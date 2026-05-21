@@ -1,0 +1,133 @@
+<mxfile host="Electron">
+  <diagram name="第 1 页" id="Ei4URccayj_5usijBBx0">
+    <mxGraphModel dx="2688" dy="1696" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2336" pageHeight="1654" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bzSnTZine0YhzpFyEF12-1" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="llm" vertex="1">
+          <mxGeometry height="200" width="570" x="1070" y="650" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-21" parent="bzSnTZine0YhzpFyEF12-1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;作用：LLM 业务主线与推理能力封装&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;关键子模块：frontend / http / local_model / model_card / discovery / kv_router / worker / engines&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：模型实例管理、前后处理、推理入口、KV 路由接线、运行时配置整合&lt;/div&gt;" vertex="1">
+          <mxGeometry height="110" width="450" x="60" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-10" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-2" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="kvbm" vertex="1">
+          <mxGeometry height="200" width="370" x="290" y="650" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-35" parent="bzSnTZine0YhzpFyEF12-2" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;kvbm-common：共享类型与约定&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;kvbm-logical：block 生命周期 / 池化 / 注册表&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;kvbm-physical：物理布局 / 传输 / RDMA-NIXL 集成&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;kvbm-kernels：设备端布局变换与拷贝 kernel&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="320" x="20" y="45" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-25" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-3" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="component" vertex="1">
+          <mxGeometry height="200" width="480" x="1210" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-18" parent="bzSnTZine0YhzpFyEF12-3" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;br&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;作用：对外能力封装、接入vllm/sglang框架python适配层&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;子模块：components/src（Python 组件封装）&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：组件化接入&lt;/div&gt;" vertex="1">
+          <mxGeometry height="150" width="430" x="25" y="35" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-4" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="deploy" vertex="1">
+          <mxGeometry height="200" width="380" x="650" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-14" parent="bzSnTZine0YhzpFyEF12-4" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63);&quot;&gt;&lt;span style=&quot;background-color: light-dark(#ffffff, var(--ge-dark-color, #121212));&quot;&gt;作用：部署、运维与集群集成入口&lt;/span&gt;&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63);&quot;&gt;&lt;span style=&quot;background-color: light-dark(#ffffff, var(--ge-dark-color, #121212));&quot;&gt;&lt;br&gt;&lt;/span&gt;&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63);&quot;&gt;&lt;span style=&quot;background-color: light-dark(#ffffff, var(--ge-dark-color, #121212));&quot;&gt;子模块：helm / operator / inference-gateway / observability / pre-deployment / snapshot&lt;/span&gt;&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63);&quot;&gt;&lt;span style=&quot;background-color: light-dark(#ffffff, var(--ge-dark-color, #121212));&quot;&gt;&lt;br&gt;&lt;/span&gt;&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63);&quot;&gt;&lt;span style=&quot;background-color: light-dark(#ffffff, var(--ge-dark-color, #121212));&quot;&gt;职责：K8s 部署、控制器、网关接入、观测性、环境预检查&lt;/span&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="150" width="360" x="10" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-5" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="container" vertex="1">
+          <mxGeometry height="200" width="430" x="1840" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-15" parent="bzSnTZine0YhzpFyEF12-5" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63); background-color: rgb(251, 251, 251);&quot;&gt;作用：镜像构建与容器化封装&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63); background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63); background-color: rgb(251, 251, 251);&quot;&gt;子模块：Dockerfile.* / templates / dev / deps / render.py / run.sh&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63); background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); color: rgb(63, 63, 63); background-color: rgb(251, 251, 251);&quot;&gt;职责：开发/测试/文档镜像、构建模板、容器运行入口&lt;/div&gt;" vertex="1">
+          <mxGeometry height="90" width="390" x="30" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-34" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-6" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="kv-router" vertex="1">
+          <mxGeometry height="200" width="520" x="1760" y="650" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-32" parent="bzSnTZine0YhzpFyEF12-6" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;作用：KV cache 感知路由与调度核心&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;关键子模块：indexer / scheduling / selector / queue / recovery / sequences / protocols&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：overlap 匹配、worker 选择、队列调度、KV 事件恢复、活跃序列跟踪&lt;/div&gt;" vertex="1">
+          <mxGeometry height="140" width="450" x="30" y="35" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-31" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-7" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="runtime" vertex="1">
+          <mxGeometry height="170" width="1020" x="370" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-30" parent="bzSnTZine0YhzpFyEF12-7" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;rounded=0;labelBackgroundColor=default;" value="&lt;p style=&quot;margin: 0px 0px 16px; color: rgb(97, 97, 97);&quot;&gt;作用：分布式运行时底座与通用执行框架&lt;/p&gt;&lt;p style=&quot;margin: 0px 0px 16px; color: rgb(97, 97, 97);&quot;&gt;关键子模块：worker / runtime / distributed / component / discovery / pipeline / transports / storage / metrics / system_health / logging / engine / local_endpoint_registry&lt;/p&gt;&lt;p style=&quot;margin: 0px 0px 16px; color: rgb(97, 97, 97);&quot;&gt;职责：负责进程生命周期管理、组件与 endpoint 抽象、服务注册与发现、请求/响应传输编排、分布式实例管理、健康检查与指标暴露、日志与链路追踪、引擎接入与本地直连支持，为&amp;nbsp;&lt;span style=&quot;padding: 1px 3px; border-radius: 4px; border-color: rgb(163, 21, 21);&quot;&gt;llm&lt;/span&gt;、&lt;span style=&quot;padding: 1px 3px; border-radius: 4px; border-color: rgb(163, 21, 21);&quot;&gt;kv-router&lt;/span&gt;&amp;nbsp;等上层业务模块提供统一运行环境和通信基础设施。&lt;/p&gt;" vertex="1">
+          <mxGeometry height="140" width="950" x="30" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-19" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="planer" vertex="1">
+          <mxGeometry height="200" width="320" x="110" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-20" parent="bzSnTZine0YhzpFyEF12-19" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="作用：高级规划功能，SLO规划等&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;模块:planer&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;职责：实现高级规划功能&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="240" x="40" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-24" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-28" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-26" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="bindings" vertex="1">
+          <mxGeometry height="120" width="850" x="950" y="390" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-27" parent="bzSnTZine0YhzpFyEF12-26" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;作用：多语言绑定与外部接入层&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;关键子模块：c / python / python/codegen / kvbm&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：为 Python/C/外部系统暴露运行时、协议或 KVBM 能力&lt;/div&gt;" vertex="1">
+          <mxGeometry height="95" width="610" x="130" y="25" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-29" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.451;entryY=0.946;entryDx=0;entryDy=0;entryPerimeter=0;" target="bzSnTZine0YhzpFyEF12-27">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-38" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-36" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-39" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-36" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.75;entryY=1;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-36" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="&lt;b style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;memory + tokens + parsers&lt;/b&gt;" vertex="1">
+          <mxGeometry height="180" width="410" x="1710" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-37" parent="bzSnTZine0YhzpFyEF12-36" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;br&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;memory：pinned memory / NUMA / CUDA mem pool / NIXL memory 辅助&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;tokens：token 序列、sequence hash、token 工具&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;parsers：tool-calling / reasoning 解析&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：为 llm、kv-router、kvbm 提供性能与语义支撑&lt;/div&gt;" vertex="1">
+          <mxGeometry height="150" width="340" x="35" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-40" edge="1" parent="1" source="bzSnTZine0YhzpFyEF12-37" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=1;entryY=0.75;entryDx=0;entryDy=0;" target="bzSnTZine0YhzpFyEF12-2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1915" y="960" />
+              <mxPoint x="1270" y="960" />
+              <mxPoint x="1270" y="890" />
+              <mxPoint x="770" y="890" />
+              <mxPoint x="770" y="800" />
+            </Array>
+            <mxPoint x="610" y="890" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-41" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="&lt;b style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;config&lt;/b&gt;" vertex="1">
+          <mxGeometry height="130" width="460" x="160" y="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-43" parent="bzSnTZine0YhzpFyEF12-41" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;br&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：配置装载、环境变量命名、运行参数统一入口&lt;/div&gt;" vertex="1">
+          <mxGeometry height="80" width="320" x="60" y="25" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-42" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="&lt;b style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;protocols&lt;/b&gt;" vertex="1">
+          <mxGeometry height="130" width="410" x="740" y="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-44" parent="bzSnTZine0YhzpFyEF12-42" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;br&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：OpenAI 兼容 API 类型、跨模块共享协议对象、事件/消息结构&lt;/div&gt;" vertex="1">
+          <mxGeometry height="105" width="360" x="25" y="25" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-45" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="&lt;b style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;gpu_memory_service&lt;/b&gt;&lt;div&gt;&lt;b style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/b&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="140" width="550" x="1260" y="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-46" parent="bzSnTZine0YhzpFyEF12-45" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;作用：独立 GPU Memory Service（显存服务化）&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;关键子模块：server / client / integrations / failover_lock / cli&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;&lt;br&gt;&lt;/div&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：显存所有权剥离、多进程共享、导入映射、故障恢复辅助&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="580" x="-30" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-47" parent="1" style="swimlane;whiteSpace=wrap;html=1;" value="&lt;b style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;mocker&lt;/b&gt;" vertex="1">
+          <mxGeometry height="140" width="325" x="1930" y="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="bzSnTZine0YhzpFyEF12-48" parent="bzSnTZine0YhzpFyEF12-47" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;br&gt;&lt;div style=&quot;color: rgb(63, 63, 63); scrollbar-color: rgb(226, 226, 226) rgb(251, 251, 251); font-size: 13px; text-align: left; background-color: rgb(251, 251, 251);&quot;&gt;职责：无 GPU 的调度/缓存行为模拟，供回放、验证和实验使用&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="240" x="25" y="50" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

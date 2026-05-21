@@ -1,0 +1,454 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  Pagoda CI — 主流水线                                           │
+# │                                                                 │
+# │  触发条件：                                                     │
+# │    • push 到 main / develop                                     │
+# │    • 任意 PR 指向 main / develop                               │
+# │                                                                 │
+# │  Job 顺序（并行 / 串行见下图）：                               │
+# │                                                                 │
+# │   fmt ──┐                                                       │
+# │          ├─► build ──┐                                         │
+# │  clippy ─┘           ├─► test-unit ──► coverage               │
+# │                       └─► test-integration                     │
+# │                           test-etcd                            │
+# │  doc (独立)                                                     │
+# │  msrv (独立，验证最低 Rust 版本)                               │
+# └─────────────────────────────────────────────────────────────────┘
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "info/**"
+      - "over/**"
+  pull_request:
+    branches: [main, develop]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "info/**"
+      - "over/**"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # protoc 通过 apt 安装后在此路径
+  PROTOC: /usr/bin/protoc
+
+# 同一 PR 同时触发多次推送时，取消旧的运行
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 1: 代码格式检查（rustfmt）
+  # ═══════════════════════════════════════════════════════════════════
+  fmt:
+    name: Format (rustfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 2: 静态分析（clippy）
+  # ═══════════════════════════════════════════════════════════════════
+  clippy:
+    name: Lint (clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+
+      # 默认 features — 核心路径必须零 warning
+      - name: Clippy (default features)
+        run: |
+          cargo clippy --all-targets -- \
+            -D warnings \
+            -D clippy::dbg_macro \
+            -D clippy::todo \
+            -W clippy::pedantic \
+            -A clippy::module_name_repetitions \
+            -A clippy::must_use_candidate \
+            -A clippy::missing_errors_doc \
+            -A clippy::missing_panics_doc
+
+      # 全 features 补充检查（不强制 -D warnings，因部分 feature-only 代码有已知 warn）
+      - name: Clippy (all features)
+        run: |
+          cargo clippy --all-targets --all-features -- \
+            -W clippy::dbg_macro
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 3: 编译检查（debug + release 双 profile）
+  # ═══════════════════════════════════════════════════════════════════
+  build:
+    name: Build (${{ matrix.profile }})
+    needs: [fmt, clippy]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ matrix.profile }}
+
+      - name: Build (${{ matrix.profile }})
+        run: cargo build --profile ${{ matrix.profile }}
+
+      - name: Build (all features, ${{ matrix.profile }})
+        run: |
+          cargo build --profile ${{ matrix.profile }} \
+            --features integration,compute-validation,tcp-low-latency
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 4: 单元测试（无外部依赖）
+  # ═══════════════════════════════════════════════════════════════════
+  test-unit:
+    name: Unit Tests
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-unit
+
+      # 仅编译和运行 lib 内联测试，不依赖任何外部服务
+      - name: Run unit tests (default features)
+        run: cargo test --lib
+
+      - name: Run unit tests (compute-validation)
+        run: cargo test --lib --features compute-validation
+
+      - name: Run unit tests (tcp-low-latency)
+        run: cargo test --lib --features tcp-low-latency
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 5: 集成测试（需要 NATS 服务）
+  # ═══════════════════════════════════════════════════════════════════
+  test-integration:
+    name: Integration Tests (NATS)
+    needs: [build]
+    runs-on: ubuntu-latest
+    services:
+      nats:
+        image: nats:2.10-alpine
+        ports:
+          - 4222:4222
+        options: >-
+          --health-cmd "nats-server --help"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-integration
+
+      - name: Wait for NATS to be ready
+        run: |
+          for i in $(seq 1 15); do
+            nc -z localhost 4222 && echo "NATS ready" && break
+            echo "Waiting for NATS... ($i/15)"
+            sleep 2
+          done
+
+      - name: Run integration tests
+        env:
+          PGD_NATS_SERVER: nats://localhost:4222
+        run: cargo test --features integration -- --test-threads=1
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 6: etcd 集成测试
+  # ═══════════════════════════════════════════════════════════════════
+  test-etcd:
+    name: Integration Tests (etcd)
+    needs: [build]
+    runs-on: ubuntu-latest
+    services:
+      etcd:
+        image: bitnami/etcd:3.5
+        env:
+          ALLOW_NONE_AUTHENTICATION: "yes"
+          ETCD_ADVERTISE_CLIENT_URLS: http://0.0.0.0:2379
+          ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+        ports:
+          - 2379:2379
+        options: >-
+          --health-cmd "etcdctl endpoint health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-etcd
+
+      - name: Wait for etcd to be ready
+        run: |
+          for i in $(seq 1 20); do
+            nc -z localhost 2379 && echo "etcd ready" && break
+            echo "Waiting for etcd... ($i/20)"
+            sleep 3
+          done
+
+      - name: Run etcd integration tests
+        env:
+          ETCD_ENDPOINTS: http://localhost:2379
+        run: cargo test --features testing-etcd -- --test-threads=1
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 7: 文档构建
+  # ═══════════════════════════════════════════════════════════════════
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: doc
+
+      # RUSTDOCFLAGS=-D warnings 确保文档注释没有悬空链接、格式错误等
+      - name: Build documentation (no-deps)
+        env:
+          RUSTDOCFLAGS: "-D warnings --cfg docsrs"
+        run: cargo doc --no-deps --all-features
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 8: 最低支持 Rust 版本（MSRV）检查
+  # ═══════════════════════════════════════════════════════════════════
+  msrv:
+    name: MSRV (Rust 1.82)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain (1.82)
+        uses: dtolnay/rust-toolchain@1.82
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      # 只做 check，不运行测试（避免 test harness API 的版本差异）
+      - name: cargo check (MSRV)
+        run: cargo check --all-features
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 9: 代码覆盖率
+  # ═══════════════════════════════════════════════════════════════════
+  coverage:
+    name: Code Coverage
+    needs: [test-unit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + llvm-tools)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (unit tests only)
+        run: |
+          cargo llvm-cov \
+            --lib \
+            --lcov \
+            --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      # 同时保存覆盖率报告为 Artifact，方便 PR 审查
+      - name: Generate HTML coverage report
+        run: |
+          cargo llvm-cov \
+            --lib \
+            --html \
+            --output-dir coverage-html
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-${{ github.sha }}
+          path: coverage-html/
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 10: 依赖检查（cargo-deny）
+  # ═══════════════════════════════════════════════════════════════════
+  deny:
+    name: Dependency Check (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          log-level: warn
+          command: check
+          arguments: --all-features
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 11: 许可证头检查
+  # ═══════════════════════════════════════════════════════════════════
+  license-headers:
+    name: License Headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check SPDX license headers in .rs files
+        run: |
+          MISSING=0
+          while IFS= read -r -d '' file; do
+            if ! head -2 "$file" | grep -q "SPDX-FileCopyrightText"; then
+              echo "MISSING header: $file"
+              MISSING=$((MISSING + 1))
+            fi
+          done < <(find lib/ -name "*.rs" -not -path "*/target/*" -print0)
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo ""
+            echo "Error: $MISSING Rust source file(s) missing SPDX license header."
+            echo "Expected header format:"
+            echo "  // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved."
+            echo "  // SPDX-License-Identifier: Apache-2.0"
+            exit 1
+          fi
+          echo "All .rs files have SPDX license headers ✓"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 汇总 Job：所有必须 Job 通过后标记 CI 成功
+  # （用于 Branch Protection Rules 中设置单个"通过"条件）
+  # ═══════════════════════════════════════════════════════════════════
+  ci-success:
+    name: CI Success
+    needs:
+      - fmt
+      - clippy
+      - build
+      - test-unit
+      - test-integration
+      - test-etcd
+      - doc
+      - msrv
+      - coverage
+      - deny
+      - license-headers
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results='${{ toJSON(needs) }}'
+          failed=$(echo "$results" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          failed = [k for k, v in data.items() if v['result'] not in ('success', 'skipped')]
+          print('\n'.join(failed))
+          ")
+          if [ -n "$failed" ]; then
+            echo "The following jobs failed:"
+            echo "$failed"
+            exit 1
+          fi
+          echo "All CI jobs passed ✓"

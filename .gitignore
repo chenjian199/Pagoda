@@ -1,0 +1,18 @@
+# Ignore Rust build artifacts
+/target/
+**/target/
+
+# Incremental compilation and dep graphs
+/target/**/incremental/
+**/dep-graph*.bin
+
+# Editor directories
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
+
+# Misc
+*.rs.bk
+EOF

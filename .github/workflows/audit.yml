@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# 安全审计流水线
+#
+# 触发条件：
+#   • 每周一 UTC 02:00 定时运行
+#   • main 分支 push（仅检查 Cargo.lock 变更时）
+#   • 手动触发（workflow_dispatch）
+
+name: Security Audit
+
+on:
+  schedule:
+    # 每周一 UTC 02:00
+    - cron: "0 2 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "lib/*/Cargo.toml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 1: CVE 安全审计（rustsec advisory database）
+  # ═══════════════════════════════════════════════════════════════════
+  audit:
+    name: Security Audit (rustsec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run security audit
+        uses: rustsec/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # 在此添加已知的 false positive advisory ID（如有）
+          # ignore: RUSTSEC-2021-XXXX
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 2: 依赖许可证合规检查（cargo-deny）
+  # ═══════════════════════════════════════════════════════════════════
+  deny-licenses:
+    name: License Compliance (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check license compliance
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check licenses
+          log-level: warn
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 3: 未使用依赖检查（cargo-udeps）
+  # ═══════════════════════════════════════════════════════════════════
+  udeps:
+    name: Unused Dependencies (cargo-udeps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain (cargo-udeps requires nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install protoc
+        run: sudo apt-get update -q && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: udeps
+
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+
+      - name: Check unused dependencies
+        run: cargo +nightly udeps --all-targets
+        env:
+          PROTOC: /usr/bin/protoc
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Job 4: 生成漏洞报告（如发现漏洞则创建 GitHub Issue）
+  # ═══════════════════════════════════════════════════════════════════
+  report:
+    name: Create Issue on Vulnerability
+    needs: [audit]
+    runs-on: ubuntu-latest
+    if: failure() && github.event_name == 'schedule'
+    steps:
+      - name: Create vulnerability issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `[Security] Vulnerability detected in dependencies - ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Security Audit Alert
+
+            The scheduled security audit detected vulnerabilities in project dependencies.
+
+            **Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+
+            Please review the audit results and update affected dependencies.
+
+            /cc @pagoda-security-team`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['security', 'dependencies'],
+            });

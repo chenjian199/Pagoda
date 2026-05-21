@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = [
+    "lib/runtime",
+]
+
+# 后续 crate 在此处追加，例如：
+# "lib/llm",
+# "lib/kv-router",
+# "lib/kvbm-core",
+# "lib/velo-core",
+# "lib/protocols",
+# "lib/tokens",
+# "lib/parsers",
+# "lib/memory",
+# "lib/mocker",
+# "lib/bench",
+# "lib/bindings",
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+license      = "Apache-2.0"
+authors      = ["PAGODA CORPORATION & AFFILIATES"]
+rust-version = "1.82"
+
+# 所有成员 crate 可通过 workspace.dependencies 引用统一版本，
+# 在成员 Cargo.toml 中写 tokio = { workspace = true } 即可。
+[workspace.dependencies]
+# ── 异步运行时 ──
+tokio            = { version = "1",   features = ["full", "parking_lot"] }
+tokio-util       = { version = "0.7", features = ["codec", "io"] }
+tokio-stream     = { version = "0.1", features = ["sync"] }
+futures          = { version = "0.3" }
+async-trait      = { version = "0.1" }
+async-stream     = { version = "0.3" }
+pin-project-lite = { version = "0.2" }
+
+# ── 序列化 ──
+serde            = { version = "1", features = ["derive"] }
+serde_json       = { version = "1" }
+rmp-serde        = { version = "1" }
+
+# ── 配置 ──
+figment          = { version = "0.10", features = ["env", "toml"] }
+validator        = { version = "0.18", features = ["derive"] }
+
+# ── 网络 ──
+async-nats       = { version = "0.37", features = ["service"] }
+hyper            = { version = "1",   features = ["full"] }
+axum             = { version = "0.7", features = ["macros"] }
+tower            = { version = "0.5", features = ["full"] }
+tower-http       = { version = "0.6", features = ["cors", "trace"] }
+
+# ── Kubernetes 发现 ──
+kube             = { version = "0.97", features = ["runtime", "derive", "client"] }
+k8s-openapi      = { version = "0.23", features = ["latest"] }
+
+# ── etcd ──
+etcd-client      = { version = "0.14", features = ["tls"] }
+
+# ── CPU 计算隔离 ──
+rayon            = { version = "1" }
+tokio-rayon      = { version = "2" }
+
+# ── 可观测性 ──
+tracing              = { version = "0.1" }
+tracing-subscriber   = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry        = { version = "0.27" }
+opentelemetry-otlp   = { version = "0.27" }
+prometheus           = { version = "0.13" }
+console-subscriber   = { version = "0.4" }
+
+# ── 错误处理 ──
+anyhow           = { version = "1" }
+thiserror        = { version = "2" }
+
+# ── 并发工具 ──
+arc-swap         = { version = "1" }
+dashmap          = { version = "6" }
+parking_lot      = { version = "0.12" }
+crossbeam-utils  = { version = "0.8" }
+
+# ── 代码生成 ──
+derive_builder   = { version = "0.20" }
+educe            = { version = "0.6" }
+derive-getters   = { version = "0.5" }
+
+# ── ZMQ ──
+zeromq           = { version = "0.4" }
+
+# ── 哈希 ──
+xxhash-rust      = { version = "0.8", features = ["xxh64"] }
+
+# ── 其他工具 ──
+bytes            = { version = "1" }
+uuid             = { version = "1", features = ["v4"] }
+regex            = { version = "1" }
+rand             = { version = "0.8" }
+once_cell        = { version = "1" }
+slug             = { version = "0.1" }
+cudarc           = { version = "0.12" }
+
+# ── 测试工具 ──
+tokio-test         = { version = "0.4" }
+tempfile           = { version = "3" }
+pretty_assertions  = { version = "1" }
+criterion          = { version = "0.5", features = ["async_tokio"] }
