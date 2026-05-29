@@ -669,22 +669,29 @@ pub(crate) async fn get_or_create_routing_occupancy_state(
 
 内部维护三套实例视图：
 
+内部维护三套实例视图，并通过 `PortNameDiscoverySource` 提供逐事件广播：
+
 | 视图字段 | 类型 | 内容 | 用途 |
 |---------|------|------|------|
 | `instance_source` | `watch::Receiver<Vec<Instance>>` | 权威实例列表 | `wait_for_instances()` / 地址解析 |
 | `instance_avail` | `ArcSwap<Vec<u64>>` | 当前可路由实例 ID | 路由选择 |
 | `instance_free` | `ArcSwap<Vec<u64>>` | 排除过载后的空闲实例 ID | 负载感知路由 |
 
+`PortNameDiscoverySource` 包装了 `watch::Receiver<Vec<Instance>>` 并附带一个事件订阅列表，
+使得上层消费者可通过 `subscribe_discovery_events()` 获得逐事件（Added/Removed）的无损广播，
+而不仅仅是合并后的快照变化。这与标准实现的 `EndpointDiscoverySource` 模式完全一致。
+
 ```rust
 #[derive(Clone, Debug)]
 pub struct Client {
-    pub portname:          PortName,
-    pub instance_source:    Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
-    instance_avail:         Arc<ArcSwap<Vec<u64>>>,
-    instance_free:          Arc<ArcSwap<Vec<u64>>>,
-    instance_avail_tx:      Arc<tokio::sync::watch::Sender<Vec<u64>>>,
-    instance_avail_rx:      tokio::sync::watch::Receiver<Vec<u64>>,
-    reconcile_interval:     Duration,
+    pub portname:                PortName,
+    portname_discovery_source:   Arc<PortNameDiscoverySource>,
+    pub instance_source:         watch::Receiver<Vec<Instance>>,
+    instance_avail:              Arc<ArcSwap<Vec<u64>>>,
+    instance_free:               Arc<ArcSwap<Vec<u64>>>,
+    instance_avail_tx:           Arc<tokio::sync::watch::Sender<Vec<u64>>>,
+    instance_avail_rx:           tokio::sync::watch::Receiver<Vec<u64>>,
+    reconcile_interval:          Duration,
 }
 ```
 
@@ -700,14 +707,16 @@ impl Client {
     pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<u64>>>
     pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>>
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>>
+    pub(crate) fn subscribe_discovery_events(&self)
+        -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent>
 
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>>
     pub fn report_instance_down(&self, instance_id: u64)
     pub fn update_free_instances(&self, busy_instance_ids: &[u64])
 
     fn monitor_instance_source(&self)
-    async fn get_or_create_dynamic_instance_source(portname: &PortName)
-        -> Result<Arc<watch::Receiver<Vec<Instance>>>>
+    async fn get_or_create_dynamic_discovery_source(portname: &PortName)
+        -> Result<Arc<PortNameDiscoverySource>>
 }
 ```
 
@@ -728,7 +737,7 @@ Self::with_reconcile_interval(portname, DEFAULT_RECONCILE_INTERVAL).await
 
 这是 `Client` 的真实构造核心。它完成的不是简单字段填充，而是四个关键动作：
 
-1. 通过 `get_or_create_dynamic_instance_source(&portname).await` 获取共享的实例 watch 源；
+1. 通过 `get_or_create_dynamic_discovery_source(&portname).await` 获取共享的 `Arc<PortNameDiscoverySource>`，同时从中派生出 `instance_source`（`discovery_source.instance_receiver()`）；
 2. 从当前 `instance_source.borrow()` 快照里提取 `initial_ids`，用它初始化 `instance_avail` / `instance_free`；
 3. 创建 `instance_avail_tx/rx` 这一条“可路由实例 ID 广播通道”；
 4. 调用 `monitor_instance_source()` 启动后台同步任务。
@@ -839,38 +848,38 @@ Self::with_reconcile_interval(portname, DEFAULT_RECONCILE_INTERVAL).await
 2. 用这份快照重置 `instance_avail` 与 `instance_free`；
 3. 若能拿到共享的 `RoutingOccupancyState`，则调用 `retain(&instance_ids)` 清理已消失实例的占用计数；
 4. 用 `instance_avail_tx.send(instance_ids)` 向订阅者广播新快照；
-5. `tokio::select!` 等待：
+5. `tokio::select!` 等待（**三路**）：
     - `rx.changed()`：说明发现源有新事件；
-    - `sleep(reconcile_interval)`：说明该做周期 reconcile 了。
+    - `sleep(reconcile_interval)`：说明该做周期 reconcile 了；
+    - `cancel_token.cancelled()`：runtime 关闭，立即退出，无需等待下一次 changed/sleep 触发。
 
 这里的 reconcile 设计非常关键：即使 discovery 一段时间没有任何新事件，被 `report_instance_down()` 临时剔除的实例也会在超时后重新回到 `instance_avail`，避免“本地永久误杀”。
 
 退出条件：
 
-- `primary_token` 被取消；
-- 或 `rx.changed()` 返回错误，说明 sender 已消失，此时会记录 error 并主动取消 runtime token。
+- `cancel_token.cancelled()` arm 触发（runtime 关闭），直接 `break`；
+- 或 `rx.changed()` 返回错误，说明 sender 已消失，此时会记录 error 并主动取消 runtime token，再 `break`。
 
-#### `get_or_create_dynamic_instance_source(portname) -> Result<Arc<watch::Receiver<Vec<Instance>>>>`
+#### `get_or_create_dynamic_discovery_source(portname) -> Result<Arc<PortNameDiscoverySource>>`
 
 这是整个客户端共享发现 watch 的工厂函数。它的目标不是“每次创建一个新 watcher”，而是：**同一个 PortName 在同一进程内只维护一条 discovery watch 管道**。
 
 完整流程如下：
 
-1. 通过 `drt.instance_sources()` 拿到 `HashMap<PortName, Weak<watch::Receiver<Vec<Instance>>>>`；
+1. 通过 `drt.instance_sources()` 拿到 `HashMap<PortName, Weak<PortNameDiscoverySource>>`；
 2. 先查缓存：
-    - 若 key 存在且 `Weak` 可升级，直接复用现有 `Arc<watch::Receiver<...>>`；
+    - 若 key 存在且 `Weak` 可升级，直接复用现有 `Arc<PortNameDiscoverySource>`；
     - 若 key 存在但已失效，则移除旧项；
-3. 若缓存未命中，则构造新的 discovery watch：
+3. 若缓存未命中，则构造新的发现源：
     - 组装 `DiscoveryQuery::PortName { namespace, servicegroup, portname }`；
     - `discovery.list_and_watch(...).await?` 获取事件流；
-    - 创建 `watch_tx/watch_rx`；
+    - 创建 `watch_tx/watch_rx`，用 `watch_rx` 构造 `Arc<PortNameDiscoverySource>`；
     - 在次级 runtime 上 spawn `port_watcher` 后台任务；
 4. `port_watcher` 维护 `HashMap<u64, Instance>`：
-    - `DiscoveryEvent::Added` → 插入/覆盖对应 `instance_id`；
-    - `DiscoveryEvent::Removed` → 删除对应 `instance_id`；
-    - 每次变化后把 `map.values().cloned().collect()` 发送给 `watch_tx`；
+    - `DiscoveryEvent::Added(PortName(inst))` → 先调 `src.broadcast_event(&event)` 广播原始事件，再用 `send_modify` 就地更新快照（去重后追加）；
+    - `DiscoveryEvent::Removed(did)` → 先广播，再 `send_modify` 移除对应 `instance_id`；
     - 若发现流报错、结束或 `watch_tx.closed()`，则退出并发送空列表；
-5. 最后把 `watch_rx` 包装成 `Arc`，以 `Weak` 形式回填缓存，再返回给调用方。
+5. 最后把 `Arc<PortNameDiscoverySource>` 以 `Weak` 形式回填缓存，再返回给调用方。
 
 这一层缓存复用极其重要：如果每个 `Client` 都自己去 `list_and_watch()`，同一个 PortName 会在进程内制造重复控制面连接、重复事件反序列化和重复状态维护。
 
@@ -880,8 +889,8 @@ Self::with_reconcile_interval(portname, DEFAULT_RECONCILE_INTERVAL).await
 
 | Task 名 | 创建位置 | 运行在 | 退出条件 |
 |---------|---------|-------|---------|
-| `port_watcher` | `get_or_create_dynamic_instance_source` | 次级 runtime | `watch_tx.closed()` 或发现流结束 |
-| `monitor_instance_source` | `Client::monitor_instance_source()` | 主 runtime | `cancel_token.is_cancelled()` |
+| `port_watcher` | `get_or_create_dynamic_discovery_source` | 次级 runtime | `watch_tx.closed()` 或发现流结束 |
+| `monitor_instance_source` | `Client::monitor_instance_source()` | 主 runtime | `cancel_token.cancelled()` 触发或 sender 丢失 |
 | `cleanup_task` | `PortNameConfigBuilder::start()` | 主 runtime | `port_shutdown_token` 取消后执行一次清理 |
 
 把 `port_watcher` 放到次级 runtime 的原因是：发现系统 watch 是长连接控制面任务，不应与业务请求 I/O 共用同一执行资源池。
