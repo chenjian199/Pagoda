@@ -1,18 +1,17 @@
-# Ignore Rust build artifacts
+# Rust build artifacts
 /target/
 **/target/
 
-# Incremental compilation and dep graphs
+# Rust compiler caches and dependency graphs
 /target/**/incremental/
 **/dep-graph*.bin
 
-# Editor directories
+# Editor and IDE local settings
 .idea/
 .vscode/
 
-# macOS
+# OS-generated files
 .DS_Store
 
-# Misc
+# Temporary backup files
 *.rs.bk
-EOF

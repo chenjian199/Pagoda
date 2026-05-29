@@ -2,110 +2,138 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-resolver = "2"
 members = [
+    "lib/config",
     "lib/runtime",
 ]
-
-# 后续 crate 在此处追加，例如：
-# "lib/llm",
-# "lib/kv-router",
-# "lib/kvbm-core",
-# "lib/velo-core",
-# "lib/protocols",
-# "lib/tokens",
-# "lib/parsers",
-# "lib/memory",
-# "lib/mocker",
-# "lib/bench",
-# "lib/bindings",
+resolver = "3"
 
 [workspace.package]
-version      = "0.1.0"
-edition      = "2021"
-license      = "Apache-2.0"
-authors      = ["PAGODA CORPORATION & AFFILIATES"]
-rust-version = "1.82"
+version = "0.0.1"
+edition = "2024"
+description = "Pagoda distributed inference framework"
+authors = ["Pagoda Contributors"]
+license = "Apache-2.0"
+keywords = ["pagoda", "llm", "inference", "distributed"]
 
-# 所有成员 crate 可通过 workspace.dependencies 引用统一版本，
-# 在成员 Cargo.toml 中写 tokio = { workspace = true } 即可。
 [workspace.dependencies]
-# ── 异步运行时 ──
-tokio            = { version = "1",   features = ["full", "parking_lot"] }
-tokio-util       = { version = "0.7", features = ["codec", "io"] }
-tokio-stream     = { version = "0.1", features = ["sync"] }
-futures          = { version = "0.3" }
-async-trait      = { version = "0.1" }
-async-stream     = { version = "0.3" }
-pin-project-lite = { version = "0.2" }
+# Local crates
+pagoda-config = { path = "lib/config", version = "0.0.1" }
+pagoda-runtime = { path = "lib/runtime", version = "0.0.1" }
 
-# ── 序列化 ──
-serde            = { version = "1", features = ["derive"] }
-serde_json       = { version = "1" }
-rmp-serde        = { version = "1" }
+# Error handling and utilities
+anyhow = { version = "1" }
+blake3 = { version = "1" }
+bytes = { version = "1" }
+dashmap = { version = "6.1" }
+derive_builder = { version = "0.20" }
+derive-getters = { version = "0.5" }
+either = { version = "1.13", features = ["serde"] }
+humantime = { version = "2.2.0" }
+indexmap = { version = "2" }
+ipnet = { version = "2" }
+libc = { version = "0.2" }
+lru = { version = "0.12" }
+moka = { version = "0.12", features = ["future"] }
+oneshot = { version = "0.1.13", features = ["std", "async"] }
+ordered-float = "4"
+parking_lot = "0.12.5"
+rand = { version = "0.9.2" }
+strum = { version = "0.27", features = ["derive"] }
+tempfile = "3"
+thiserror = { version = "2.0.17" }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+validator = { version = "0.20.0", features = ["derive"] }
+xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 
-# ── 配置 ──
-figment          = { version = "0.10", features = ["env", "toml"] }
-validator        = { version = "0.18", features = ["derive"] }
+# Async runtime and messaging
+async-nats = { version = "0.45.0", features = ["service"] }
+async-stream = { version = "0.3" }
+async-trait = { version = "0.1" }
+etcd-client = { version = "0.17.0", features = ["tls"] }
+futures = { version = "0.3" }
+futures-util = { version = "0.3.32" }
+tmq = { version = "0.5.0" }
+tokio = { version = "=1.48.0", features = ["full"] }
+tokio-stream = { version = "0.1" }
+tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
 
-# ── 网络 ──
-async-nats       = { version = "0.37", features = ["service"] }
-hyper            = { version = "1",   features = ["full"] }
-axum             = { version = "0.7", features = ["macros"] }
-tower            = { version = "0.5", features = ["full"] }
-tower-http       = { version = "0.6", features = ["cors", "trace"] }
+# HTTP and service APIs
+axum = { version = "=0.8.4", features = ["macros", "ws"] }
+axum-core = { version = "0.5.2" }
+hyper = { version = "=1.7.0" }
+hyper-util = { version = "=0.1.17" }
+reqwest = { version = "0.12.24", default-features = false, features = [
+    "multipart",
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+tower-http = { version = "0.6", features = ["trace"] }
 
-# ── Kubernetes 发现 ──
-kube             = { version = "0.97", features = ["runtime", "derive", "client"] }
-k8s-openapi      = { version = "0.23", features = ["latest"] }
+# Serialization and data formats
+chrono = { version = "0.4", default-features = false, features = [
+    "alloc",
+    "std",
+    "clock",
+    "now",
+    "serde",
+] }
+rmp-serde = { version = "1" }
+serde_bytes = { version = "0.11" }
+# "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1" }
 
-# ── etcd ──
-etcd-client      = { version = "0.14", features = ["tls"] }
+# Metrics, tracing, and observability
+prometheus = { version = "0.14" }
+mio = { version = "=1.1.1" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "local-time",
+    "json",
+] }
+tracing-opentelemetry = { version = "0.32.0" }
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
 
-# ── CPU 计算隔离 ──
-rayon            = { version = "1" }
-tokio-rayon      = { version = "2" }
+# GPU and model tooling
+cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
+fastokens = { version = "0.1.0" }
+hf-hub = { version = "0.4.2", default-features = false, features = [
+    "tokio",
+    "rustls-tls",
+    "ureq",
+] }
+modelexpress-client = { version = "0.3.0" }
+modelexpress-common = { version = "0.3.0" }
 
-# ── 可观测性 ──
-tracing              = { version = "0.1" }
-tracing-subscriber   = { version = "0.3", features = ["env-filter", "json"] }
-opentelemetry        = { version = "0.27" }
-opentelemetry-otlp   = { version = "0.27" }
-prometheus           = { version = "0.13" }
-console-subscriber   = { version = "0.4" }
+[profile.dev.package]
+insta.opt-level = 3
 
-# ── 错误处理 ──
-anyhow           = { version = "1" }
-thiserror        = { version = "2" }
+[profile.dev]
+# Enable locally if debug builds become too slow.
+# opt-level = 3
 
-# ── 并发工具 ──
-arc-swap         = { version = "1" }
-dashmap          = { version = "6" }
-parking_lot      = { version = "0.12" }
-crossbeam-utils  = { version = "0.8" }
+[profile.release]
+# Shrink release binaries and keep cross-crate optimization enabled.
+codegen-units = 1
+lto = "thin"
 
-# ── 代码生成 ──
-derive_builder   = { version = "0.20" }
-educe            = { version = "0.6" }
-derive-getters   = { version = "0.5" }
+# Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
+# Build: cargo build --profile profiling --features nvtx
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
 
-# ── ZMQ ──
-zeromq           = { version = "0.4" }
-
-# ── 哈希 ──
-xxhash-rust      = { version = "0.8", features = ["xxh64"] }
-
-# ── 其他工具 ──
-bytes            = { version = "1" }
-uuid             = { version = "1", features = ["v4"] }
-regex            = { version = "1" }
-rand             = { version = "0.8" }
-once_cell        = { version = "1" }
-slug             = { version = "0.1" }
-cudarc           = { version = "0.12" }
-
-# ── 测试工具 ──
-tokio-test         = { version = "0.4" }
-tempfile           = { version = "3" }
-pretty_assertions  = { version = "1" }
-criterion          = { version = "0.5", features = ["async_tokio"] }
+# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
+# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
+# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
+[patch.crates-io]
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

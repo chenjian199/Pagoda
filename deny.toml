@@ -1,127 +1,96 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# cargo-deny 配置文件
 #
-# cargo-deny 配置
+# 用途：检查 Rust 依赖的安全漏洞、许可证、重复版本和来源可信度。
 # 文档：https://embarkstudios.github.io/cargo-deny/
-#
 # 运行：cargo deny check
-#       make deps-check
 
 [graph]
+# Pagoda 当前主要支持的 Linux 目标平台。
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
 ]
-# 排除开发工具相关 crate
+
+# dev-dependencies 也参与检查，避免测试工具引入高风险依赖。
 exclude-dev = false
 
-# ─────────────────────────────────────────────────────────────────────
-# 许可证检查
-# ─────────────────────────────────────────────────────────────────────
 [licenses]
 version = 2
 
-# 允许的 SPDX 许可证标识符列表
+# 未声明许可证的 crate 直接拒绝。
+unlicensed = "deny"
+
+# Copyleft 许可证先警告，由人工确认是否允许引入。
+copyleft = "warn"
+
+# 私有 crate 不要求声明许可证。
+private = { ignore = true }
+
+# 项目允许的许可证白名单。
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "MIT",
-    "MIT-0",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
-    "Unicode-3.0",
     "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
     "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
     "Zlib",
 ]
 
-# 对无许可证 crate 的处理（deny = 拒绝，allow = 接受，warn = 警告）
-unlicensed = "deny"
+# 已知合规但无法自动识别的许可证例外，新增时必须写明原因。
+exceptions = []
 
-# 发现许可证异常时的处理
-copyleft = "warn"
-
-# 私有 crate（无许可证要求）豁免
-private = { ignore = true }
-
-# 许可证豁免列表（用于已知合规但 cargo-deny 误判的 crate）
-exceptions = [
-    # 示例（取消注释并填入实际需要豁免的 crate）:
-    # { allow = ["GPL-2.0"], name = "some-gpl-crate", version = "*" },
-]
-
-# ─────────────────────────────────────────────────────────────────────
-# 安全漏洞检查
-# ─────────────────────────────────────────────────────────────────────
 [advisories]
 version = 2
 
-# RustSec advisory database 路径（CI 中自动下载）
+# RustSec 漏洞库。CI 或本地首次运行时会自动拉取。
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 
-# 对未修复漏洞的处理
+# 未修复安全漏洞阻断构建；维护状态和潜在 soundness 问题先警告。
 vulnerability = "deny"
-
-# 对已取消（unmaintained）crate 的处理
 unmaintained = "warn"
-
-# 对通知类别的处理
 notice = "warn"
-
-# 对草稿漏洞的处理
 unsound = "warn"
 
-# 已知漏洞忽略列表（应附带说明和到期日期）
-ignore = [
-    # 示例：
-    # { id = "RUSTSEC-2023-XXXX", reason = "Not affected due to feature X, revisit 2025-01-01" },
-]
+# 忽略项必须附带原因和复查日期，不允许长期无说明豁免。
+ignore = []
 
-# ─────────────────────────────────────────────────────────────────────
-# 重复依赖检查
-# ─────────────────────────────────────────────────────────────────────
 [bans]
-# 允许同一依赖存在的版本数（超过则报错）
+# 多版本依赖先警告，后续稳定后可提升为 deny。
 multiple-versions = "warn"
 
-# 完全禁止的 crate
-deny = [
-    # 安全风险
-    { name = "openssl-sys", reason = "使用 rustls 代替 openssl（避免 C 依赖和 CVE 风险）" },
-
-    # 废弃 crate
-    { name = "failure", reason = "使用 anyhow / thiserror 代替" },
-    { name = "error-chain", reason = "使用 anyhow / thiserror 代替" },
-
-    # 潜在的 soundness 问题
-    { name = "ouroboros", reason = "存在已知 soundness 问题" },
-]
-
-# 跳过版本冲突检查的 crate（用于暂时接受的重复版本）
-skip = [
-    # 示例：
-    # { name = "windows-sys", version = "0.45" },
-]
-
-# 允许特定 crate 的 wildcard 依赖
+# 允许通配符版本依赖。若项目后续进入发布阶段，建议改为 warn 或 deny。
 wildcards = "allow"
 
-# ─────────────────────────────────────────────────────────────────────
-# 包来源检查
-# ─────────────────────────────────────────────────────────────────────
+# 禁止引入的 crate。
+deny = [
+    { name = "error-chain", reason = "已废弃，使用 anyhow 或 thiserror 代替" },
+    { name = "failure", reason = "已废弃，使用 anyhow 或 thiserror 代替" },
+    { name = "openssl-sys", reason = "优先使用 rustls，避免 OpenSSL C 依赖和相关 CVE 风险" },
+    { name = "ouroboros", reason = "存在已知 soundness 风险，避免在核心运行时中使用" },
+]
+
+# 暂时允许的重复版本依赖。新增项必须写明原因，并定期清理。
+skip = []
+
 [sources]
-# 不允许使用未知来源的 crate
+# 拒绝未知 registry 和未声明允许的 git 来源。
 unknown-registry = "deny"
 unknown-git = "deny"
 
-# 允许的 crate 来源
+# 允许的 crate registry。
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
-# 允许使用 git 依赖的仓库（内部 crate 或未发布的 patch）
+# 允许的 git 依赖来源。需与 Cargo.toml 中的 patch/git 依赖保持一致。
 allow-git = [
-    # 示例：
-    # "https://github.com/pagoda-corp/some-internal-crate",
+    "https://github.com/lightseekorg/smg",
 ]

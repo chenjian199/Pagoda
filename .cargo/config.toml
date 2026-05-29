@@ -1,26 +1,25 @@
-# Pagoda Cargo 本地配置
-# 此文件影响 workspace 内所有 crate 的构建行为
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Pagoda Cargo 本地配置。
+# 此文件影响 workspace 内所有 crate 的构建行为。
 
 [build]
-# 编译时使用所有可用 CPU 核心（覆盖 CARGO_BUILD_JOBS 环境变量）
-jobs = 8  # 0 = 自动检测 CPU 核心数
-
-[env]
-# 构建时检测 protoc（若系统未安装，给出友好提示）
-# 开发者可通过 PROTOC 环境变量覆盖路径
-# PROTOC = "/usr/bin/protoc"  # 取消注释以固定路径
+# tokio-console 和 runtime/metrics/tokio_perf.rs 需要 Tokio unstable metrics API。
+rustflags = ["--cfg", "tokio_unstable"]
 
 [target.x86_64-unknown-linux-gnu]
-# TCP 低延迟模式：开启 TCP_NODELAY（由 tcp-low-latency feature 控制）
-# rustflags = ["-C", "target-cpu=native"]  # 可选：本地开发时开启，CI 禁止
+# 面向 Haswell（2013）及更新机器，启用 x86-64-v3/AVX2，同时保留 Tokio unstable metrics API。
+rustflags = ["-C", "target-cpu=x86-64-v3", "--cfg", "tokio_unstable"]
 
-[alias]
-# 常用命令别名
-b       = "build"
-t       = "test"
-c       = "check"
-r       = "run"
-fmt-all = "fmt --all"
-clippy-all = "clippy --all-targets --all-features -- -D warnings"
-doc-open = "doc --no-deps --open"
-cov     = "llvm-cov --lib --html --open"
+[target.aarch64-unknown-linux-gnu]
+# 面向 Graviton 2 / Ampere Altra 及更新机器，启用 NEON 向量和 LSE atomics，同时保留 Tokio unstable metrics API。
+rustflags = ["-C", "target-cpu=neoverse-n1", "--cfg", "tokio_unstable"]
+
+[env]
+# 静态链接 fastokens tokenizer 使用的 pcre2 C 库，避免依赖系统 libpcre2/pkg-config。
+PCRE2_SYS_STATIC = "1"
+
+# 构建时检测 protoc（若系统未安装，给出友好提示）。
+# 开发者可通过 PROTOC 环境变量覆盖路径。
+# PROTOC = "/usr/bin/protoc"  # 取消注释以固定路径。
