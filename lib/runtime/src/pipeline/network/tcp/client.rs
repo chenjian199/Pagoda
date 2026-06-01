@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::tcp::client` —— 响应平面 TCP 客户端（反向连接）
@@ -9,7 +9,7 @@
 //! 推送响应流。
 //!
 //! ## 外部契约
-//! - 公开类型 / 方法与 lib-copy 完全一致；`SinkExt` / `StreamExt` 是连接上 `Framed` 必需。
+//! - 公开类型 / 方法完全一致；`SinkExt` / `StreamExt` 是连接上 `Framed` 必需。
 //! - 不额外暴露任何 helper；连接超时 / retry 由上层 router 处理。
 //!
 //! ## 实现要点

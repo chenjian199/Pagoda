@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -69,9 +69,9 @@ impl Connector {
         etcd_urls: &[String],
         connect_options: &Option<ConnectOptions>,
     ) -> Result<etcd_client::Client> {
-        let endpoints = etcd_urls.to_vec();
+        let portnames = etcd_urls.to_vec();
         let options = connect_options.clone();
-        etcd_client::Client::connect(endpoints, options)
+        etcd_client::Client::connect(portnames, options)
             .await
             .with_context(|| {
                 format!(
@@ -211,13 +211,13 @@ mod tests {
     //! 以及当本地存在 etcd 时，accessor 与 `reconnect(now)` 的行为。
     //!
     //! ## 意义
-    //! 这些测试既覆盖纯逻辑路径（退避计算），又通过 `DYNAMO_TEST_ETCD_URL` 触发
+    //! 这些测试既覆盖纯逻辑路径（退避计算），又通过 `PAGODA_TEST_ETCD_URL` 触发
     //! 真实 etcd 路径（accessor / 过期 deadline 立即失败），确保重写不破坏现有契约。
 
     use super::*;
 
     fn test_etcd_urls() -> Vec<String> {
-        let url = std::env::var("DYNAMO_TEST_ETCD_URL")
+        let url = std::env::var("PAGODA_TEST_ETCD_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:2379".to_string());
         vec![url]
     }
@@ -227,8 +227,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_supplemental_connect_error_contains_endpoint_context() {
-        let urls = vec!["bad://etcd-endpoint".to_string()];
+    async fn test_supplemental_connect_error_contains_portname_context() {
+        let urls = vec!["bad://etcd-portname".to_string()];
         match Connector::connect(&urls, &None).await {
             Ok(_client) => {
                 // etcd-client may lazily connect and succeed immediately.
@@ -236,14 +236,14 @@ mod tests {
             Err(err) => {
                 let err = err.to_string();
                 assert!(err.contains("Unable to connect to etcd server at"));
-                assert!(err.contains("bad://etcd-endpoint"));
+                assert!(err.contains("bad://etcd-portname"));
             }
         }
     }
 
     #[tokio::test]
     async fn test_supplemental_new_error_bubbles_connect_context() {
-        let urls = vec!["bad://etcd-endpoint".to_string()];
+        let urls = vec!["bad://etcd-portname".to_string()];
         match Connector::new(urls, None).await {
             Ok(_connector) => {
                 // etcd-client may lazily connect and succeed immediately.
@@ -251,7 +251,7 @@ mod tests {
             Err(err) => {
                 let err = err.to_string();
                 assert!(err.contains("Unable to connect to etcd server at"));
-                assert!(err.contains("bad://etcd-endpoint"));
+                assert!(err.contains("bad://etcd-portname"));
             }
         }
     }

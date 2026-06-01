@@ -1,17 +1,17 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::ingress::shared_tcp_endpoint` —— 单端口多端点复用 TCP 服务器
 //!
 //! ## 设计意图
-//! 让同一个进程的多个逻辑端点共享一个 TCP 端口 —— 路由以 endpoint path 为键。这是
-//! TCP 传输下 `RequestPlaneServer` 的实现：随着 `register_endpoint` 动态查表并调用
+//! 让同一个进程的多个逻辑端点共享一个 TCP 端口 —— 路由以 portname path 为键。这是
+//! TCP 传输下 `RequestPlaneServer` 的实现：随着 `register_portname` 动态查表并调用
 //! 对应的 `PushWorkHandler`。
 //!
 //! ## 外部契约
-//! - 公开类型与方法与 lib-copy 完全一致；`address() -> tcp://host:port` /
+//! - 公开类型与方法完全一致；`address() -> tcp://host:port` /
 //!   `transport_name() -> "tcp"` / `is_healthy()` 是契约。
-//! - endpoint path 路由表与错误响应格式不可改，跨语言客户端依赖。
+//! - portname path 路由表与错误响应格式不可改，跨语言客户端依赖。
 //!
 //! ## 实现要点
 //! - 连接路径上采用 `TwoPartCodec` 读取请求帧；需 ACK 的错误路径统一走
@@ -19,10 +19,10 @@
 //! - 过载控制：有插入 admission controller 接点，限流拒绝转化为
 //!   `"Server overloaded"` 错误帧发回。
 
-//! Shared TCP Server with Endpoint Multiplexing
+//! Shared TCP Server with PortName Multiplexing
 //!
-//! Provides a shared TCP server that can handle multiple endpoints on a single port
-//! by adding endpoint routing to the TCP wire protocol.
+//! Provides a shared TCP server that can handle multiple portnames on a single port
+//! by adding portname routing to the TCP wire protocol.
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
@@ -57,7 +57,7 @@ const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
 
 /// Get worker pool size from environment or use default
 fn get_worker_pool_size() -> usize {
-    std::env::var("DYN_TCP_WORKER_POOL_SIZE")
+    std::env::var("PGD_TCP_WORKER_POOL_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_WORKER_POOL_SIZE)
@@ -65,7 +65,7 @@ fn get_worker_pool_size() -> usize {
 
 /// Get work queue size from environment or use default
 fn get_work_queue_size() -> usize {
-    std::env::var("DYN_TCP_WORK_QUEUE_SIZE")
+    std::env::var("PGD_TCP_WORK_QUEUE_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
@@ -105,15 +105,15 @@ struct WorkItem {
     notify: Arc<Notify>,
     instance_id: u64,
     namespace: String,
-    component_name: String,
-    endpoint_name: String,
+    servicegroup_name: String,
+    portname_name: String,
 }
 
 // === SECTION: [4] 共享 TCP 服务器与处理器 ===
 
-/// Shared TCP server that handles multiple endpoints on a single port
+/// Shared TCP server that handles multiple portnames on a single port
 pub struct SharedTcpServer {
-    handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+    handlers: Arc<DashMap<String, Arc<PortNameHandler>>>,
     /// The address to bind to (may have port 0 for OS-assigned port)
     bind_addr: SocketAddr,
     /// The actual bound address (populated after bind_and_start, contains actual port)
@@ -123,12 +123,12 @@ pub struct SharedTcpServer {
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
 }
 
-struct EndpointHandler {
+struct PortNameHandler {
     service_handler: Arc<dyn PushWorkHandler>,
     instance_id: u64,
     namespace: String,
-    component_name: String,
-    endpoint_name: String,
+    servicegroup_name: String,
+    portname_name: String,
     system_health: Arc<Mutex<SystemHealth>>,
     inflight: Arc<AtomicU64>,
     notify: Arc<Notify>,
@@ -165,7 +165,7 @@ impl SharedTcpServer {
             handlers: Arc::new(DashMap::new()),
             // address we requested to bind to.
             bind_addr,
-            // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
+            // actual address after free port assignment (if PGD_TCP_RPC_PORT is not specified)
             actual_addr: RwLock::new(None),
             cancellation_token,
             work_tx,
@@ -210,7 +210,7 @@ impl SharedTcpServer {
 
                         // Acquire permit before spawning (bounds concurrency). Time the wait so
                         // pool starvation (permit exhaustion) shows up as rising p99 in
-                        // `dynamo_work_handler_permit_wait_seconds`.
+                        // `pagoda_work_handler_permit_wait_seconds`.
                         let permit_wait_start = Instant::now();
                         let permit = match semaphore.clone().acquire_owned().await {
                             Ok(p) => p,
@@ -270,8 +270,8 @@ impl SharedTcpServer {
         // Create span with trace context from headers
         let span = crate::logging::make_handle_payload_span_from_tcp_headers(
             &work_item.headers,
-            &work_item.component_name,
-            &work_item.endpoint_name,
+            &work_item.servicegroup_name,
+            &work_item.portname_name,
             &work_item.namespace,
             work_item.instance_id,
         );
@@ -279,7 +279,7 @@ impl SharedTcpServer {
         let request_id = work_item
             .headers
             .get("request-id")
-            .or_else(|| work_item.headers.get("x-dynamo-request-id"))
+            .or_else(|| work_item.headers.get("x-pagoda-request-id"))
             .cloned();
 
         let result = work_item
@@ -371,58 +371,58 @@ impl SharedTcpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn register_endpoint(
+    pub async fn register_portname(
         &self,
-        endpoint_path: String,
+        portname_path: String,
         service_handler: Arc<dyn PushWorkHandler>,
         instance_id: u64,
         namespace: String,
-        component_name: String,
-        endpoint_name: String,
+        servicegroup_name: String,
+        portname_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        let fqn_endpoint = format!("{namespace}.{component_name}.{endpoint_name}");
+        let fqn_portname = format!("{namespace}.{servicegroup_name}.{portname_name}");
 
-        let handler = Arc::new(EndpointHandler {
+        let handler = Arc::new(PortNameHandler {
             service_handler,
             instance_id,
             namespace,
-            component_name,
-            endpoint_name: endpoint_name.clone(),
+            servicegroup_name,
+            portname_name: portname_name.clone(),
             system_health: system_health.clone(),
             inflight: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
         });
 
         // Insert handler FIRST to ensure it's ready to receive requests
-        self.handlers.insert(endpoint_path, handler);
+        self.handlers.insert(portname_path, handler);
 
-        system_health.lock().set_endpoint_registered(&endpoint_name);
+        system_health.lock().set_portname_registered(&portname_name);
 
         tracing::info!(
-            "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
+            "Registered portname '{fqn_portname}' with shared TCP server on {}",
             self.actual_address().unwrap_or(self.bind_addr)
         );
 
         Ok(())
     }
 
-    pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
-        if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
+    pub async fn unregister_portname(&self, portname_path: &str, portname_name: &str) {
+        if let Some((_, handler)) = self.handlers.remove(portname_path) {
             handler
                 .system_health
                 .lock()
-                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+                .set_portname_health_status(portname_name, crate::HealthStatus::NotReady);
             tracing::info!(
-                endpoint_name = %endpoint_name,
-                endpoint_path = %endpoint_path,
-                "Unregistered TCP endpoint handler"
+                portname_name = %portname_name,
+                portname_path = %portname_path,
+                "Unregistered TCP portname handler"
             );
 
             let inflight_count = handler.inflight.load(Ordering::SeqCst);
             if inflight_count > 0 {
                 tracing::info!(
-                    endpoint_name = %endpoint_name,
+                    portname_name = %portname_name,
                     inflight_count = inflight_count,
                     "Waiting for inflight TCP requests to complete"
                 );
@@ -430,7 +430,7 @@ impl SharedTcpServer {
                     handler.notify.notified().await;
                 }
                 tracing::info!(
-                    endpoint_name = %endpoint_name,
+                    portname_name = %portname_name,
                     "All inflight TCP requests completed"
                 );
             }
@@ -451,7 +451,7 @@ impl SharedTcpServer {
 
     async fn handle_connection(
         stream: TcpStream,
-        handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+        handlers: Arc<DashMap<String, Arc<PortNameHandler>>>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
@@ -476,7 +476,7 @@ impl SharedTcpServer {
 
     async fn read_loop(
         mut read_half: tokio::io::ReadHalf<TcpStream>,
-        handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+        handlers: Arc<DashMap<String, Arc<PortNameHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
     ) -> Result<()> {
@@ -505,13 +505,13 @@ impl SharedTcpServer {
                 }
             };
 
-            // Get endpoint path (zero-copy string slice)
-            let endpoint_path = match request_msg.endpoint_path() {
+            // Get portname path (zero-copy string slice)
+            let portname_path = match request_msg.portname_path() {
                 Ok(path) => path,
                 Err(e) => {
-                    tracing::warn!("Invalid UTF-8 in endpoint path: {e}");
+                    tracing::warn!("Invalid UTF-8 in portname path: {e}");
                     let error_response =
-                        TcpResponseMessage::new(Bytes::from_static(b"Invalid endpoint path"));
+                        TcpResponseMessage::new(Bytes::from_static(b"Invalid portname path"));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
@@ -526,23 +526,23 @@ impl SharedTcpServer {
             let payload = request_msg.payload();
 
             tracing::trace!(
-                endpoint = endpoint_path,
+                portname = portname_path,
                 payload_len = payload.len(),
                 total_size = request_msg.total_size(),
                 "Received TCP request"
             );
 
             // Look up handler (lock-free read with DashMap)
-            let handler = handlers.get(endpoint_path).map(|h| h.clone());
+            let handler = handlers.get(portname_path).map(|h| h.clone());
 
             let handler = match handler {
                 Some(h) => h,
                 None => {
-                    tracing::warn!("No handler found for endpoint: {endpoint_path}");
+                    tracing::warn!("No handler found for portname: {portname_path}");
                     // Send error response
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
-                        "Unknown endpoint: {}",
-                        endpoint_path
+                        "Unknown portname: {}",
+                        portname_path
                     )));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
@@ -563,8 +563,8 @@ impl SharedTcpServer {
                 notify: handler.notify.clone(),
                 instance_id: handler.instance_id,
                 namespace: handler.namespace.clone(),
-                component_name: handler.component_name.clone(),
-                endpoint_name: handler.endpoint_name.clone(),
+                servicegroup_name: handler.servicegroup_name.clone(),
+                portname_name: handler.portname_name.clone(),
             };
 
             // Reserve a slot in the bounded channel BEFORE incrementing the
@@ -593,7 +593,7 @@ impl SharedTcpServer {
                     }
 
                     tracing::trace!(
-                        endpoint = handler.endpoint_name.as_str(),
+                        portname = handler.portname_name.as_str(),
                         instance_id = handler.instance_id,
                         "Request queued and acknowledged"
                     );
@@ -604,7 +604,7 @@ impl SharedTcpServer {
                     // the read loop must terminate.
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
-                        endpoint = handler.endpoint_name.as_str(),
+                        portname = handler.portname_name.as_str(),
                         instance_id = handler.instance_id,
                         error = %e,
                         "Failed to reserve worker pool slot, sending error response"
@@ -647,34 +647,34 @@ impl SharedTcpServer {
 // Implement RequestPlaneServer trait for SharedTcpServer
 #[async_trait::async_trait]
 impl super::unified_server::RequestPlaneServer for SharedTcpServer {
-    async fn register_endpoint(
+    async fn register_portname(
         &self,
-        endpoint_name: String,
+        portname_name: String,
         service_handler: Arc<dyn PushWorkHandler>,
         instance_id: u64,
         namespace: String,
-        component_name: String,
+        servicegroup_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         // Include instance_id in the routing key to avoid collisions when multiple workers
         // share the same TCP server (e.g., --num-workers > 1 in tests)
-        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
-        self.register_endpoint(
-            endpoint_path,
+        let portname_path = format!("{instance_id:x}/{portname_name}");
+        self.register_portname(
+            portname_path,
             service_handler,
             instance_id,
             namespace,
-            component_name,
-            endpoint_name,
+            servicegroup_name,
+            portname_name,
             system_health,
         )
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
+    async fn unregister_portname(&self, portname_name: &str) -> Result<()> {
         // With multiple workers per process, each registers with a unique key
-        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
-        let suffix = format!("/{endpoint_name}");
+        // "{instance_id}/{portname_name}". Find and remove all matching entries.
+        let suffix = format!("/{portname_name}");
         let keys_to_remove: Vec<String> = self
             .handlers
             .iter()
@@ -683,7 +683,7 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
             .collect();
 
         for key in keys_to_remove {
-            self.unregister_endpoint(&key, endpoint_name).await;
+            self.unregister_portname(&key, portname_name).await;
         }
         Ok(())
     }
@@ -715,7 +715,7 @@ mod tests {
     //! | 测试名 | 覆盖维度 |
     //! |---|---|
     //! | `test_graceful_shutdown_waits_for_inflight_tcp_requests` | 优雅停机：取消令牌触发后仍等待 inflight TCP 请求处理完毕 |
-    //! | `test_worker_pool_bounds_concurrency` | 工作池上限：并发度被 `DYN_TCP_WORKER_POOL_SIZE` 严格限制 |
+    //! | `test_worker_pool_bounds_concurrency` | 工作池上限：并发度被 `PGD_TCP_WORKER_POOL_SIZE` 严格限制 |
     //! | `test_worker_pool_metrics_are_observed` | 工作池活跃任务 gauge 在调度/完成时正确升降 |
     //! | `test_capacities_published_on_server_init` | 服务初始化时上报工作池与队列容量到指标系统 |
 
@@ -776,7 +776,7 @@ mod tests {
 
         fn add_metrics(
             &self,
-            _endpoint: &crate::component::Endpoint,
+            _portname: &crate::servicegroup::PortName,
             _metrics_labels: Option<&[(&str, &str)]>,
         ) -> Result<()> {
             Ok(())
@@ -800,8 +800,8 @@ mod tests {
         let request_completed = handler.request_completed.clone();
         let request_in_flight = handler.request_in_flight.clone();
 
-        // Register endpoint
-        let endpoint_path = "test_endpoint".to_string();
+        // Register portname
+        let portname_path = "test_portname".to_string();
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             crate::HealthStatus::Ready,
             vec![],
@@ -811,24 +811,24 @@ mod tests {
         )));
 
         server
-            .register_endpoint(
-                endpoint_path.clone(),
+            .register_portname(
+                portname_path.clone(),
                 handler.clone() as Arc<dyn PushWorkHandler>,
                 1,
                 "test_namespace".to_string(),
-                "test_component".to_string(),
-                "test_endpoint".to_string(),
+                "test_servicegroup".to_string(),
+                "test_portname".to_string(),
                 system_health,
             )
             .await
-            .expect("Failed to register endpoint");
+            .expect("Failed to register portname");
 
-        tracing::debug!("Endpoint registered");
+        tracing::debug!("PortName registered");
 
-        // Get the endpoint handler to simulate request processing
-        let endpoint_handler = server
+        // Get the portname handler to simulate request processing
+        let portname_handler = server
             .handlers
-            .get(&endpoint_path)
+            .get(&portname_path)
             .expect("Handler should be registered")
             .clone();
 
@@ -842,7 +842,7 @@ mod tests {
         });
 
         // Increment inflight counter manually to simulate the request being tracked
-        endpoint_handler.inflight.fetch_add(1, Ordering::SeqCst);
+        portname_handler.inflight.fetch_add(1, Ordering::SeqCst);
 
         // Wait for request to start processing
         tokio::select! {
@@ -860,17 +860,17 @@ mod tests {
             "Request should be in flight"
         );
 
-        // Now unregister the endpoint while request is inflight
+        // Now unregister the portname while request is inflight
         let unregister_start = Instant::now();
-        tracing::debug!("Starting unregister_endpoint with inflight request");
+        tracing::debug!("Starting unregister_portname with inflight request");
 
         // Spawn unregister in a separate task so we can monitor its behavior
         let unregister_task = tokio::spawn({
             let server = server.clone();
-            let endpoint_path = endpoint_path.clone();
+            let portname_path = portname_path.clone();
             async move {
                 server
-                    .unregister_endpoint(&endpoint_path, "test_endpoint")
+                    .unregister_portname(&portname_path, "test_portname")
                     .await;
                 Instant::now()
             }
@@ -879,10 +879,10 @@ mod tests {
         // Give unregister a moment to remove handler and start waiting
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Verify that unregister_endpoint hasn't returned yet (it should be waiting)
+        // Verify that unregister_portname hasn't returned yet (it should be waiting)
         assert!(
             !unregister_task.is_finished(),
-            "unregister_endpoint should still be waiting for inflight request"
+            "unregister_portname should still be waiting for inflight request"
         );
 
         tracing::debug!("Verified unregister is waiting, now waiting for request to complete");
@@ -898,23 +898,23 @@ mod tests {
         }
 
         // Decrement inflight counter and notify (simulating what the real code does)
-        endpoint_handler.inflight.fetch_sub(1, Ordering::SeqCst);
-        endpoint_handler.notify.notify_one();
+        portname_handler.inflight.fetch_sub(1, Ordering::SeqCst);
+        portname_handler.notify.notify_one();
 
         // Now wait for unregister to complete
         let unregister_end = tokio::time::timeout(Duration::from_secs(2), unregister_task)
             .await
-            .expect("unregister_endpoint should complete after inflight request finishes")
+            .expect("unregister_portname should complete after inflight request finishes")
             .expect("unregister task should not panic");
 
         let unregister_duration = unregister_end - unregister_start;
 
-        tracing::debug!("unregister_endpoint completed in {:?}", unregister_duration);
+        tracing::debug!("unregister_portname completed in {:?}", unregister_duration);
 
-        // Verify unregister_endpoint waited for the inflight request
+        // Verify unregister_portname waited for the inflight request
         assert!(
             unregister_duration >= Duration::from_secs(1),
-            "unregister_endpoint should have waited ~1s for inflight request, but only took {:?}",
+            "unregister_portname should have waited ~1s for inflight request, but only took {:?}",
             unregister_duration
         );
 
@@ -930,7 +930,7 @@ mod tests {
             .expect("Request task should complete")
             .expect("Request should succeed");
 
-        tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
+        tracing::info!("Test passed: unregister_portname properly waited for inflight TCP request");
     }
 
     ///////////////////// TESTS FOR CONCURRENCY BOUNDING /////////////////////
@@ -983,7 +983,7 @@ mod tests {
 
         fn add_metrics(
             &self,
-            _endpoint: &crate::component::Endpoint,
+            _portname: &crate::servicegroup::PortName,
             _metrics_labels: Option<&[(&str, &str)]>,
         ) -> Result<()> {
             Ok(())
@@ -1026,8 +1026,8 @@ mod tests {
                 notify: notify.clone(),
                 instance_id: 1,
                 namespace: "test".to_string(),
-                component_name: "test".to_string(),
-                endpoint_name: "test".to_string(),
+                servicegroup_name: "test".to_string(),
+                portname_name: "test".to_string(),
             };
             work_tx.send(work_item).await.expect("send should succeed");
         }
@@ -1101,8 +1101,8 @@ mod tests {
                 notify: notify.clone(),
                 instance_id: 1,
                 namespace: "test".to_string(),
-                component_name: "test".to_string(),
-                endpoint_name: "test".to_string(),
+                servicegroup_name: "test".to_string(),
+                portname_name: "test".to_string(),
             };
             work_tx.send(work_item).await.expect("send should succeed");
         }

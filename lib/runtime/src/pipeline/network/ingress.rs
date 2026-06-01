@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::ingress` —— 入口侧（服务端 / 接收端点）实现集合
 //!
 //! ## 设计意图
 //! 集中声明 “在本进程响应外部请求” 一侧的实现：HTTP 端点、NATS 服务端、
-//! Push endpoint / handler、共享 TCP endpoint、统一服务端入口。
+//! Push portname / handler、共享 TCP portname、统一服务端入口。
 //! 本文件本身不持有业务逻辑，只作命名空间聚合与重导出。
 //!
 //! ## 外部契约

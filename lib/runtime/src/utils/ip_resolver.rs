@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -83,7 +83,7 @@ pub fn get_http_rpc_host() -> String {
 
 /// 优先从环境变量读取 HTTP RPC 主机，缺失时回退到本地 IP 解析。
 pub fn get_http_rpc_host_from_env() -> String {
-    match std::env::var("DYN_HTTP_RPC_HOST") {
+    match std::env::var("PGD_HTTP_RPC_HOST") {
         Ok(value) => value,
         Err(_) => get_http_rpc_host(),
     }
@@ -91,7 +91,7 @@ pub fn get_http_rpc_host_from_env() -> String {
 
 /// 优先从环境变量读取 TCP RPC 主机，缺失时回退到本地 IP 解析。
 pub fn get_tcp_rpc_host_from_env() -> String {
-    match std::env::var("DYN_TCP_RPC_HOST") {
+    match std::env::var("PGD_TCP_RPC_HOST") {
         Ok(value) => value,
         Err(_) => get_http_rpc_host(),
     }
@@ -171,7 +171,7 @@ mod tests {
     fn test_get_http_rpc_host_from_env_with_env_var() {
         // 测试优先读取环境变量。
         unsafe {
-            std::env::set_var("DYN_HTTP_RPC_HOST", "10.0.0.1");
+            std::env::set_var("PGD_HTTP_RPC_HOST", "10.0.0.1");
         }
 
         let result = get_http_rpc_host_from_env();
@@ -179,7 +179,7 @@ mod tests {
 
         // 清理环境变量，避免影响后续测试。
         unsafe {
-            std::env::remove_var("DYN_HTTP_RPC_HOST");
+            std::env::remove_var("PGD_HTTP_RPC_HOST");
         }
     }
 
@@ -240,14 +240,14 @@ mod tests {
     fn test_get_tcp_rpc_host_from_env_with_env_var() {
         // 测试 TCP RPC 主机也会优先读取环境变量。
         unsafe {
-            std::env::set_var("DYN_TCP_RPC_HOST", "10.1.2.3");
+            std::env::set_var("PGD_TCP_RPC_HOST", "10.1.2.3");
         }
 
         let result = get_tcp_rpc_host_from_env();
         assert_eq!(result, "10.1.2.3");
 
         unsafe {
-            std::env::remove_var("DYN_TCP_RPC_HOST");
+            std::env::remove_var("PGD_TCP_RPC_HOST");
         }
     }
 }

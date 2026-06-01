@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! NATS 微服务发现与状态集（service 模块）
@@ -6,32 +6,32 @@
 //! ## 设计意图
 //! 为调用方封装三件事：
 //! 1. [`ServiceClient`] 提供基于 NATS 的请求 / 应答与服务发现拉取；
-//! 2. [`ServiceSet`] / [`ServiceInfo`] / [`EndpointInfo`] / [`NatsStatsMetrics`]
+//! 2. [`ServiceSet`] / [`ServiceInfo`] / [`PortNameInfo`] / [`NatsStatsMetrics`]
 //!    描述一次“$SRV.STATS.<service>” 采集的原始结果集；
-//! 3. 辅助函数（为 [`EndpointInfo::id`] 提供的 hex 后缀解析、为 `collect_services`
+//! 3. 辅助函数（为 [`PortNameInfo::id`] 提供的 hex 后缀解析、为 `collect_services`
 //!    提供的消息反序列化）集中为私有助手，让主路径保持函数式、上下文纯净。
 //!
 //! TODO：本模块后续仍需重构以明确“组件 live / ready 状态”与取消令牌间的关联。
 //!
 //! ## 外部契约
-//! - 公开结构体：`ServiceClient`、`ServiceSet`、`ServiceInfo`、`EndpointInfo`、`NatsStatsMetrics`；
-//!   后三者均为 `Debug + Clone + Serialize + Deserialize`，`EndpointInfo` / `NatsStatsMetrics`
+//! - 公开结构体：`ServiceClient`、`ServiceSet`、`ServiceInfo`、`PortNameInfo`、`NatsStatsMetrics`；
+//!   后三者均为 `Debug + Clone + Serialize + Deserialize`，`PortNameInfo` / `NatsStatsMetrics`
 //!   额外提供 `derive_getters::Dissolve`。字段与序列化格式保持不变（NATS 线上格式契约）。
 //! - 公开方法集合 `ServiceClient::new` / `unary` / `collect_services`、
-//!   `EndpointInfo::id`、`NatsStatsMetrics::decode`、`ServiceSet::into_endpoints` / `services` 签名不变。
-//! - `EndpointInfo::id` 语义：从 subject 末尾 `-` 后的部分按十六进制解析为 `i64`；
+//!   `PortNameInfo::id`、`NatsStatsMetrics::decode`、`ServiceSet::into_portnames` / `services` 签名不变。
+//! - `PortNameInfo::id` 语义：从 subject 末尾 `-` 后的部分按十六进制解析为 `i64`；
 //!   缺失 / 空 / 非十六进制均返回 `anyhow::Error`，错误文本与历史一致。
 //! - `collect_services` 语义：在 `timeout` 截止前收集所有消息，忽略空 payload，
 //!   反序列化失败记 `debug` 日志但继续，timeout 为零 / 超过 10s 都会额外发 `warn`。
 //!
 //! ## 实现要点
 //! - **多样化（Rule 2）**：
-//!   * `EndpointInfo::id` 抽出私有助手 `extract_hex_suffix`，把“取后缀”与
+//!   * `PortNameInfo::id` 抽出私有助手 `extract_hex_suffix`，把“取后缀”与
 //!     “hex 解析”拆成两步，使主函数只负责错误包装；
 //!   * `collect_services` 主环改为 `while let Some(message) = s.next().await`，并抽出
 //!     `try_parse_service_info` 助手负责“空 payload 跳过 + 解析失败记日志 + 返回 Option”；
 //!     主环只需 `if let Some(info) = ...` 推入 `Vec`；
-//!   * `into_endpoints` 由 `.map(...).flatten()` 改为 `.flat_map(...)`，仅为习惯性表达。
+//!   * `into_portnames` 由 `.map(...).flatten()` 改为 `.flat_map(...)`，仅为习惯性表达。
 //! - **不**变动任何错误文本、`try_stream!` 框架、NATS 财产调用路径与日志级别，
 //!   以保证对外可观察行为与基线完全一致。
 
@@ -42,7 +42,7 @@
 
 use crate::{
     DistributedRuntime,
-    component::Component,
+    servicegroup::ServiceGroup,
     metrics::{MetricsHierarchy, prometheus_names},
     traits::*,
     transports::nats,
@@ -82,7 +82,7 @@ impl ServiceClient {
 ///     - id: String
 ///     - version: String
 ///     - started: String
-///     - endpoints: Vec<EndpointInfo>
+///     - portnames: Vec<PortNameInfo>
 ///       - name: String
 ///       - subject: String
 ///       - data: Option<NatsStatsMetrics>
@@ -98,17 +98,17 @@ pub struct ServiceSet {
     services: Vec<ServiceInfo>,
 }
 
-/// 下面是 `nats req '$SRV.STATS.dynamo_backend'` 返回 JSON 的示例：
+/// 下面是 `nats req '$SRV.STATS.pagoda_backend'` 返回 JSON 的示例：
 /// {
 ///   "type": "io.nats.micro.v1.stats_response",
-///   "name": "dynamo_backend",
+///   "name": "pagoda_backend",
 ///   "id": "bdu7nA8tbhy9mEkxIWlkBA",
 ///   "version": "0.0.1",
 ///   "started": "2025-08-08T05:07:17.720783523Z",
-///   "endpoints": [
+///   "portnames": [
 ///     {
-///       "name": "dynamo_backend-generate-694d988806b92e39",
-///       "subject": "dynamo_backend.generate-694d988806b92e39",
+///       "name": "pagoda_backend-generate-694d988806b92e39",
+///       "subject": "pagoda_backend.generate-694d988806b92e39",
 ///       "num_requests": 0,
 ///       "num_errors": 0,
 ///       "processing_time": 0,
@@ -127,25 +127,25 @@ pub struct ServiceInfo {
     pub id: String,
     pub version: String,
     pub started: String,
-    pub endpoints: Vec<EndpointInfo>,
+    pub portnames: Vec<PortNameInfo>,
 }
 
 /// 每个端点都包含名称、subject、请求统计以及扩展数据等字段。
 #[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
-pub struct EndpointInfo {
+pub struct PortNameInfo {
     pub name: String,
     pub subject: String,
 
-    /// 不属于 `EndpointInfo` 固定字段的额外内容，会被展平到指标结构中。
+    /// 不属于 `PortNameInfo` 固定字段的额外内容，会被展平到指标结构中。
     #[serde(flatten)]
     pub data: Option<NatsStatsMetrics>,
 }
 
-// === SECTION: EndpointInfo / NatsStatsMetrics 语义补充 ===
+// === SECTION: PortNameInfo / NatsStatsMetrics 语义补充 ===
 
 /// 私有助手：从 subject 中提取“最后一个 `-` 后的 hex 后缀”并按 16 进制解析为 `i64`。
 ///
-/// 这个助手把“取后缀”与“hex 解析”拆成两步，令 [`EndpointInfo::id`] 主体只需
+/// 这个助手把“取后缀”与“hex 解析”拆成两步，令 [`PortNameInfo::id`] 主体只需
 /// 负责错误消息包装。错误文本与历史实现严格保持一致：
 /// * 缺失 / 空后缀 → `"No id found in subject"`
 /// * 非十六进制 → `"Invalid id format: <ParseIntError>"`
@@ -159,7 +159,7 @@ fn extract_hex_suffix(subject: &str) -> Result<i64> {
     i64::from_str_radix(suffix, 16).map_err(|err| error!("Invalid id format: {}", err))
 }
 
-impl EndpointInfo {
+impl PortNameInfo {
     /// 从端点 subject 的十六进制后缀中提取实例 ID。
     ///
     /// 处理流程与历史实现等价：先按最后一个 `-` 分割出后缀，再按十六进制解析为 `i64`。
@@ -173,7 +173,7 @@ impl EndpointInfo {
 // 但仍缺少如 `name` 等字段，因此暂时保留一个本地结构用于反序列化。
 // 理想情况下，这个类型应由上游库直接暴露。
 /// NATS Service API 返回的统计结构。
-/// https://github.com/nats-io/nats.rs/blob/main/async-nats/src/service/endpoint.rs
+/// https://github.com/nats-io/nats.rs/blob/main/async-nats/src/service/portname.rs
 #[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
 pub struct NatsStatsMetrics {
     // 这些字段来自 `$SRV.STATS.<service_name>` 请求返回的标准 NATS 统计信息。
@@ -277,10 +277,10 @@ impl ServiceSet {
     ///
     /// 实现上以 `flat_map` 代替历史的 `.map(...).flatten()` 两步拼接，
     /// 语义等价、迭代顺序与动态行为一致。
-    pub fn into_endpoints(self) -> impl Iterator<Item = EndpointInfo> {
+    pub fn into_portnames(self) -> impl Iterator<Item = PortNameInfo> {
         self.services
             .into_iter()
-            .flat_map(|service| service.endpoints)
+            .flat_map(|service| service.portnames)
     }
 
     /// 返回当前 `ServiceSet` 内部保存的服务切片引用。
@@ -294,8 +294,8 @@ impl ServiceSet {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
-    //! 不依赖 NATS：手动构造 `ServiceSet` / `EndpointInfo` / `NatsStatsMetrics` 样本，
-    //! 验证 `into_endpoints` 的展平、`EndpointInfo::id` 在合法 / 非十六进制后缀上的双路径、
+    //! 不依赖 NATS：手动构造 `ServiceSet` / `PortNameInfo` / `NatsStatsMetrics` 样本，
+    //! 验证 `into_portnames` 的展平、`PortNameInfo::id` 在合法 / 非十六进制后缀上的双路径、
     //! `NatsStatsMetrics::decode` 的泛型解码，以及 `services()` 访问器的引用返回。
     //!
     //! ## 意义
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    /// 测试：`ServiceSet::into_endpoints` 会把不同服务中的端点展平输出。
+    /// 测试：`ServiceSet::into_portnames` 会把不同服务中的端点展平输出。
     fn test_service_set() {
         let services = vec![
             ServiceInfo {
@@ -333,14 +333,14 @@ mod tests {
                 id: "1".to_string(),
                 version: "1.0".to_string(),
                 started: "2021-01-01".to_string(),
-                endpoints: vec![
-                    EndpointInfo {
-                        name: "endpoint1".to_string(),
+                portnames: vec![
+                    PortNameInfo {
+                        name: "portname1".to_string(),
                         subject: "subject1".to_string(),
                         data: Some(sample_metrics("value1")),
                     },
-                    EndpointInfo {
-                        name: "endpoint2-foo".to_string(),
+                    PortNameInfo {
+                        name: "portname2-foo".to_string(),
                         subject: "subject2".to_string(),
                         data: Some(sample_metrics("value1")),
                     },
@@ -351,14 +351,14 @@ mod tests {
                 id: "2".to_string(),
                 version: "1.0".to_string(),
                 started: "2021-01-01".to_string(),
-                endpoints: vec![
-                    EndpointInfo {
-                        name: "endpoint1".to_string(),
+                portnames: vec![
+                    PortNameInfo {
+                        name: "portname1".to_string(),
                         subject: "subject1".to_string(),
                         data: Some(sample_metrics("value1")),
                     },
-                    EndpointInfo {
-                        name: "endpoint2-bar".to_string(),
+                    PortNameInfo {
+                        name: "portname2-bar".to_string(),
                         subject: "subject2".to_string(),
                         data: Some(sample_metrics("value2")),
                     },
@@ -368,36 +368,36 @@ mod tests {
 
         let service_set = ServiceSet { services };
 
-        let endpoints: Vec<_> = service_set
-            .into_endpoints()
-            .filter(|e| e.name.starts_with("endpoint2"))
+        let portnames: Vec<_> = service_set
+            .into_portnames()
+            .filter(|e| e.name.starts_with("portname2"))
             .collect();
 
-        assert_eq!(endpoints.len(), 2);
+        assert_eq!(portnames.len(), 2);
     }
 
     #[test]
-    /// 测试：`EndpointInfo::id` 能正确解析十六进制后缀。
-    fn test_endpoint_info_id_parses_hex_suffix() {
-        let endpoint = EndpointInfo {
-            name: "endpoint".to_string(),
+    /// 测试：`PortNameInfo::id` 能正确解析十六进制后缀。
+    fn test_portname_info_id_parses_hex_suffix() {
+        let portname = PortNameInfo {
+            name: "portname".to_string(),
             subject: "service.generate-deadbeef".to_string(),
             data: None,
         };
 
-        assert_eq!(endpoint.id().unwrap(), 0xdeadbeef);
+        assert_eq!(portname.id().unwrap(), 0xdeadbeef);
     }
 
     #[test]
-    /// 测试：`EndpointInfo::id` 在后缀不是十六进制时返回错误。
-    fn test_endpoint_info_id_rejects_invalid_hex_suffix() {
-        let endpoint = EndpointInfo {
-            name: "endpoint".to_string(),
+    /// 测试：`PortNameInfo::id` 在后缀不是十六进制时返回错误。
+    fn test_portname_info_id_rejects_invalid_hex_suffix() {
+        let portname = PortNameInfo {
+            name: "portname".to_string(),
             subject: "service.generate-not-hex".to_string(),
             data: None,
         };
 
-        assert!(endpoint.id().is_err());
+        assert!(portname.id().is_err());
     }
 
     #[test]
@@ -417,7 +417,7 @@ mod tests {
                 id: "1".to_string(),
                 version: "1.0".to_string(),
                 started: "2021-01-01".to_string(),
-                endpoints: vec![],
+                portnames: vec![],
             }],
         };
 

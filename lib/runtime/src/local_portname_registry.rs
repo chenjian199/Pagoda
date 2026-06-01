@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! 本地端点注册表（Local Endpoint Registry）
+//! 本地端点注册表（Local PortName Registry）
 //!
 //! ## 设计意图
 //! 为运行在同一进程内的调用方提供一张"端点名 → 异步引擎"的查找表，
@@ -13,7 +13,7 @@
 //! - 公开类型别名 `LocalAsyncEngine`：固定为
 //!   `Arc<dyn AsyncEngine<SingleIn<Value>, ManyOut<Annotated<Value>>, anyhow::Error> + Send + Sync>`，
 //!   被多个上层模块作为引擎槽位类型直接使用，**签名不可变**。
-//! - 公开结构体 `LocalEndpointRegistry`：必须保持 `Clone + Default`，
+//! - 公开结构体 `LocalPortNameRegistry`：必须保持 `Clone + Default`，
 //!   且 `clone()` 之后的副本与原对象共享同一份底层存储（写入相互可见）。
 //! - 方法集合 `new` / `register(String, LocalAsyncEngine)` / `get(&str) -> Option<LocalAsyncEngine>`
 //!   的签名与语义保持不变；`register` 对同名端点采取覆盖语义。
@@ -52,19 +52,19 @@ pub type LocalAsyncEngine = Arc<
 /// 引擎对象并直接驱动，无需走网络层。`Clone` 出来的副本与原对象共享同一份
 /// 内部存储，因此可以放心地把它分发给多个组件。
 #[derive(Clone, Default)]
-pub struct LocalEndpointRegistry {
+pub struct LocalPortNameRegistry {
     /// 端点名 → 引擎的并发映射；外层 `Arc` 负责跨克隆共享同一张底表。
     engines: Arc<DashMap<String, LocalAsyncEngine>>,
 }
 
 // === SECTION: 注册 / 查询行为 ===
 
-impl LocalEndpointRegistry {
+impl LocalPortNameRegistry {
     /// 构造一张全新的、内部为空的本地端点注册表。
     ///
     /// 中文说明：
     /// 1. 先构造一张空的 `DashMap`，再用 `Arc` 包起来，使后续克隆出的副本能共享同一份状态。
-    /// 2. 把这张共享映射表填入 `LocalEndpointRegistry` 并返回。
+    /// 2. 把这张共享映射表填入 `LocalPortNameRegistry` 并返回。
     pub fn new() -> Self {
         let engines = Arc::new(DashMap::new());
 
@@ -74,18 +74,18 @@ impl LocalEndpointRegistry {
     /// 注册一个本地端点。
     ///
     /// # 参数
-    /// * `endpoint_name` —— 端点名（例如 `"generate"`、`"load_lora"`）。
+    /// * `portname_name` —— 端点名（例如 `"generate"`、`"load_lora"`）。
     /// * `engine` —— 处理该端点请求的异步引擎句柄。
     ///
     /// 中文说明：
     /// 1. 借用内部共享映射表的引用，明确写入目标即为当前注册表持有的 `DashMap`。
     /// 2. 写入前输出一条 `debug` 日志，便于排查端点注册顺序。
     /// 3. 调用 `DashMap::insert`，对同名端点采取覆盖语义。
-    pub fn register(&self, endpoint_name: String, engine: LocalAsyncEngine) {
+    pub fn register(&self, portname_name: String, engine: LocalAsyncEngine) {
         let registry = &self.engines;
 
-        tracing::debug!("Registering local endpoint: {endpoint_name}");
-        registry.insert(endpoint_name, engine);
+        tracing::debug!("Registering local portname: {portname_name}");
+        registry.insert(portname_name, engine);
     }
 
     /// 查询已注册的本地端点。
@@ -96,8 +96,8 @@ impl LocalEndpointRegistry {
     /// 1. 通过 `DashMap::get` 取出只读临时句柄。
     /// 2. 命中时克隆内部 `Arc` 引擎并返回，避免把 `DashMap` 内部句柄泄露到调用方。
     /// 3. 未命中时返回 `None`，表示当前注册表里没有该端点。
-    pub fn get(&self, endpoint_name: &str) -> Option<LocalAsyncEngine> {
-        let maybe_engine = self.engines.get(endpoint_name);
+    pub fn get(&self, portname_name: &str) -> Option<LocalAsyncEngine> {
+        let maybe_engine = self.engines.get(portname_name);
 
         if let Some(engine) = maybe_engine {
             return Some(engine.clone());
@@ -117,7 +117,7 @@ mod tests {
     //! 以及克隆出的注册表与原对象共享同一份底层存储。
     //!
     //! ## 意义
-    //! 这些用例固定了 `LocalEndpointRegistry` 的对外可观察行为——
+    //! 这些用例固定了 `LocalPortNameRegistry` 的对外可观察行为——
     //! 任何后续重构（容器替换、并发策略变更等）都必须使这些断言继续成立，
     //! 从而保证上层使用方的契约不被破坏。
 
@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn test_new_and_default_start_empty() {
-        let registry = LocalEndpointRegistry::new();
-        let default_registry = LocalEndpointRegistry::default();
+        let registry = LocalPortNameRegistry::new();
+        let default_registry = LocalPortNameRegistry::default();
 
         assert!(registry.engines.is_empty());
         assert!(default_registry.engines.is_empty());
@@ -176,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_and_get_return_same_engine() {
-        let registry = LocalEndpointRegistry::new();
+        let registry = LocalPortNameRegistry::new();
         let engine: LocalAsyncEngine = Arc::new(MockLocalEngine { name: "alpha" });
 
         registry.register("generate".to_string(), engine.clone());
@@ -201,8 +201,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_overwrites_existing_endpoint() {
-        let registry = LocalEndpointRegistry::new();
+    async fn test_register_overwrites_existing_portname() {
+        let registry = LocalPortNameRegistry::new();
         let first: LocalAsyncEngine = Arc::new(MockLocalEngine { name: "first" });
         let second: LocalAsyncEngine = Arc::new(MockLocalEngine { name: "second" });
 
@@ -226,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone_shares_underlying_registry() {
-        let registry = LocalEndpointRegistry::new();
+        let registry = LocalPortNameRegistry::new();
         let cloned = registry.clone();
         let engine: LocalAsyncEngine = Arc::new(MockLocalEngine { name: "shared" });
 

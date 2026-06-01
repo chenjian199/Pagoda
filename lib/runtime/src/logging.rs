@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo 分布式日志模块（logging）
+//! Pagoda 分布式日志模块（logging）
 //!
 //! ## 设计意图
 //! 为整个进程提供"一句初始化"的 tracing-subscriber 装配能力：读取环境变量 /
@@ -11,11 +11,11 @@
 //!
 //! ## 配置来源优先级
 //!   1. 环境变量（最高）；
-//!   2. `DYN_LOGGING_CONFIG_PATH` 指向的 TOML；
-//!   3. `/opt/dynamo/etc/logging.toml`（默认路径）。
+//!   2. `PGD_LOGGING_CONFIG_PATH` 指向的 TOML；
+//!   3. `/opt/pagoda/etc/logging.toml`（默认路径）。
 //!
-//! 日志格式默认 `READABLE`，设置 `DYN_LOGGING_JSONL=1` 后切为 `JSONL`；设置
-//! `DYN_LOG_USE_LOCAL_TZ=1` 可使用本地时区。`DYN_LOG` / TOML 里的 `log_filters` 控制
+//! 日志格式默认 `READABLE`，设置 `PGD_LOGGING_JSONL=1` 后切为 `JSONL`；设置
+//! `PGD_LOG_USE_LOCAL_TZ=1` 可使用本地时区。`PGD_LOG` / TOML 里的 `log_filters` 控制
 //! per-target 过滤器，默认级别为 `info`。
 //!
 //! 示例：
@@ -117,11 +117,11 @@ use pagoda_config::env_is_truthy;
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
 
-/// Default OTLP endpoint
+/// Default OTLP portname
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
 /// Default service name
-const DEFAULT_OTEL_SERVICE_NAME: &str = "dynamo";
+const DEFAULT_OTEL_SERVICE_NAME: &str = "pagoda";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
@@ -240,7 +240,7 @@ impl DistributedTraceContext {
     }
 }
 
-/// Parse a traceparent string into its components.
+/// Parse a traceparent string into its servicegroups.
 ///
 /// 中文说明：
 /// 1. 按 W3C Trace Context 定义，`traceparent` 必须是 `version-trace_id-parent_id-flags`
@@ -321,10 +321,10 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
+        // Read request-id from internal headers, with fallback to deprecated x-pagoda-request-id
         if let Some(header_value) = headers.get("request-id") {
             request_id = Some(header_value.to_string());
-        } else if let Some(header_value) = headers.get("x-dynamo-request-id") {
+        } else if let Some(header_value) = headers.get("x-pagoda-request-id") {
             request_id = Some(header_value.to_string());
         }
 
@@ -339,9 +339,9 @@ impl TraceParent {
     }
 }
 
-/// Create a span for inference request endpoints (completions, chat, embeddings, etc.).
+/// Create a span for inference request portnames (completions, chat, embeddings, etc.).
 ///
-/// Uses `target: "request_span"` which is always allowed through the DYN_LOG filter
+/// Uses `target: "request_span"` which is always allowed through the PGD_LOG filter
 /// (via `request_span=trace` directive in `filters()`). This ensures request context
 /// (request_id, model, trace_id) is always available on log events.
 pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
@@ -385,12 +385,12 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
-/// Create a span for system endpoints (health, metrics, models, engine, loras, etc.).
+/// Create a span for system portnames (health, metrics, models, engine, loras, etc.).
 ///
 /// Same structure as `make_inference_request_span` but uses `target: "system_span"`
-/// which follows normal DYN_LOG filtering (debug level by default). The inference
+/// which follows normal PGD_LOG filtering (debug level by default). The inference
 /// span target `request_span` is always-on via a `request_span=trace` directive;
-/// system spans are not, keeping high-frequency polling endpoints quiet.
+/// system spans are not, keeping high-frequency polling portnames quiet.
 pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
@@ -465,11 +465,11 @@ fn extract_otel_context_from_http_headers(
     }
 }
 
-/// Create a handle_payload span from NATS headers with component context
+/// Create a handle_payload span from NATS headers with servicegroup context
 pub fn make_handle_payload_span(
     headers: &async_nats::HeaderMap,
-    component: &str,
-    endpoint: &str,
+    servicegroup: &str,
+    portname: &str,
     namespace: &str,
     instance_id: u64,
 ) -> Span {
@@ -485,8 +485,8 @@ pub fn make_handle_payload_span(
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
             tracestate = trace_parent.tracestate,
-            component = component,
-            endpoint = endpoint,
+            servicegroup = servicegroup,
+            portname = portname,
             namespace = namespace,
             instance_id = instance_id,
         );
@@ -502,19 +502,19 @@ pub fn make_handle_payload_span(
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
             tracestate = trace_parent.tracestate,
-            component = component,
-            endpoint = endpoint,
+            servicegroup = servicegroup,
+            portname = portname,
             namespace = namespace,
             instance_id = instance_id,
         )
     }
 }
 
-/// Create a handle_payload span from TCP/HashMap headers with component context
+/// Create a handle_payload span from TCP/HashMap headers with servicegroup context
 pub fn make_handle_payload_span_from_tcp_headers(
     headers: &std::collections::HashMap<String, String>,
-    component: &str,
-    endpoint: &str,
+    servicegroup: &str,
+    portname: &str,
     namespace: &str,
     instance_id: u64,
 ) -> Span {
@@ -522,7 +522,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
     let x_request_id = headers.get("x-request-id").cloned();
     let request_id = headers
         .get("request-id")
-        .or_else(|| headers.get("x-dynamo-request-id"))
+        .or_else(|| headers.get("x-pagoda-request-id"))
         .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         .cloned();
     let tracestate = headers.get("tracestate").cloned();
@@ -536,8 +536,8 @@ pub fn make_handle_payload_span_from_tcp_headers(
             x_request_id = x_request_id,
             request_id = request_id,
             tracestate = tracestate,
-            component = component,
-            endpoint = endpoint,
+            servicegroup = servicegroup,
+            portname = portname,
             namespace = namespace,
             instance_id = instance_id,
         );
@@ -553,8 +553,8 @@ pub fn make_handle_payload_span_from_tcp_headers(
             x_request_id = x_request_id,
             request_id = request_id,
             tracestate = tracestate,
-            component = component,
-            endpoint = endpoint,
+            servicegroup = servicegroup,
+            portname = portname,
             namespace = namespace,
             instance_id = instance_id,
         )
@@ -837,10 +837,10 @@ where
                 x_request_id = Some(x_request_id_input.to_string());
             }
 
-            // Extract request_id (with backward compat for x_dynamo_request_id)
+            // Extract request_id (with backward compat for x_pagoda_request_id)
             if let Some(request_id_input) = visitor.fields.get("request_id") {
                 request_id = Some(request_id_input.to_string());
-            } else if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
+            } else if let Some(x_request_id_input) = visitor.fields.get("x_pagoda_request_id") {
                 request_id = Some(x_request_id_input.to_string());
             }
 
@@ -1050,7 +1050,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let service_name = get_service_name();
 
         // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
+        let (tracer_provider, logger_provider_opt, portname_opt) = if otlp_exporter_enabled() {
             // Export enabled: create OTLP exporters with batch processors
             let traces_endpoint =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
@@ -1122,9 +1122,9 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .init();
 
         // Log initialization status after subscriber is ready
-        if let Some(endpoint) = endpoint_opt {
+        if let Some(portname) = portname_opt {
             tracing::info!(
-                endpoint = %endpoint,
+                portname = %portname,
                 service = %service_name,
                 "OpenTelemetry OTLP export enabled (traces and logs)"
             );
@@ -1150,7 +1150,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 fn filters(config: LoggingConfig) -> EnvFilter {
     let mut filter_layer = EnvFilter::builder()
         .with_default_directive(config.log_level.parse().unwrap())
-        .with_env_var(env_logging::DYN_LOG)
+        .with_env_var(env_logging::PGD_LOG)
         .from_env_lossy();
 
     for (module, level) in config.log_filters {
@@ -1170,10 +1170,10 @@ fn filters(config: LoggingConfig) -> EnvFilter {
         filter_layer = filter_layer.add_directive("span_event=trace".parse().unwrap());
     }
 
-    // Always allow infrastructure request spans regardless of DYN_LOG level.
+    // Always allow infrastructure request spans regardless of PGD_LOG level.
     // This ensures request context (request_id, model, trace_id) is always
-    // available on log events, even when DYN_LOG=error or DYN_LOG=warn.
-    // Can be overridden via DYN_LOG=request_span=<level> if needed.
+    // available on log events, even when PGD_LOG=error or PGD_LOG=warn.
+    // Can be overridden via PGD_LOG=request_span=<level> if needed.
     filter_layer = filter_layer.add_directive("request_span=trace".parse().unwrap());
 
     filter_layer
@@ -1203,10 +1203,10 @@ pub fn log_message(level: &str, message: &str, module: &str, file: &str, line: u
 
 fn load_config() -> LoggingConfig {
     let config_path =
-        std::env::var(env_logging::DYN_LOGGING_CONFIG_PATH).unwrap_or_else(|_| "".to_string());
+        std::env::var(env_logging::PGD_LOGGING_CONFIG_PATH).unwrap_or_else(|_| "".to_string());
     let figment = Figment::new()
         .merge(Serialized::defaults(LoggingConfig::default()))
-        .merge(Toml::file("/opt/dynamo/etc/logging.toml"))
+        .merge(Toml::file("/opt/pagoda/etc/logging.toml"))
         .merge(Toml::file(config_path));
 
     figment.extract().unwrap()
@@ -1411,7 +1411,7 @@ where
                     visitor.fields.remove("request_id");
                 }
                 // Remove old field name if present
-                visitor.fields.remove("x_dynamo_request_id");
+                visitor.fields.remove("x_pagoda_request_id");
             } else {
                 tracing::error!(
                     "Distributed Trace Context not found, falling back to internal ids"
@@ -1612,7 +1612,7 @@ pub mod tests {
     async fn test_json_log_capture() -> Result<()> {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
-            [(env_logging::DYN_LOGGING_JSONL, Some("1"))],
+            [(env_logging::PGD_LOGGING_JSONL, Some("1"))],
             (async || {
                 let tmp_file = NamedTempFile::new().unwrap();
                 let file_name = tmp_file.path().to_str().unwrap();
@@ -1852,7 +1852,7 @@ pub mod tests {
     /// - Target-based filtering (spans from allowed targets pass even at lower levels)
     ///
     /// This test runs in a subprocess to ensure logging is initialized with our specific
-    /// filter settings (DYN_LOG=warn,pagoda_runtime::logging::tests=debug), avoiding
+    /// filter settings (PGD_LOG=warn,pagoda_runtime::logging::tests=debug), avoiding
     /// interference from other tests that may have initialized logging first.
     #[test]
     fn test_span_events() {
@@ -1869,9 +1869,9 @@ pub mod tests {
                 "--exact",
                 "--nocapture",
             ])
-            .env("DYN_LOGGING_JSONL", "1")
-            .env("DYN_LOGGING_SPAN_EVENTS", "1")
-            .env("DYN_LOG", "warn,pagoda_runtime::logging::tests=debug")
+            .env("PGD_LOGGING_JSONL", "1")
+            .env("PGD_LOGGING_SPAN_EVENTS", "1")
+            .env("PGD_LOG", "warn,pagoda_runtime::logging::tests=debug")
             .output()
             .expect("Failed to execute subprocess test");
 
@@ -1899,7 +1899,7 @@ pub mod tests {
     #[tokio::test]
     async fn test_span_events_subprocess() -> Result<()> {
         // Skip if not running as subprocess (env vars not set)
-        if std::env::var("DYN_LOGGING_SPAN_EVENTS").is_err() {
+        if std::env::var("PGD_LOGGING_SPAN_EVENTS").is_err() {
             return Ok(());
         }
 

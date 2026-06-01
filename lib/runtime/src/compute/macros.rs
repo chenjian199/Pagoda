@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `compute::macros` —— 三档计算任务执行宏
@@ -6,7 +6,7 @@
 //! ## 设计意图
 //!
 //! Tokio 是为 I/O 密集型设计的，把"耗时几十毫秒以上的纯 CPU 工作"
-//! 直接放在 async 任务里会阻塞 worker，进而拖垮整个事件循环。Dynamo
+//! 直接放在 async 任务里会阻塞 worker，进而拖垮整个事件循环。Pagoda
 //! 在 `compute::pool` 之上提供了一组 **零开销 / 上下文感知** 的执行
 //! 宏，让调用方按预估耗时挑选合适的执行策略：
 //!
@@ -30,7 +30,7 @@
 //!   关闭时这部分代码会被 `#[cfg]` 完全消除——宏体仍要保持"两种 cfg
 //!   下都能编译"。
 //!
-//! ## 设计要点（与上一版的区别）
+//! ## 设计要点
 //!
 //! 1. 把 `compute_medium!` 与 `compute_large!` 中"thread-local 探测 +
 //!    fallback"逻辑统一到 `__compute_run_medium_async!` /
@@ -150,7 +150,7 @@ macro_rules! __compute_run_large_async {
 ///
 /// # Example
 /// ```
-/// # use dynamo_runtime::compute_small;
+/// # use pagoda_runtime::compute_small;
 /// let result = compute_small!(2 + 2);
 /// assert_eq!(result, 4);
 /// ```
@@ -182,7 +182,7 @@ macro_rules! compute_small {
 ///
 /// # Example
 /// ```ignore
-/// # use dynamo_runtime::{compute_medium, compute::ComputePool};
+/// # use pagoda_runtime::{compute_medium, compute::ComputePool};
 /// # async fn example(pool: &ComputePool) {
 /// // 使用 thread-local context
 /// let s: i32 = compute_medium!({ (0..1000).map(|i| i * 2).sum() }).await;
@@ -221,7 +221,7 @@ macro_rules! compute_medium {
 ///
 /// # Example
 /// ```ignore
-/// # use dynamo_runtime::{compute_large, compute::ComputePool};
+/// # use pagoda_runtime::{compute_large, compute::ComputePool};
 /// # async fn example(pool: &ComputePool) {
 /// // thread-local context
 /// let r: u64 = compute_large!({ heavy_work() }).await;

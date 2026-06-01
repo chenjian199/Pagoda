@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::tcp::server` —— 响应平面 TCP 服务器
@@ -9,7 +9,7 @@
 //! pipeline 响应回流的传输层基础。
 //!
 //! ## 外部契约
-//! - 公开类型 / 方法集与 lib-copy 一致；`socket2` 创建 monitor socket 的 keepalive /
+//! - 公开类型 / 方法一致；`socket2` 创建 monitor socket 的 keepalive /
 //!   nodelay / reuseport 参数是契约。
 //! - 帧格式严格遵循 `codec::TwoPartCodec`；不接受额外 magic / version 变体。
 //!
@@ -52,7 +52,7 @@ use super::{
     CallHomeHandshake, ControlMessage, PendingConnections, RegisteredStream, StreamOptions,
     StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec,
 };
-use crate::discovery::EndpointInstanceId;
+use crate::discovery::PortNameInstanceId;
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
@@ -149,21 +149,21 @@ struct RequestedRecvConnection {
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
-    /// subject UUID -> EndpointInstanceId. Full 4-field key isolates services
-    /// that share an endpoint name across namespaces/components.
-    subject_instance: HashMap<String, EndpointInstanceId>,
-    /// EndpointInstanceId -> subject UUIDs, for batch cancellation on removal.
-    instance_subjects: HashMap<EndpointInstanceId, HashSet<String>>,
+    /// subject UUID -> PortNameInstanceId. Full 4-field key isolates services
+    /// that share an portname name across namespaces/servicegroups.
+    subject_instance: HashMap<String, PortNameInstanceId>,
+    /// PortNameInstanceId -> subject UUIDs, for batch cancellation on removal.
+    instance_subjects: HashMap<PortNameInstanceId, HashSet<String>>,
     /// Tombstones (instance -> insertion time) close the
     /// `cancel_instance_streams` vs `associate_instance` race; entries expire
     /// after [`TOMBSTONE_TTL`].
-    removed_instances: HashMap<EndpointInstanceId, Instant>,
+    removed_instances: HashMap<PortNameInstanceId, Instant>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
 /// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
 /// `associate_instance` / `cancel_instance_streams` to bound the set size.
-fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: Instant) {
+fn prune_tombstones(tombstones: &mut HashMap<PortNameInstanceId, Instant>, now: Instant) {
     tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
 }
 
@@ -244,7 +244,7 @@ impl TcpStreamServer {
     /// Returns `false` if the instance is already tombstoned, in which case
     /// the subject is cancelled immediately and the caller should skip
     /// `send_request` and fail with a migratable `Disconnected` error.
-    pub async fn associate_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+    pub async fn associate_instance(&self, subject: &str, id: &PortNameInstanceId) -> bool {
         let mut state = self.state.lock().await;
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
@@ -253,8 +253,8 @@ impl TcpStreamServer {
             tracing::warn!(
                 subject,
                 namespace = %id.namespace,
-                component = %id.component,
-                endpoint = %id.endpoint,
+                servicegroup = %id.servicegroup,
+                portname = %id.portname,
                 instance_id = id.instance_id,
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
@@ -290,7 +290,7 @@ impl TcpStreamServer {
     /// Cancel all pending response streams for an instance and tombstone it
     /// so any racing `associate_instance()` for the same id cancels too.
     /// Returns the number of streams cancelled.
-    pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
+    pub async fn cancel_instance_streams(&self, id: &PortNameInstanceId) -> usize {
         let mut state = self.state.lock().await;
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
@@ -309,7 +309,7 @@ impl TcpStreamServer {
 
     /// Drop the tombstone for an instance that has reappeared in discovery,
     /// so future subjects for that identity are tracked normally.
-    pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
+    pub async fn clear_instance_tombstone(&self, id: &PortNameInstanceId) {
         let mut state = self.state.lock().await;
         state.removed_instances.remove(id);
     }
@@ -860,9 +860,9 @@ mod tests {
     //! | `test_registered_stream_into_parts_disarms_cleanup` | RegisteredStream: into_parts 解除 cleanup |
     //! | `test_associate_after_cancel_is_immediately_cancelled` | tombstone: cancel 后 associate 立即被 cancel |
     //! | `test_clear_tombstone_allows_new_associations` | tombstone: 清除后允许新 association |
-    //! | `test_cancel_does_not_affect_sibling_endpoint` | 隔离: 取消不影响同组下别的 endpoint |
-    //! | `test_tombstone_is_endpoint_scoped` | tombstone: 以 endpoint 身份作为作用域 |
-    //! | `test_cancel_does_not_affect_different_component` | 隔离: 跨 component 不受影响 |
+    //! | `test_cancel_does_not_affect_sibling_portname` | 隔离: 取消不影响同组下别的 portname |
+    //! | `test_tombstone_is_portname_scoped` | tombstone: 以 portname 身份作为作用域 |
+    //! | `test_cancel_does_not_affect_different_servicegroup` | 隔离: 跨 servicegroup 不受影响 |
     //! | `test_tombstone_expires_after_ttl` | tombstone: TTL 过期后失效 |
     //! | `test_tombstone_within_ttl_blocks_associate` | tombstone: TTL 内继续拦截 associate |
     //! | `test_tombstone_lazy_prune_on_cancel` | tombstone: cancel 路径上懒惰剖除 |
@@ -1031,14 +1031,14 @@ mod tests {
     /// Convenience constructor so tests don't repeat the struct literal.
     fn make_eid(
         namespace: &str,
-        component: &str,
-        endpoint: &str,
+        servicegroup: &str,
+        portname: &str,
         instance_id: u64,
-    ) -> EndpointInstanceId {
-        EndpointInstanceId {
+    ) -> PortNameInstanceId {
+        PortNameInstanceId {
             namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: endpoint.to_string(),
+            servicegroup: servicegroup.to_string(),
+            portname: portname.to_string(),
             instance_id,
         }
     }
@@ -1247,7 +1247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_does_not_affect_sibling_endpoint() {
+    async fn test_cancel_does_not_affect_sibling_portname() {
         // Regression: cancelling "generate" must not cancel "prefill" subjects
         // that share the same instance_id (same backend runtime).
         let server = test_server().await;
@@ -1261,7 +1261,7 @@ mod tests {
         assert!(server.associate_instance(&gen_subj, &gen_id).await);
         assert!(server.associate_instance(&pre_subj, &pre_id).await);
 
-        // Cancel only the "generate" endpoint's subjects.
+        // Cancel only the "generate" portname's subjects.
         let cancelled = server.cancel_instance_streams(&gen_id).await;
         assert_eq!(
             cancelled, 1,
@@ -1276,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tombstone_is_endpoint_scoped() {
+    async fn test_tombstone_is_portname_scoped() {
         // Tombstoning "generate" must not prevent new associations on "prefill"
         // for the same instance_id.
         let server = test_server().await;
@@ -1305,16 +1305,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_does_not_affect_different_component() {
-        // Regression: two services with different (namespace, component) but the
-        // same endpoint name and the same pod-backed instance_id must not interfere,
+    async fn test_cancel_does_not_affect_different_servicegroup() {
+        // Regression: two services with different (namespace, servicegroup) but the
+        // same portname name and the same pod-backed instance_id must not interfere,
         // even though they share a single TcpStreamServer runtime.
         let server = test_server().await;
 
         let (subj_a, prov_a) = register_and_get_subject(&server).await;
         let (subj_b, prov_b) = register_and_get_subject(&server).await;
 
-        // Same endpoint name + instance_id, different namespace/component.
+        // Same portname name + instance_id, different namespace/servicegroup.
         let id_a = make_eid("ns-a", "comp-a", "generate", 42);
         let id_b = make_eid("ns-b", "comp-b", "generate", 42);
 
@@ -1418,9 +1418,9 @@ mod tests {
     #[tokio::test]
     async fn test_clear_tombstone_only_affects_named_identity() {
         // Documents the monotonic-lease invariant: `clear_instance_tombstone`
-        // for one EndpointInstanceId must not touch a sibling entry. With etcd
+        // for one PortNameInstanceId must not touch a sibling entry. With etcd
         // lease IDs this defensive code rarely fires (new lease = new
-        // EndpointInstanceId), but the per-key scope must hold.
+        // PortNameInstanceId), but the per-key scope must hold.
         let server = test_server().await;
 
         let id_a = make_eid("ns", "comp", "generate", 1);
@@ -1453,11 +1453,11 @@ mod tests {
         assert!(!server.associate_instance(&subj_a, &id_a).await);
         assert!(prov_a.await.is_err());
 
-        // Service B with same endpoint name + instance_id must be accepted.
+        // Service B with same portname name + instance_id must be accepted.
         let (subj_b, _prov_b) = register_and_get_subject(&server).await;
         assert!(
             server.associate_instance(&subj_b, &id_b).await,
-            "Different namespace/component must not be tombstoned"
+            "Different namespace/servicegroup must not be tombstoned"
         );
         assert_eq!(server.cancel_instance_streams(&id_b).await, 1);
     }

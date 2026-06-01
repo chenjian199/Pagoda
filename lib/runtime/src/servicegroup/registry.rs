@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # `component::registry` —— `Registry` 的构造器与默认值
+//! # `servicegroup::registry` —— `Registry` 的构造器与默认值
 //!
 //! ## 设计意图
 //!
-//! 上层 [`Registry`] 是 component 模块对外公开的"服务注册中心句柄"，
+//! 上层 [`Registry`] 是 servicegroup 模块对外公开的"服务注册中心句柄"，
 //! 其内部用 `Arc<tokio::sync::Mutex<RegistryInner>>` 共享一份服务表。
 //! 本文件**只**提供这一类型的构造路径，把"如何初始化内部状态"集中
 //! 在一处，避免上游代码在多处重复写 `Arc::new(Mutex::new(...))`。
@@ -29,7 +29,7 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::component::{Registry, RegistryInner};
+use crate::servicegroup::{Registry, RegistryInner};
 
 // ============================================================================
 // 私有 helper

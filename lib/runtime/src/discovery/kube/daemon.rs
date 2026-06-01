@@ -1,17 +1,17 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # K8s 原生发现聚合 daemon
 //!
 //! ## 设计意图
 //!
-//! 旧版 daemon 把单个 Pod 的全部 endpoint / model / event channel 信息塞在
-//! 一个 `DynamoWorkerMetadata` CR 里聚合；新版改为**四路独立 reflector**：
+//! 旧版 daemon 把单个 Pod 的全部 portname / model / event channel 信息塞在
+//! 一个 `PagodaWorkerMetadata` CR 里聚合；新版改为**四路独立 reflector**：
 //!
 //! | reflector       | 监听对象                                | 用途                  |
 //! |-----------------|----------------------------------------|----------------------|
-//! | `eps_store`     | `EndpointSlice` (managed-by=dynamo)     | 就绪门控 + Endpoint 元数据 |
-//! | `svc_store`     | `Service` (registry-mode=native-service)| Endpoint 补全 namespace/component |
+//! | `eps_store`     | `EndpointSlice` (managed-by=pagoda)     | 就绪门控 + PortName 元数据 |
+//! | `svc_store`     | `Service` (registry-mode=native-service)| PortName 补全 namespace/servicegroup |
 //! | `cm_store`      | `ConfigMap` (kind=model)                | Model 元数据          |
 //! | `lease_store`   | `Lease` (kind=event-channel)            | EventChannel 元数据   |
 //!
@@ -67,7 +67,7 @@ use super::service_registry::{
     MANAGED_BY_LABEL, MANAGED_BY_VALUE, REGISTRY_MODE_LABEL, REGISTRY_MODE_VALUE,
     SERVICE_NAME_LABEL,
 };
-use super::utils::{extract_endpoint_info, hash_pod_name};
+use super::utils::{extract_portname_info, hash_pod_name};
 
 /// 多路更新事件汇聚后再批处理的去抖窗口。
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
@@ -223,8 +223,8 @@ where
 /// ## 处理过程
 ///
 /// 1. 列举所有 ready 的 `EndpointSlice`，得到 `(instance_id, pod_name)` 元组集；
-/// 2. 把所有 Service 按 `metadata.name` 索引为 map，供后续 Endpoint 恢复；
-/// 3. 用 [`endpoint_instance_from_service_and_slice`] 复原每个 Endpoint 实例；
+/// 2. 把所有 Service 按 `metadata.name` 索引为 map，供后续 PortName 恢复；
+/// 3. 用 [`endpoint_instance_from_service_and_slice`] 复原每个 PortName 实例；
 /// 4. 用 [`model_instance_from_config_map`] / [`event_instance_from_lease`]
 ///    把每个 ConfigMap / Lease 复原为对应的 DiscoveryInstance；
 /// 5. 用 `pod_name → hash_pod_name → instance_id` 将所有实例分组到
@@ -244,7 +244,7 @@ fn aggregate(
     // 第 1 步：ready 条目（gate）
     let mut ready_pods: HashMap<u64, String> = HashMap::new();
     for slice_arc in eps_store.state().iter() {
-        for (id, pod) in extract_endpoint_info(slice_arc.as_ref()) {
+        for (id, pod) in extract_portname_info(slice_arc.as_ref()) {
             ready_pods.insert(id, pod);
         }
     }
@@ -256,7 +256,7 @@ fn aggregate(
         .filter_map(|s| s.metadata.name.clone().map(|n| (n, s.clone())))
         .collect();
 
-    // 第 3 步：恢复 Endpoint
+    // 第 3 步：恢复 PortName
     let mut per_pod: HashMap<u64, DiscoveryMetadata> = HashMap::new();
     for slice_arc in eps_store.state().iter() {
         let slice = slice_arc.as_ref();
@@ -274,7 +274,7 @@ fn aggregate(
             Ok(Some(inst)) => inst,
             Ok(None) => continue,
             Err(e) => {
-                tracing::debug!(error = %e, "failed to recover Endpoint from slice/service");
+                tracing::debug!(error = %e, "failed to recover PortName from slice/service");
                 continue;
             }
         };
@@ -359,7 +359,7 @@ fn endpoint_slice_target_pod(slice: &EndpointSlice) -> Option<String> {
 /// 抽离为独立函数避免在 `aggregate` 内重复 match 三类型的样板代码。
 fn insert_into_metadata(meta: &mut DiscoveryMetadata, instance: DiscoveryInstance) {
     let res = match &instance {
-        DiscoveryInstance::Endpoint(_) => meta.register_endpoint(instance),
+        DiscoveryInstance::PortName(_) => meta.register_portname(instance),
         DiscoveryInstance::Model { .. } => meta.register_model_card(instance),
         DiscoveryInstance::EventChannel { .. } => meta.register_event_channel(instance),
     };
@@ -398,20 +398,20 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 向空 metadata 注册一个 Endpoint，断言 generation 相对空状态发生变化。
+    /// 向空 metadata 注册一个 PortName，断言 generation 相对空状态发生变化。
     /// ## 意义
     /// 验证 generation 能反映内容差异，确保 `has_changes_from` 触发正确。
     #[test]
     fn content_generation_changes_on_register() {
-        use crate::component::{Instance, TransportType};
+        use crate::servicegroup::{Instance, TransportType};
 
         let empty_gen = content_generation(&DiscoveryMetadata::new());
         let mut m = DiscoveryMetadata::new();
-        m.register_endpoint(DiscoveryInstance::Endpoint(Instance {
+        m.register_portname(DiscoveryInstance::PortName(Instance {
             instance_id: 1,
             namespace: "ns".into(),
-            component: "c".into(),
-            endpoint: "ep".into(),
+            servicegroup: "c".into(),
+            portname: "ep".into(),
             transport: TransportType::Nats("nats://x".into()),
             device_type: None,
         }))
@@ -468,23 +468,23 @@ mod tests {
 
     /// ## 测试过程
     /// 把同一个 instance 两次插入 `DiscoveryMetadata`（通过 helper），断言总
-    /// endpoints 计数保持 1。
+    /// portnames 计数保持 1。
     /// ## 意义
     /// 验证 `insert_into_metadata` 对同 key 是覆盖语义，避免快照膨胀。
     #[test]
     fn insert_into_metadata_is_idempotent() {
-        use crate::component::{Instance, TransportType};
-        let inst = DiscoveryInstance::Endpoint(Instance {
+        use crate::servicegroup::{Instance, TransportType};
+        let inst = DiscoveryInstance::PortName(Instance {
             instance_id: 1,
             namespace: "ns".into(),
-            component: "c".into(),
-            endpoint: "ep".into(),
+            servicegroup: "c".into(),
+            portname: "ep".into(),
             transport: TransportType::Nats("nats://x".into()),
             device_type: None,
         });
         let mut m = DiscoveryMetadata::new();
         insert_into_metadata(&mut m, inst.clone());
         insert_into_metadata(&mut m, inst);
-        assert_eq!(m.get_all_endpoints().len(), 1);
+        assert_eq!(m.get_all_portnames().len(), 1);
     }
 }

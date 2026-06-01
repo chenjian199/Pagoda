@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `compute::thread_local` —— 计算上下文的线程局部存储
@@ -260,7 +260,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留） ============================
+    // === lib 标准契约测试 ============================
     // ------------------------------------------------------------------
 
     #[test]

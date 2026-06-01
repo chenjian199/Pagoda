@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Worker 元数据容器与快照
 //!
 //! ## 设计意图
 //!
-//! 每个 worker 把自己注册的 endpoint / model card / event channel 整体维护在
+//! 每个 worker 把自己注册的 portname / model card / event channel 整体维护在
 //! 一个 [`DiscoveryMetadata`] 中，作为可序列化的“自描述”单元被发布到 K8s
 //! ConfigMap / Service annotation / KV store。daemon 把全集群的多份元数据
 //! 收敛成一个 [`MetadataSnapshot`]，供上层在内存中按 [`DiscoveryQuery`] 过滤。
@@ -64,9 +64,9 @@ where
 /// - 跨进程序列化后仍可正确还原原始实例。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryMetadata {
-    /// 已注册的 endpoint 实例（key = [`EndpointInstanceId::to_path`]）
+    /// 已注册的 portname 实例（key = [`PortNameInstanceId::to_path`]）
     #[serde(default, deserialize_with = "deserialize_null_default")]
-    endpoints: HashMap<String, DiscoveryInstance>,
+    portnames: HashMap<String, DiscoveryInstance>,
     /// 已注册的 model card 实例（key = [`ModelCardInstanceId::to_path`]）
     #[serde(default, deserialize_with = "deserialize_null_default")]
     model_cards: HashMap<String, DiscoveryInstance>,
@@ -85,20 +85,20 @@ impl DiscoveryMetadata {
     /// 构造一个空 metadata。
     pub fn new() -> Self {
         Self {
-            endpoints: HashMap::new(),
+            portnames: HashMap::new(),
             model_cards: HashMap::new(),
             event_channels: HashMap::new(),
         }
     }
 
-    /// 注册一个 Endpoint 实例。类型不符时返回错误。
-    pub fn register_endpoint(&mut self, instance: DiscoveryInstance) -> Result<()> {
+    /// 注册一个 PortName 实例。类型不符时返回错误。
+    pub fn register_portname(&mut self, instance: DiscoveryInstance) -> Result<()> {
         insert_typed(
-            &mut self.endpoints,
+            &mut self.portnames,
             instance,
-            DiscoveryInstanceId::extract_endpoint_id,
+            DiscoveryInstanceId::extract_portname_id,
             |k| k.to_path(),
-            "endpoint",
+            "portname",
         )
     }
 
@@ -124,14 +124,14 @@ impl DiscoveryMetadata {
         )
     }
 
-    /// 注销 Endpoint 实例。幂等（不存在时也返回 Ok）。
-    pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+    /// 注销 PortName 实例。幂等（不存在时也返回 Ok）。
+    pub fn unregister_portname(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         remove_typed(
-            &mut self.endpoints,
+            &mut self.portnames,
             instance,
-            DiscoveryInstanceId::extract_endpoint_id,
+            DiscoveryInstanceId::extract_portname_id,
             |k| k.to_path(),
-            "endpoint",
+            "portname",
         )
     }
 
@@ -157,8 +157,8 @@ impl DiscoveryMetadata {
         )
     }
 
-    pub fn get_all_endpoints(&self) -> Vec<DiscoveryInstance> {
-        self.endpoints.values().cloned().collect()
+    pub fn get_all_portnames(&self) -> Vec<DiscoveryInstance> {
+        self.portnames.values().cloned().collect()
     }
     pub fn get_all_model_cards(&self) -> Vec<DiscoveryInstance> {
         self.model_cards.values().cloned().collect()
@@ -167,9 +167,9 @@ impl DiscoveryMetadata {
         self.event_channels.values().cloned().collect()
     }
 
-    /// 返回三类集合的并集（按 endpoints → model_cards → event_channels 顺序）。
+    /// 返回三类集合的并集（按 portnames → model_cards → event_channels 顺序）。
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
-        self.endpoints
+        self.portnames
             .values()
             .chain(self.model_cards.values())
             .chain(self.event_channels.values())
@@ -183,15 +183,15 @@ impl DiscoveryMetadata {
     /// 2. 复用 [`filter_instances`] 做细粒度字段比较。
     pub fn filter(&self, query: &DiscoveryQuery) -> Vec<DiscoveryInstance> {
         let candidates = match query {
-            DiscoveryQuery::AllEndpoints
-            | DiscoveryQuery::NamespacedEndpoints { .. }
-            | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. } => self.get_all_endpoints(),
+            DiscoveryQuery::AllPortNames
+            | DiscoveryQuery::NamespacedPortNames { .. }
+            | DiscoveryQuery::ServiceGroupPortNames { .. }
+            | DiscoveryQuery::PortName { .. } => self.get_all_portnames(),
 
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
-            | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. } => self.get_all_model_cards(),
+            | DiscoveryQuery::ServiceGroupModels { .. }
+            | DiscoveryQuery::PortNameModels { .. } => self.get_all_model_cards(),
 
             DiscoveryQuery::EventChannels(_) => self.get_all_event_channels(),
         };
@@ -256,19 +256,19 @@ fn filter_instances(
 /// 单实例与查询的字段级匹配判定。
 fn instance_matches_query(inst: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
     match (inst, query) {
-        (_, DiscoveryQuery::AllEndpoints) | (_, DiscoveryQuery::AllModels) => true,
+        (_, DiscoveryQuery::AllPortNames) | (_, DiscoveryQuery::AllModels) => true,
 
-        (DiscoveryInstance::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
+        (DiscoveryInstance::PortName(i), DiscoveryQuery::NamespacedPortNames { namespace }) => {
             &i.namespace == namespace
         }
         (
-            DiscoveryInstance::Endpoint(i),
-            DiscoveryQuery::ComponentEndpoints { namespace, component },
-        ) => &i.namespace == namespace && &i.component == component,
+            DiscoveryInstance::PortName(i),
+            DiscoveryQuery::ServiceGroupPortNames { namespace, servicegroup },
+        ) => &i.namespace == namespace && &i.servicegroup == servicegroup,
         (
-            DiscoveryInstance::Endpoint(i),
-            DiscoveryQuery::Endpoint { namespace, component, endpoint },
-        ) => &i.namespace == namespace && &i.component == component && &i.endpoint == endpoint,
+            DiscoveryInstance::PortName(i),
+            DiscoveryQuery::PortName { namespace, servicegroup, portname },
+        ) => &i.namespace == namespace && &i.servicegroup == servicegroup && &i.portname == portname,
 
         (
             DiscoveryInstance::Model { namespace: ns, .. },
@@ -277,36 +277,36 @@ fn instance_matches_query(inst: &DiscoveryInstance, query: &DiscoveryQuery) -> b
         (
             DiscoveryInstance::Model {
                 namespace: ns,
-                component: comp,
+                servicegroup: comp,
                 ..
             },
-            DiscoveryQuery::ComponentModels { namespace, component },
-        ) => ns == namespace && comp == component,
+            DiscoveryQuery::ServiceGroupModels { namespace, servicegroup },
+        ) => ns == namespace && comp == servicegroup,
         (
             DiscoveryInstance::Model {
                 namespace: ns,
-                component: comp,
-                endpoint: ep,
+                servicegroup: comp,
+                portname: ep,
                 ..
             },
-            DiscoveryQuery::EndpointModels {
+            DiscoveryQuery::PortNameModels {
                 namespace,
-                component,
-                endpoint,
+                servicegroup,
+                portname,
             },
-        ) => ns == namespace && comp == component && ep == endpoint,
+        ) => ns == namespace && comp == servicegroup && ep == portname,
 
         (
             DiscoveryInstance::EventChannel {
                 namespace: ns,
-                component: comp,
+                servicegroup: comp,
                 topic: t,
                 ..
             },
             DiscoveryQuery::EventChannels(q),
         ) => {
             q.namespace.as_ref().is_none_or(|x| x == ns)
-                && q.component.as_ref().is_none_or(|x| x == comp)
+                && q.servicegroup.as_ref().is_none_or(|x| x == comp)
                 && q.topic.as_ref().is_none_or(|x| x == t)
         }
 
@@ -406,14 +406,14 @@ fn classify_generation_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Instance, TransportType};
+    use crate::servicegroup::{Instance, TransportType};
     use crate::discovery::{EventChannelQuery, EventTransport};
 
     fn ep(ns: &str, c: &str, e: &str, id: u64) -> DiscoveryInstance {
-        DiscoveryInstance::Endpoint(Instance {
+        DiscoveryInstance::PortName(Instance {
             namespace: ns.into(),
-            component: c.into(),
-            endpoint: e.into(),
+            servicegroup: c.into(),
+            portname: e.into(),
             instance_id: id,
             transport: TransportType::Nats("nats://x".into()),
             device_type: None,
@@ -423,8 +423,8 @@ mod tests {
     fn model(ns: &str, c: &str, e: &str, id: u64) -> DiscoveryInstance {
         DiscoveryInstance::Model {
             namespace: ns.into(),
-            component: c.into(),
-            endpoint: e.into(),
+            servicegroup: c.into(),
+            portname: e.into(),
             instance_id: id,
             card_json: serde_json::json!({ "display_name": "m" }),
             model_suffix: None,
@@ -434,7 +434,7 @@ mod tests {
     fn evc(ns: &str, c: &str, t: &str, id: u64) -> DiscoveryInstance {
         DiscoveryInstance::EventChannel {
             namespace: ns.into(),
-            component: c.into(),
+            servicegroup: c.into(),
             topic: t.into(),
             instance_id: id,
             transport: EventTransport::zmq("tcp://x:1"),
@@ -442,16 +442,16 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 注册 Endpoint 后序列化再反序列化，三个桶大小应保持 1/0/0。
+    /// 注册 PortName 后序列化再反序列化，三个桶大小应保持 1/0/0。
     /// ## 意义
     /// 验证 serde 往返不丢字段、不串桶。
     #[test]
     fn metadata_serde_roundtrip() {
         let mut m = DiscoveryMetadata::new();
-        m.register_endpoint(ep("t", "c", "e", 1)).unwrap();
+        m.register_portname(ep("t", "c", "e", 1)).unwrap();
         let json = serde_json::to_string(&m).unwrap();
         let back: DiscoveryMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.endpoints.len(), 1);
+        assert_eq!(back.portnames.len(), 1);
         assert_eq!(back.model_cards.len(), 0);
         assert_eq!(back.event_channels.len(), 0);
     }
@@ -462,19 +462,19 @@ mod tests {
     /// 回归保护 [`deserialize_null_default`] —— 没有它整条解析会失败。
     #[test]
     fn metadata_tolerates_null_buckets() {
-        let json = r#"{ "endpoints": null, "model_cards": null, "event_channels": null }"#;
+        let json = r#"{ "portnames": null, "model_cards": null, "event_channels": null }"#;
         let m: DiscoveryMetadata = serde_json::from_str(json).unwrap();
         assert!(m.get_all().is_empty());
     }
 
     /// ## 测试过程
-    /// 把 Model 实例传给 register_endpoint。
+    /// 把 Model 实例传给 register_portname。
     /// ## 意义
     /// 类型分桶必须严格，否则查询结果会跨桶污染。
     #[test]
     fn register_rejects_wrong_type() {
         let mut m = DiscoveryMetadata::new();
-        assert!(m.register_endpoint(model("n", "c", "e", 1)).is_err());
+        assert!(m.register_portname(model("n", "c", "e", 1)).is_err());
     }
 
     /// ## 测试过程
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn unregister_is_idempotent() {
         let mut m = DiscoveryMetadata::new();
-        m.unregister_endpoint(&ep("n", "c", "e", 9)).unwrap();
+        m.unregister_portname(&ep("n", "c", "e", 9)).unwrap();
     }
 
     /// ## 测试过程
@@ -494,22 +494,22 @@ mod tests {
     #[test]
     fn duplicate_register_overwrites() {
         let mut m = DiscoveryMetadata::new();
-        m.register_endpoint(ep("n", "c", "e", 1)).unwrap();
-        m.register_endpoint(ep("n", "c", "e", 1)).unwrap();
-        assert_eq!(m.get_all_endpoints().len(), 1);
+        m.register_portname(ep("n", "c", "e", 1)).unwrap();
+        m.register_portname(ep("n", "c", "e", 1)).unwrap();
+        assert_eq!(m.get_all_portnames().len(), 1);
     }
 
     /// ## 测试过程
-    /// 注册 endpoint/model/event_channel 各 1 个，分别用对应 All 查询。
+    /// 注册 portname/model/event_channel 各 1 个，分别用对应 All 查询。
     /// ## 意义
     /// 验证 filter 的桶分派正确，杜绝跨类型穿透。
     #[test]
     fn filter_dispatches_to_correct_bucket() {
         let mut m = DiscoveryMetadata::new();
-        m.register_endpoint(ep("n", "c", "e", 1)).unwrap();
+        m.register_portname(ep("n", "c", "e", 1)).unwrap();
         m.register_model_card(model("n", "c", "e", 2)).unwrap();
         m.register_event_channel(evc("n", "c", "kv", 3)).unwrap();
-        assert_eq!(m.filter(&DiscoveryQuery::AllEndpoints).len(), 1);
+        assert_eq!(m.filter(&DiscoveryQuery::AllPortNames).len(), 1);
         assert_eq!(m.filter(&DiscoveryQuery::AllModels).len(), 1);
         assert_eq!(
             m.filter(&DiscoveryQuery::EventChannels(EventChannelQuery::all())).len(),
@@ -549,21 +549,21 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 构造 snapshot 含 2 个 worker，各注册 1 个 endpoint；调用 filter。
+    /// 构造 snapshot 含 2 个 worker，各注册 1 个 portname；调用 filter。
     /// ## 意义
     /// 验证 MetadataSnapshot::filter 跨 worker 聚合正确。
     #[test]
     fn snapshot_filter_aggregates_workers() {
         let mut a = DiscoveryMetadata::new();
-        a.register_endpoint(ep("n", "c", "e1", 1)).unwrap();
+        a.register_portname(ep("n", "c", "e1", 1)).unwrap();
         let mut b = DiscoveryMetadata::new();
-        b.register_endpoint(ep("n", "c", "e2", 2)).unwrap();
+        b.register_portname(ep("n", "c", "e2", 2)).unwrap();
         let snap = MetadataSnapshot {
             instances: HashMap::from([(1u64, Arc::new(a)), (2, Arc::new(b))]),
             generations: HashMap::from([(1u64, 1i64), (2, 1)]),
             sequence: 1,
             timestamp: std::time::Instant::now(),
         };
-        assert_eq!(snap.filter(&DiscoveryQuery::AllEndpoints).len(), 2);
+        assert_eq!(snap.filter(&DiscoveryQuery::AllPortNames).len(), 2);
     }
 }

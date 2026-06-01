@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::manager` —— 出站连接管理与多传输协调器
@@ -9,7 +9,7 @@
 //! 并把响应回流挂载到本进程的 response service 上。
 //!
 //! ## 外部契约
-//! - 公开类型 / 方法集合与 lib-copy 严格一致；构造器 `new` 与 transport selection
+//! - 公开类型 / 方法集合严格一致；构造器 `new` 与 transport selection
 //!   逻辑是契约面，不可重写为 enum match。
 //! - `Drop` 实现里 `cancellation_token.cancel()` + log 是契约：上层依赖该日志做
 //!   优雅退出时序判断。
@@ -51,7 +51,7 @@ static ACTUAL_HTTP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 /// Global storage for the shared TCP server instance.
 ///
 /// When multiple workers run in the same process, they must share a single TCP server
-/// to ensure all endpoints are registered on the same server. Without this, each worker
+/// to ensure all portnames are registered on the same server. Without this, each worker
 /// would create its own server on a different port, but all would publish the same port
 /// (from ACTUAL_TCP_RPC_PORT) to discovery, causing "No handler found" errors.
 ///
@@ -62,7 +62,7 @@ static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
 /// Global storage for the shared HTTP server instance.
 ///
 /// Same rationale as GLOBAL_TCP_SERVER: multiple workers in the same process must share
-/// a single HTTP server so that all endpoints are registered on the same port.
+/// a single HTTP server so that all portnames are registered on the same port.
 static GLOBAL_HTTP_SERVER: tokio::sync::OnceCell<
     Arc<super::ingress::http_endpoint::SharedHttpServer>,
 > = tokio::sync::OnceCell::const_new();
@@ -70,7 +70,7 @@ static GLOBAL_HTTP_SERVER: tokio::sync::OnceCell<
 /// Process-wide cancellation token for the global TCP server.
 ///
 /// This token is independent of any individual runtime's cancellation token so that
-/// component Drop impls (e.g. KvRouter::drop → cancel) don't kill the shared accept
+/// servicegroup Drop impls (e.g. KvRouter::drop → cancel) don't kill the shared accept
 /// loop while the OnceCell still hands out the (now-dead) server to later runtimes.
 static GLOBAL_TCP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
     std::sync::LazyLock::new(CancellationToken::new);
@@ -158,27 +158,27 @@ impl NetworkConfig {
     fn from_env(nats_client: Option<async_nats::Client>) -> Self {
         Self {
             // HTTP server configuration
-            // If DYN_HTTP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            http_host: std::env::var("DYN_HTTP_RPC_HOST")
+            // If PGD_HTTP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
+            http_host: std::env::var("PGD_HTTP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
-            http_port: std::env::var("DYN_HTTP_RPC_PORT")
+            http_port: std::env::var("PGD_HTTP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),
-            http_rpc_root: std::env::var("DYN_HTTP_RPC_ROOT_PATH")
+            http_rpc_root: std::env::var("PGD_HTTP_RPC_ROOT_PATH")
                 .unwrap_or_else(|_| "/v1/rpc".to_string()),
 
             // TCP server configuration
-            // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            tcp_host: std::env::var("DYN_TCP_RPC_HOST")
+            // If PGD_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
+            tcp_host: std::env::var("PGD_TCP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
-            tcp_port: std::env::var("DYN_TCP_RPC_PORT")
+            tcp_port: std::env::var("PGD_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),
 
-            // HTTP client configuration (reads DYN_HTTP2_* env vars)
+            // HTTP client configuration (reads PGD_HTTP2_* env vars)
             http_client_config: super::egress::http_router::Http2Config::from_env(),
 
-            // TCP client configuration (reads DYN_TCP_* env vars)
+            // TCP client configuration (reads PGD_TCP_* env vars)
             tcp_client_config: super::egress::tcp_client::TcpRequestConfig::from_env(),
 
             // NATS (external)
@@ -207,11 +207,11 @@ impl NetworkConfig {
 ///
 /// ```ignore
 /// // Create manager (typically done once in DistributedRuntime)
-/// let manager = NetworkManager::new(cancel_token, nats_client, component_registry, request_plane_mode);
+/// let manager = NetworkManager::new(cancel_token, nats_client, servicegroup_registry, request_plane_mode);
 ///
 /// // Get server (lazy init, cached)
 /// let server = manager.server().await?;
-/// server.register_endpoint(...).await?;
+/// server.register_portname(...).await?;
 ///
 /// // Create client (not cached, lightweight)
 /// let client = manager.create_client()?;
@@ -223,7 +223,7 @@ pub struct NetworkManager {
     config: NetworkConfig,
     server: Arc<OnceCell<Arc<dyn RequestPlaneServer>>>,
     cancellation_token: CancellationToken,
-    component_registry: crate::component::Registry,
+    servicegroup_registry: crate::servicegroup::Registry,
 }
 
 impl NetworkManager {
@@ -236,7 +236,7 @@ impl NetworkManager {
     ///
     /// * `cancellation_token` - Token for graceful shutdown of servers
     /// * `nats_client` - Optional NATS client (required only for NATS mode)
-    /// * `component_registry` - Component registry to get NATS service groups from
+    /// * `servicegroup_registry` - ServiceGroup registry to get NATS service groups from
     ///
     /// # Returns
     ///
@@ -244,7 +244,7 @@ impl NetworkManager {
     pub fn new(
         cancellation_token: CancellationToken,
         nats_client: Option<async_nats::Client>,
-        component_registry: crate::component::Registry,
+        servicegroup_registry: crate::servicegroup::Registry,
         mode: RequestPlaneMode,
     ) -> Self {
         let config = NetworkConfig::from_env(nats_client);
@@ -288,7 +288,7 @@ impl NetworkManager {
             config,
             server: Arc::new(OnceCell::new()),
             cancellation_token,
-            component_registry,
+            servicegroup_registry,
         }
     }
 
@@ -361,7 +361,7 @@ impl NetworkManager {
         use super::ingress::http_endpoint::SharedHttpServer;
 
         // Use the global HTTP server to ensure all workers in the same process share
-        // a single server. This is critical for correct endpoint routing.
+        // a single server. This is critical for correct portname routing.
         let server = GLOBAL_HTTP_SERVER
             .get_or_try_init(|| async {
                 // Use configured port if specified, otherwise use port 0 (OS assigns free port)
@@ -372,7 +372,7 @@ impl NetworkManager {
 
                 tracing::info!(
                     bind_addr = %bind_addr,
-                    port_source = if self.config.http_port.is_some() { "DYN_HTTP_RPC_PORT" } else { "OS-assigned" },
+                    port_source = if self.config.http_port.is_some() { "PGD_HTTP_RPC_PORT" } else { "OS-assigned" },
                     rpc_root = %self.config.http_rpc_root,
                     "Creating HTTP request plane server"
                 );
@@ -400,7 +400,7 @@ impl NetworkManager {
 
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         // Use the global TCP server to ensure all workers in the same process share
-        // a single server. This is critical for correct endpoint routing.
+        // a single server. This is critical for correct portname routing.
         let server = GLOBAL_TCP_SERVER
             .get_or_try_init(|| async {
                 // Use configured port if specified, otherwise use port 0 (OS assigns free port)
@@ -411,7 +411,7 @@ impl NetworkManager {
 
                 tracing::info!(
                     bind_addr = %bind_addr,
-                    port_source = if self.config.tcp_port.is_some() { "DYN_TCP_RPC_PORT" } else { "OS-assigned" },
+                    port_source = if self.config.tcp_port.is_some() { "PGD_TCP_RPC_PORT" } else { "OS-assigned" },
                     "Creating TCP request plane server"
                 );
 
@@ -449,7 +449,7 @@ impl NetworkManager {
 
         Ok(NatsMultiplexedServer::new(
             nats_client.clone(),
-            self.component_registry.clone(),
+            self.servicegroup_registry.clone(),
             self.cancellation_token.clone(),
         ) as Arc<dyn RequestPlaneServer>)
     }

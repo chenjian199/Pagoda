@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Prometheus 命名常量与名字净化
@@ -11,7 +11,7 @@
 //!
 //! ## 外部契约
 //!
-//! - `name_prefix` / `labels` / `component_names`：固定前缀与公共标签。
+//! - `name_prefix` / `labels` / `servicegroup_names`：固定前缀与公共标签。
 //! - `frontend_service` / `work_handler` / `tokio_perf` / `request_plane` /
 //!   `transport` / `routing_overhead` / `router` 等子模块：按功能域聚合的
 //!   指标名常量；所有常量是公开 API，**改名属于 ABI 破坏性变更**。
@@ -21,7 +21,7 @@
 //!     止 `__` 前缀）；
 //!   * [`sanitize_frontend_prometheus_prefix`] —— 失败时回退到
 //!     [`name_prefix::FRONTEND`]；
-//!   * [`build_component_metric_name`] —— 给组件前缀拼指标名；
+//!   * [`build_servicegroup_metric_name`] —— 给组件前缀拼指标名；
 //!   * [`clamp_u64_to_i64`] —— 给 IntGauge 做安全截断。
 //!
 //! ## 命名约定（速查）
@@ -48,8 +48,8 @@
 //! ## Python 同步
 //!
 //! ⚠️ 修改任意常量后需要重生成 Python 绑定：
-//! `cargo run -p dynamo-codegen --bin gen-python-prometheus-names`，
-//! 它会更新 `lib/bindings/python/src/dynamo/prometheus_names.py`。
+//! `cargo run -p pagoda-codegen --bin gen-python-prometheus-names`，
+//! 它会更新 `lib/bindings/python/src/pagoda/prometheus_names.py`。
 
 // =============================================================================
 // === 前缀 / 标签 / 组件名 ====================================================
@@ -57,48 +57,48 @@
 
 /// 指标前缀；详见模块级文档的命名约定。
 pub mod name_prefix {
-    /// Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
-    pub const COMPONENT: &str = "dynamo_component";
+    /// Prefix for servicegroup-scoped metrics, auto-labeled with namespace/portname.
+    pub const SERVICEGROUP: &str = "pagoda_servicegroup";
 
     /// Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
-    pub const FRONTEND: &str = "dynamo_frontend";
+    pub const FRONTEND: &str = "pagoda_frontend";
 
     /// Prefix for KV router instance metrics (carries `router_id` label).
-    pub const ROUTER: &str = "dynamo_router";
+    pub const ROUTER: &str = "pagoda_router";
 
     /// Prefix for standalone KV indexer metrics
-    pub const KVINDEXER: &str = "dynamo_kvindexer";
+    pub const KVINDEXER: &str = "pagoda_kvindexer";
 
     /// Prefix for request-plane metrics at AddressedPushRouter.
     /// Transport-agnostic: measures request lifecycle latency and concurrency
     /// (queue → send → roundtrip TTFT, inflight gauge).
-    pub const REQUEST_PLANE: &str = "dynamo_request_plane";
+    pub const REQUEST_PLANE: &str = "pagoda_request_plane";
 
     /// Prefix for transport-layer metrics (TCP / NATS).
     /// Protocol-specific: measures wire-level health (bytes sent/received, error counts).
-    pub const TRANSPORT: &str = "dynamo_transport";
+    pub const TRANSPORT: &str = "pagoda_transport";
 
     /// Prefix for work-handler transport breakdown metrics (backend side)
-    pub const WORK_HANDLER: &str = "dynamo_work_handler";
+    pub const WORK_HANDLER: &str = "pagoda_work_handler";
 
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
-    pub const TOKIO: &str = "dynamo_tokio";
+    pub const TOKIO: &str = "pagoda_tokio";
 
     /// Prefix for per-phase routing overhead latency (hashing, scheduling).
-    /// Raw Prometheus, not component-scoped.
-    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
+    /// Raw Prometheus, not servicegroup-scoped.
+    pub const ROUTING_OVERHEAD: &str = "pagoda_routing_overhead";
 }
 
 /// 由层级系统自动注入的公共标签。Python codegen 会同步导出这些常量。
 pub mod labels {
-    /// Label for component identification
-    pub const COMPONENT: &str = "dynamo_component";
+    /// Label for servicegroup identification
+    pub const SERVICEGROUP: &str = "pagoda_servicegroup";
 
     /// Label for namespace identification
-    pub const NAMESPACE: &str = "dynamo_namespace";
+    pub const NAMESPACE: &str = "pagoda_namespace";
 
-    /// Label for endpoint identification
-    pub const ENDPOINT: &str = "dynamo_endpoint";
+    /// Label for portname identification
+    pub const PORTNAME: &str = "pagoda_portname";
 
     /// Label for worker data-parallel rank (non-auto-inserted).
     pub const DP_RANK: &str = "dp_rank";
@@ -106,7 +106,7 @@ pub mod labels {
     /// Label for worker instance ID (etcd lease ID).
     pub const WORKER_ID: &str = "worker_id";
 
-    /// Label for model name/path (OpenAI API standard, injected by Dynamo)
+    /// Label for model name/path (OpenAI API standard, injected by Pagoda)
     pub const MODEL: &str = "model";
 
     /// Label for model name/path (engine-native alternative).
@@ -119,9 +119,9 @@ pub mod labels {
     pub const ROUTER_ID: &str = "router_id";
 }
 
-/// Well-known `dynamo_component` label values.
-pub mod component_names {
-    /// Component name for the KV router (frontend-side request routing).
+/// Well-known `pagoda_servicegroup` label values.
+pub mod servicegroup_names {
+    /// ServiceGroup name for the KV router (frontend-side request routing).
     pub const ROUTER: &str = "router";
 }
 
@@ -132,7 +132,7 @@ pub mod component_names {
 /// Frontend service metrics (LLM HTTP service)
 pub mod frontend_service {
     /// Environment variable that overrides the default metric prefix
-    pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
+    pub const METRICS_PREFIX_ENV: &str = "PGD_METRICS_PREFIX";
 
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
@@ -361,7 +361,7 @@ pub mod kvbm {
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
-/// Router per-request metrics (component-scoped via `MetricsHierarchy`).
+/// Router per-request metrics (servicegroup-scoped via `MetricsHierarchy`).
 pub mod router_request {
     /// Prefix prepended to `frontend_service::*` names to form router metric names.
     pub const METRIC_PREFIX: &str = "router_";
@@ -378,7 +378,7 @@ pub mod routing_overhead {
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (servicegroup-scoped aggregate histograms + counter)
 pub mod router {
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
     pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
@@ -606,14 +606,14 @@ pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
     sanitize_prometheus_name(raw).unwrap_or_else(|_| name_prefix::FRONTEND.to_string())
 }
 
-/// 组件指标全名：`dynamo_component_{sanitized(metric_name)}`。
+/// 组件指标全名：`pagoda_servicegroup_{sanitized(metric_name)}`。
 ///
 /// 清洗失败直接 panic——调用方按设计应保证 metric_name 至少包含一个合法字符。
-pub fn build_component_metric_name(metric_name: &str) -> String {
+pub fn build_servicegroup_metric_name(metric_name: &str) -> String {
     let sanitized =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
-    let mut out = String::with_capacity(name_prefix::COMPONENT.len() + 1 + sanitized.len());
-    out.push_str(name_prefix::COMPONENT);
+    let mut out = String::with_capacity(name_prefix::SERVICEGROUP.len() + 1 + sanitized.len());
+    out.push_str(name_prefix::SERVICEGROUP);
     out.push('_');
     out.push_str(&sanitized);
     out
@@ -623,7 +623,7 @@ pub fn build_component_metric_name(metric_name: &str) -> String {
 ///
 /// # Examples
 /// ```
-/// use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+/// use pagoda_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 ///
 /// assert_eq!(clamp_u64_to_i64(100), 100);
 /// assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
@@ -643,8 +643,8 @@ mod tests {
     #[test]
     fn test_sanitize_frontend_prometheus_prefix() {
         assert_eq!(
-            sanitize_frontend_prometheus_prefix("dynamo_frontend"),
-            "dynamo_frontend"
+            sanitize_frontend_prometheus_prefix("pagoda_frontend"),
+            "pagoda_frontend"
         );
         assert_eq!(
             sanitize_frontend_prometheus_prefix("custom_prefix"),
@@ -736,45 +736,45 @@ mod tests {
     }
 
     #[test]
-    fn test_build_component_metric_name() {
+    fn test_build_servicegroup_metric_name() {
         assert_eq!(
-            build_component_metric_name("test_metric"),
-            "dynamo_component_test_metric"
+            build_servicegroup_metric_name("test_metric"),
+            "pagoda_servicegroup_test_metric"
         );
         assert_eq!(
-            build_component_metric_name("requests_total"),
-            "dynamo_component_requests_total"
-        );
-
-        assert_eq!(
-            build_component_metric_name("test metric"),
-            "dynamo_component_test_metric"
-        );
-        assert_eq!(
-            build_component_metric_name("test.metric"),
-            "dynamo_component_test_metric"
-        );
-        assert_eq!(
-            build_component_metric_name("test@metric"),
-            "dynamo_component_test_metric"
+            build_servicegroup_metric_name("requests_total"),
+            "pagoda_servicegroup_requests_total"
         );
 
         assert_eq!(
-            build_component_metric_name("123metric"),
-            "dynamo_component__123metric"
+            build_servicegroup_metric_name("test metric"),
+            "pagoda_servicegroup_test_metric"
+        );
+        assert_eq!(
+            build_servicegroup_metric_name("test.metric"),
+            "pagoda_servicegroup_test_metric"
+        );
+        assert_eq!(
+            build_servicegroup_metric_name("test@metric"),
+            "pagoda_servicegroup_test_metric"
+        );
+
+        assert_eq!(
+            build_servicegroup_metric_name("123metric"),
+            "pagoda_servicegroup__123metric"
         );
     }
 
     #[test]
     #[should_panic(expected = "metric name should be valid or sanitizable")]
-    fn test_build_component_metric_name_panics_on_invalid_input() {
-        build_component_metric_name("@#$%");
+    fn test_build_servicegroup_metric_name_panics_on_invalid_input() {
+        build_servicegroup_metric_name("@#$%");
     }
 
     #[test]
     #[should_panic(expected = "metric name should be valid or sanitizable")]
-    fn test_build_component_metric_name_panics_on_empty_input() {
-        build_component_metric_name("");
+    fn test_build_servicegroup_metric_name_panics_on_empty_input() {
+        build_servicegroup_metric_name("");
     }
 
     #[test]
@@ -867,18 +867,18 @@ mod tests {
     /// ## 意义
     /// 一次性把组件命名与 u64→i64 截断这两段独立逻辑的临界行为锁住。
     #[test]
-    fn test_supplemental_build_component_metric_name_and_clamp_boundaries() {
+    fn test_supplemental_build_servicegroup_metric_name_and_clamp_boundaries() {
         assert_eq!(
-            build_component_metric_name("queue:depth__current"),
-            "dynamo_component_queue:depth__current"
+            build_servicegroup_metric_name("queue:depth__current"),
+            "pagoda_servicegroup_queue:depth__current"
         );
         assert_eq!(
-            build_component_metric_name(":leading"),
-            "dynamo_component__:leading"
+            build_servicegroup_metric_name(":leading"),
+            "pagoda_servicegroup__:leading"
         );
         assert_eq!(
-            build_component_metric_name("metric/with/slashes"),
-            "dynamo_component_metric_with_slashes"
+            build_servicegroup_metric_name("metric/with/slashes"),
+            "pagoda_servicegroup_metric_with_slashes"
         );
 
         assert_eq!(clamp_u64_to_i64((i64::MAX as u64) - 1), i64::MAX - 1);

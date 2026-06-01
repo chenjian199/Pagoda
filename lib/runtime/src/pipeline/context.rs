@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::context` —— 请求上下文 Context / Controller / Registry
@@ -10,7 +10,7 @@
 //!
 //! ## 外部契约
 //! - `pub struct Context<T>`、`pub struct Controller`、`pub struct Registry`、
-//!   `pub trait AsyncEngineContext` 均按 lib-copy 暴露；
+//!   `pub trait AsyncEngineContext` 均暴露；
 //! - `Context::new(id: String)`、`with_id(current, id: String)`、`add_stage(&str)`、
 //!   `insert<K: ToString, U: Send + Sync + 'static>`、`insert_unique`、
 //!   `get<V: Send + Sync + 'static>(&str) -> Result<Arc<V>, String>`、
@@ -21,7 +21,7 @@
 //!   要求 `U: Send + Sync + 'static`（**不是** `U: Data`），保持比 `Data` 更宽的接受面。
 //!
 //! ## 实现要点
-//! - 三段式头之外不引入任何额外 use；正文保持 lib-copy 原貌，避免破坏 controller
+//! - 三段式头之外不引入任何额外 use；正文保持避免破坏 controller
 //!   通过 `Mutex<HashMap<TypeId, ...>>` 实现的类型擦除存储语义。
 
 use std::ops::{Deref, DerefMut};
@@ -325,7 +325,7 @@ impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
     }
 }
 
-// TODO - refactor here - this came from the dynamo.llm-async-engine crate
+// TODO - refactor here - this came from the pagoda.llm-async-engine crate
 
 use tokio::sync::watch::{Receiver, Sender, channel};
 

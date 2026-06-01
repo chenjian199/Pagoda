@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,22 +26,22 @@
 //! - 公开结构体 `HealthCheckTarget`（`Clone + Debug`）与 `SystemHealth`（`Clone`）；
 //!   字段 `instance` / `payload` 公开可访问。
 //! - `SystemHealth` 的公开方法集合（`new` / `health_check_enabled` / `set_*` / `get_*` /
-//!   `register_health_check_target` / `take_new_endpoint_receiver` /
+//!   `register_health_check_target` / `take_new_portname_receiver` /
 //!   `initialize_uptime_gauge` / `uptime` / `update_uptime_gauge` / `health_path` / `live_path`）签名保持不变。
-//! - `take_new_endpoint_receiver` 继续返回 `Option<mpsc::UnboundedReceiver<String>>`，
+//! - `take_new_portname_receiver` 继续返回 `Option<mpsc::UnboundedReceiver<String>>`，
 //!   **不**改为 broadcast 、**不**改变只能被消费一次的语义。
-//! - `get_health_status` 的判定优先级按“`use_endpoint_health_status` → 已注册目标表 →
+//! - `get_health_status` 的判定优先级按“`use_portname_health_status` → 已注册目标表 →
 //!   `system_health`” 三档依次回退，结果与历史实现逐字段等价。
 //!
 //! ## 实现要点
 //! - **多样化（Rule 2）**：
-//!   * 抽出私有助手 `with_endpoint_write` 封装 `endpoint_health.write().unwrap()` 访问模式，
+//!   * 抽出私有助手 `with_portname_write` 封装 `portname_health.write().unwrap()` 访问模式，
 //!     将多处重复的“取写锁 + 操作 HashMap”压平为单一闭包用例；
 //!   * `get_health_status` 的嵌套 `if/else { if/else { ... } }` 展平为 `if/else if/else`
 //!     级联链，语义严格等价；
 //!   * `has_health_check_targets` 由 `.iter().next().is_some()` 改为 `!read().is_empty()`，
 //!     成本更低、意图更明确。
-//! - **不**动锼粒度（`endpoint_health` / `health_check_targets` / `health_check_notifiers`
+//! - **不**动锼粒度（`portname_health` / `health_check_targets` / `health_check_notifiers`
 //!   仍是独立 `RwLock`），**不**改变锁获取顺序，避免潜在死锁特征变迁。
 
 use std::{
@@ -51,32 +51,32 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-use crate::component;
+use crate::servicegroup;
 use crate::config::HealthStatus;
 use crate::metrics::{MetricsHierarchy, prometheus_names::distributed_runtime};
 
 /// 健康检查目标，包含实例信息以及发起检查时要发送的 payload。
 #[derive(Clone, Debug)]
 pub struct HealthCheckTarget {
-    pub instance: component::Instance,
+    pub instance: servicegroup::Instance,
     pub payload: serde_json::Value,
 }
 
 /// 系统健康状态管理器。
-/// 如果配置了 `use_endpoint_health_status`，初始化时会为这些端点预填充健康状态表。
+/// 如果配置了 `use_portname_health_status`，初始化时会为这些端点预填充健康状态表。
 #[derive(Clone)]
 pub struct SystemHealth {
     system_health: HealthStatus,
-    endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
+    portname_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
     /// 将端点 subject 映射到健康检查目标（实例信息 + payload）。
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
     /// 将端点 subject 映射到其专属健康检查通知器。
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
     /// 新端点注册通知通道。
     /// 这样可以避免 `HealthCheckManager` 先启动、端点后注册时出现竞态并漏掉事件。
-    new_endpoint_tx: mpsc::UnboundedSender<String>,
-    new_endpoint_rx: Arc<parking_lot::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
-    use_endpoint_health_status: Vec<String>,
+    new_portname_tx: mpsc::UnboundedSender<String>,
+    new_portname_rx: Arc<parking_lot::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+    use_portname_health_status: Vec<String>,
     health_check_enabled: bool,
     health_path: String,
     live_path: String,
@@ -90,7 +90,7 @@ impl SystemHealth {
     /// 创建系统健康状态对象，并初始化端点状态表、通知器表和注册通道。
     pub fn new(
         starting_health_status: HealthStatus,
-        use_endpoint_health_status: Vec<String>,
+        use_portname_health_status: Vec<String>,
         health_check_enabled: bool,
         health_path: String,
         live_path: String,
@@ -99,21 +99,21 @@ impl SystemHealth {
             true => HealthStatus::NotReady,
             false => starting_health_status.clone(),
         };
-        let endpoint_health = use_endpoint_health_status
+        let portname_health = use_portname_health_status
             .iter()
             .cloned()
-            .map(|endpoint| (endpoint, seeded_status.clone()))
+            .map(|portname| (portname, seeded_status.clone()))
             .collect::<HashMap<_, _>>();
-        let (new_endpoint_tx, new_endpoint_rx) = mpsc::unbounded_channel();
+        let (new_portname_tx, new_portname_rx) = mpsc::unbounded_channel();
 
         Self {
             system_health: starting_health_status,
-            endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
+            portname_health: Arc::new(std::sync::RwLock::new(portname_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            new_endpoint_tx,
-            new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(new_endpoint_rx))),
-            use_endpoint_health_status,
+            new_portname_tx,
+            new_portname_rx: Arc::new(parking_lot::Mutex::new(Some(new_portname_rx))),
+            use_portname_health_status,
             health_check_enabled,
             health_path,
             live_path,
@@ -127,23 +127,23 @@ impl SystemHealth {
         self.health_check_enabled
     }
 
-    /// 私有助手：在 `endpoint_health` 写锁保护下执行给定闭包。
+    /// 私有助手：在 `portname_health` 写锁保护下执行给定闭包。
     ///
     /// 将“获取写锁 → `unwrap()` → 操作 `HashMap` → 释放”的重复模式集中为一个助手，
     /// 使调用点只关心业务逻辑（写什么）。锁获取顺序与历史实现严格一致。
-    fn with_endpoint_write<R>(
+    fn with_portname_write<R>(
         &self,
         op: impl FnOnce(&mut HashMap<String, HealthStatus>) -> R,
     ) -> R {
-        let mut endpoint_health = self.endpoint_health.write().unwrap();
-        op(&mut endpoint_health)
+        let mut portname_health = self.portname_health.write().unwrap();
+        op(&mut portname_health)
     }
 
     /// 记录端点传输层已注册。
     /// 如果未启用 canary，则直接把端点标记为 `Ready`；否则保持不变，等待 canary 验证。
-    pub fn set_endpoint_registered(&self, endpoint: &str) {
+    pub fn set_portname_registered(&self, portname: &str) {
         if !self.health_check_enabled {
-            self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
+            self.set_portname_health_status(portname, HealthStatus::Ready);
         }
     }
 
@@ -152,10 +152,10 @@ impl SystemHealth {
         self.system_health = status;
     }
 
-    /// 设置指定端点的健康状态。实现上委托给私有助手 [`Self::with_endpoint_write`]。
-    pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
-        self.with_endpoint_write(|endpoint_health| {
-            endpoint_health.insert(endpoint.to_string(), status);
+    /// 设置指定端点的健康状态。实现上委托给私有助手 [`Self::with_portname_write`]。
+    pub fn set_portname_health_status(&self, portname: &str, status: HealthStatus) {
+        self.with_portname_write(|portname_health| {
+            portname_health.insert(portname.to_string(), status);
         });
     }
 
@@ -165,32 +165,32 @@ impl SystemHealth {
     /// 若二者都不存在，则回退到系统整体状态字段。
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
         let health_check_targets = self.health_check_targets.read().unwrap();
-        let endpoint_health = self.endpoint_health.read().unwrap();
-        let endpoints = endpoint_health
+        let portname_health = self.portname_health.read().unwrap();
+        let portnames = portname_health
             .iter()
-            .map(|(endpoint, status)| {
+            .map(|(portname, status)| {
                 let label = if *status == HealthStatus::Ready {
                     "ready"
                 } else {
                     "notready"
                 };
-                (endpoint.clone(), label.to_string())
+                (portname.clone(), label.to_string())
             })
             .collect::<HashMap<_, _>>();
 
-        let healthy = if !self.use_endpoint_health_status.is_empty() {
-            self.use_endpoint_health_status.iter().all(|endpoint| {
-                endpoint_health
-                    .get(endpoint)
+        let healthy = if !self.use_portname_health_status.is_empty() {
+            self.use_portname_health_status.iter().all(|portname| {
+                portname_health
+                    .get(portname)
                     .is_some_and(|status| *status == HealthStatus::Ready)
             })
         } else if !health_check_targets.is_empty() {
             // 如果已经注册了健康检查目标，则以这些目标的状态来判定整体健康性。
             health_check_targets
                 .iter()
-                .all(|(endpoint_subject, _target)| {
-                    endpoint_health
-                        .get(endpoint_subject)
+                .all(|(portname_subject, _target)| {
+                    portname_health
+                        .get(portname_subject)
                         .is_some_and(|status| *status == HealthStatus::Ready)
                 })
         } else {
@@ -198,7 +198,7 @@ impl SystemHealth {
             self.system_health == HealthStatus::Ready
         };
 
-        (healthy, endpoints)
+        (healthy, portnames)
     }
 
     /// 为端点注册一个健康检查目标。
@@ -206,11 +206,11 @@ impl SystemHealth {
     /// 处理流程为：原子写入目标表、创建通知器、初始化端点状态，并通过通道通知管理器有新端点加入。
     pub fn register_health_check_target(
         &self,
-        endpoint_subject: &str,
-        instance: component::Instance,
+        portname_subject: &str,
+        instance: servicegroup::Instance,
         payload: serde_json::Value,
     ) {
-        let key = endpoint_subject.to_owned();
+        let key = portname_subject.to_owned();
 
         // 在单次写锁中完成检查和插入，避免重复注册时产生竞态。
         let inserted = {
@@ -226,7 +226,7 @@ impl SystemHealth {
 
         if !inserted {
             tracing::warn!(
-                "Attempted to re-register health check for endpoint '{}'; ignoring.",
+                "Attempted to re-register health check for portname '{}'; ignoring.",
                 key
             );
             return;
@@ -241,16 +241,16 @@ impl SystemHealth {
         }
 
         // 端点初始状态保守地标记为 NotReady，等待真实探测结果覆盖。
-        self.with_endpoint_write(|endpoint_health| {
-            endpoint_health
+        self.with_portname_write(|portname_health| {
+            portname_health
                 .entry(key.clone())
                 .or_insert(HealthStatus::NotReady);
         });
 
-        if let Err(e) = self.new_endpoint_tx.send(key.clone()) {
+        if let Err(e) = self.new_portname_tx.send(key.clone()) {
             tracing::error!(
-                "Failed to send endpoint '{}' registration to health check manager: {}. \
-                 Health checks will not be performed for this endpoint.",
+                "Failed to send portname '{}' registration to health check manager: {}. \
+                 Health checks will not be performed for this portname.",
                 key,
                 e
             );
@@ -263,7 +263,7 @@ impl SystemHealth {
             .read()
             .unwrap()
             .iter()
-            .map(|(endpoint, target)| (endpoint.clone(), target.clone()))
+            .map(|(portname, target)| (portname.clone(), target.clone()))
             .collect()
     }
 
@@ -273,7 +273,7 @@ impl SystemHealth {
     }
 
     /// 获取已注册健康检查目标的端点列表。
-    pub fn get_health_check_endpoints(&self) -> Vec<String> {
+    pub fn get_health_check_portnames(&self) -> Vec<String> {
         self.health_check_targets
             .read()
             .unwrap()
@@ -283,35 +283,35 @@ impl SystemHealth {
     }
 
     /// 获取指定端点对应的健康检查目标。
-    pub fn get_health_check_target(&self, endpoint: &str) -> Option<HealthCheckTarget> {
+    pub fn get_health_check_target(&self, portname: &str) -> Option<HealthCheckTarget> {
         self.health_check_targets
             .read()
             .unwrap()
-            .get(endpoint)
+            .get(portname)
             .cloned()
     }
 
     /// 获取指定端点当前的健康状态。
-    pub fn get_endpoint_health_status(&self, endpoint: &str) -> Option<HealthStatus> {
-        self.endpoint_health.read().unwrap().get(endpoint).cloned()
+    pub fn get_portname_health_status(&self, portname: &str) -> Option<HealthStatus> {
+        self.portname_health.read().unwrap().get(portname).cloned()
     }
 
     /// 获取指定端点的专属健康检查 notifier。
-    pub fn get_endpoint_health_check_notifier(
+    pub fn get_portname_health_check_notifier(
         &self,
-        endpoint_subject: &str,
+        portname_subject: &str,
     ) -> Option<Arc<tokio::sync::Notify>> {
         self.health_check_notifiers
             .read()
             .unwrap()
-            .get(endpoint_subject)
+            .get(portname_subject)
             .cloned()
     }
 
     /// 取走新端点注册事件接收端。
     /// 该方法只能成功一次，供 `HealthCheckManager` 独占消费注册事件。
-    pub fn take_new_endpoint_receiver(&self) -> Option<mpsc::UnboundedReceiver<String>> {
-        let mut receiver = self.new_endpoint_rx.lock();
+    pub fn take_new_portname_receiver(&self) -> Option<mpsc::UnboundedReceiver<String>> {
+        let mut receiver = self.new_portname_rx.lock();
         receiver.take()
     }
 
@@ -355,7 +355,7 @@ impl SystemHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Instance, TransportType};
+    use crate::servicegroup::{Instance, TransportType};
     use crate::metrics::MetricsRegistry;
 
     struct TestMetricsHierarchy {
@@ -386,20 +386,20 @@ mod tests {
     }
 
     /// 构造一个最小可用的测试实例，便于注册健康检查目标。
-    fn sample_instance(endpoint: &str) -> Instance {
+    fn sample_instance(portname: &str) -> Instance {
         Instance {
-            component: "component".to_string(),
-            endpoint: endpoint.to_string(),
+            servicegroup: "servicegroup".to_string(),
+            portname: portname.to_string(),
             namespace: "namespace".to_string(),
             instance_id: 1,
-            transport: TransportType::Nats(endpoint.to_string()),
+            transport: TransportType::Nats(portname.to_string()),
             device_type: None,
         }
     }
 
     #[test]
     /// 测试：初始化时会根据健康检查开关为端点设置不同的初始状态。
-    fn test_new_initializes_endpoint_statuses_from_health_check_flag() {
+    fn test_new_initializes_portname_statuses_from_health_check_flag() {
         let without_canary = SystemHealth::new(
             HealthStatus::Ready,
             vec!["ep-a".to_string()],
@@ -416,18 +416,18 @@ mod tests {
         );
 
         assert_eq!(
-            without_canary.get_endpoint_health_status("ep-a"),
+            without_canary.get_portname_health_status("ep-a"),
             Some(HealthStatus::Ready)
         );
         assert_eq!(
-            with_canary.get_endpoint_health_status("ep-a"),
+            with_canary.get_portname_health_status("ep-a"),
             Some(HealthStatus::NotReady)
         );
     }
 
     #[test]
     /// 测试：端点注册信号在 canary 开关不同的情况下会产生不同状态更新行为。
-    fn test_set_endpoint_registered_respects_health_check_flag() {
+    fn test_set_portname_registered_respects_health_check_flag() {
         let disabled = SystemHealth::new(
             HealthStatus::NotReady,
             vec!["ep-a".to_string()],
@@ -443,16 +443,16 @@ mod tests {
             "/live".to_string(),
         );
 
-        disabled.set_endpoint_registered("ep-a");
-        enabled.set_endpoint_registered("ep-a");
+        disabled.set_portname_registered("ep-a");
+        enabled.set_portname_registered("ep-a");
 
-        assert_eq!(disabled.get_endpoint_health_status("ep-a"), Some(HealthStatus::Ready));
-        assert_eq!(enabled.get_endpoint_health_status("ep-a"), Some(HealthStatus::NotReady));
+        assert_eq!(disabled.get_portname_health_status("ep-a"), Some(HealthStatus::Ready));
+        assert_eq!(enabled.get_portname_health_status("ep-a"), Some(HealthStatus::NotReady));
     }
 
     #[test]
     /// 测试：存在显式端点列表时，整体健康性由该列表中的端点状态决定。
-    fn test_get_health_status_uses_explicit_endpoint_list() {
+    fn test_get_health_status_uses_explicit_portname_list() {
         let system_health = SystemHealth::new(
             HealthStatus::NotReady,
             vec!["ep-a".to_string(), "ep-b".to_string()],
@@ -461,14 +461,14 @@ mod tests {
             "/live".to_string(),
         );
 
-        system_health.set_endpoint_health_status("ep-a", HealthStatus::Ready);
-        system_health.set_endpoint_health_status("ep-b", HealthStatus::NotReady);
+        system_health.set_portname_health_status("ep-a", HealthStatus::Ready);
+        system_health.set_portname_health_status("ep-b", HealthStatus::NotReady);
 
-        let (healthy, endpoints) = system_health.get_health_status();
+        let (healthy, portnames) = system_health.get_health_status();
 
         assert!(!healthy);
-        assert_eq!(endpoints.get("ep-a").map(String::as_str), Some("ready"));
-        assert_eq!(endpoints.get("ep-b").map(String::as_str), Some("notready"));
+        assert_eq!(portnames.get("ep-a").map(String::as_str), Some("ready"));
+        assert_eq!(portnames.get("ep-b").map(String::as_str), Some("notready"));
     }
 
     #[test]
@@ -497,12 +497,12 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0, "ep-a");
         assert_eq!(targets[0].1.payload, serde_json::json!({"version": 1}));
-        assert!(system_health.get_endpoint_health_check_notifier("ep-a").is_some());
+        assert!(system_health.get_portname_health_check_notifier("ep-a").is_some());
     }
 
     #[tokio::test]
     /// 测试：新端点注册事件接收端只能被取走一次，并能收到后续注册通知。
-    async fn test_take_new_endpoint_receiver_only_once_and_receives_registrations() {
+    async fn test_take_new_portname_receiver_only_once_and_receives_registrations() {
         let system_health = SystemHealth::new(
             HealthStatus::Ready,
             vec![],
@@ -511,8 +511,8 @@ mod tests {
             "/live".to_string(),
         );
 
-        let mut receiver = system_health.take_new_endpoint_receiver().unwrap();
-        assert!(system_health.take_new_endpoint_receiver().is_none());
+        let mut receiver = system_health.take_new_portname_receiver().unwrap();
+        assert!(system_health.take_new_portname_receiver().is_none());
 
         system_health.register_health_check_target(
             "ep-a",
@@ -520,10 +520,10 @@ mod tests {
             serde_json::json!({"prompt": "health"}),
         );
 
-        let endpoint = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+        let portname = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
             .await
             .unwrap();
-        assert_eq!(endpoint.as_deref(), Some("ep-a"));
+        assert_eq!(portname.as_deref(), Some("ep-a"));
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
             serde_json::json!({"prompt": "health"}),
         );
         let (healthy_before, _) = system_health.get_health_status();
-        system_health.set_endpoint_health_status("ep-a", HealthStatus::Ready);
+        system_health.set_portname_health_status("ep-a", HealthStatus::Ready);
         let (healthy_after, _) = system_health.get_health_status();
 
         assert!(!healthy_before);

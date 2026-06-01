@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Worker-Pool 饱和度指标（共享 TCP 后端 server 侧）
@@ -39,7 +39,7 @@ use crate::MetricsRegistry;
 
 // === 命名 + 构造 helpers =====================================================
 
-/// 拼接 `dynamo_work_handler_<suffix>` 全名。
+/// 拼接 `pagoda_work_handler_<suffix>` 全名。
 fn work_handler_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::WORK_HANDLER, suffix)
 }
@@ -208,7 +208,7 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 验证所有 6 个指标拼出的全名形如 `dynamo_work_handler_*`，
+    /// 验证所有 6 个指标拼出的全名形如 `pagoda_work_handler_*`，
     /// 并检查 `WORK_HANDLER_QUEUE_DEPTH` / `_PERMIT_WAIT_SECONDS` 的 desc 内容。
     /// ## 意义
     /// 锁定对外契约，防止重命名静默切断 Grafana 仪表盘。
@@ -216,27 +216,27 @@ mod tests {
     fn test_supplemental_metric_name_and_descriptors() {
         assert_eq!(
             work_handler_metric_name(work_handler::QUEUE_DEPTH),
-            "dynamo_work_handler_queue_depth"
+            "pagoda_work_handler_queue_depth"
         );
         assert_eq!(
             work_handler_metric_name(work_handler::QUEUE_CAPACITY),
-            "dynamo_work_handler_queue_capacity"
+            "pagoda_work_handler_queue_capacity"
         );
         assert_eq!(
             work_handler_metric_name(work_handler::ENQUEUE_REJECTED_TOTAL),
-            "dynamo_work_handler_enqueue_rejected_total"
+            "pagoda_work_handler_enqueue_rejected_total"
         );
         assert_eq!(
             work_handler_metric_name(work_handler::PERMIT_WAIT_SECONDS),
-            "dynamo_work_handler_permit_wait_seconds"
+            "pagoda_work_handler_permit_wait_seconds"
         );
         assert_eq!(
             work_handler_metric_name(work_handler::POOL_ACTIVE_TASKS),
-            "dynamo_work_handler_pool_active_tasks"
+            "pagoda_work_handler_pool_active_tasks"
         );
         assert_eq!(
             work_handler_metric_name(work_handler::POOL_CAPACITY),
-            "dynamo_work_handler_pool_capacity"
+            "pagoda_work_handler_pool_capacity"
         );
         assert_eq!(
             work_handler_metric_name(""),

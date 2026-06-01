@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Discovery 流的下游适配工具
@@ -11,7 +11,7 @@
 //!
 //! 1. 模型卡的反序列化（JSON → `T`）；
 //! 2. 自定义提取闭包 `F: Fn(T) -> V`；
-//! 3. 多 LoRA / 多 endpoint 同 `instance_id` 时的“折叠”策略；
+//! 3. 多 LoRA / 多 portname 同 `instance_id` 时的“折叠”策略；
 //! 4. 通过 `watch::Receiver<HashMap<u64, V>>` 推送给下游；
 //!
 //! 这四件事打包到一个后台 task 中完成，避免每个调用方各自实现。
@@ -26,7 +26,7 @@
 //! ## 实现要点
 //!
 //! - 内部状态键采用完整的 `DiscoveryInstanceId`（含命名空间 / 组件 /
-//!   endpoint / 后缀），避免不同对象因低 53 位哈希冲突而互相覆盖；
+//!   portname / 后缀），避免不同对象因低 53 位哈希冲突而互相覆盖；
 //! - 折叠后的 `HashMap<u64, V>` 与上次广播值比较，仅在**内容真实变化**时
 //!   `send`，避免下游被空唤醒；
 //! - 折叠逻辑被抽离为 [`collapse_to_instance_view`]，单独可测，与历史版本
@@ -49,7 +49,7 @@ use super::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStr
 /// 同一 `instance_id` 可能对应：
 /// - 一个基础模型条目（`Model{suffix=None}`）
 /// - 任意数量的 LoRA 条目（`Model{suffix=Some}`）
-/// - 不同 namespace/component/endpoint 上偶尔重复的条目
+/// - 不同 namespace/servicegroup/portname 上偶尔重复的条目
 ///
 /// 选择策略：**先到的基础模型优先**；若桶里已经有任何条目且新条目是 LoRA，
 /// 则保持原值不变。直观地说，下游通常只关心“这个 worker 在跑哪个基础模型”，
@@ -64,7 +64,7 @@ fn collapse_to_instance_view<V: Clone>(
             key,
             DiscoveryInstanceId::Model(m) if m.model_suffix.is_some()
         );
-        // 基础模型 / Endpoint / EventChannel 一律允许插入或覆盖；
+        // 基础模型 / PortName / EventChannel 一律允许插入或覆盖；
         // LoRA 只有当桶为空时才占位
         if !is_lora_suffix || !out.contains_key(&iid) {
             out.insert(iid, value.clone());
@@ -91,7 +91,7 @@ fn collapse_to_instance_view<V: Clone>(
 /// # 示例
 /// ```ignore
 /// let stream = discovery
-///     .list_and_watch(DiscoveryQuery::ComponentModels { .. }, None)
+///     .list_and_watch(DiscoveryQuery::ServiceGroupModels { .. }, None)
 ///     .await?;
 /// let rx = watch_and_extract_field(stream, |card: ModelDeploymentCard| {
 ///     card.runtime_config
@@ -203,7 +203,7 @@ mod tests {
     use super::*;
     use crate::discovery::mock::{MockDiscovery, SharedMockRegistry};
     use crate::discovery::{
-        Discovery, DiscoveryQuery, DiscoverySpec, EndpointInstanceId, ModelCardInstanceId,
+        Discovery, DiscoveryQuery, DiscoverySpec, PortNameInstanceId, ModelCardInstanceId,
     };
 
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -214,8 +214,8 @@ mod tests {
     fn base_model_spec(name: &str) -> DiscoverySpec {
         DiscoverySpec::Model {
             namespace: "ns".into(),
-            component: "comp".into(),
-            endpoint: "generate".into(),
+            servicegroup: "comp".into(),
+            portname: "generate".into(),
             card_json: serde_json::json!({ "display_name": name }),
             model_suffix: None,
         }
@@ -224,18 +224,18 @@ mod tests {
     fn mk_model_id(iid: u64, suffix: Option<&str>) -> DiscoveryInstanceId {
         DiscoveryInstanceId::Model(ModelCardInstanceId {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: iid,
             model_suffix: suffix.map(str::to_owned),
         })
     }
 
-    fn mk_endpoint_id(iid: u64) -> DiscoveryInstanceId {
-        DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+    fn mk_portname_id(iid: u64) -> DiscoveryInstanceId {
+        DiscoveryInstanceId::PortName(PortNameInstanceId {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: iid,
         })
     }
@@ -270,13 +270,13 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 同一 `instance_id` 来自两条独立的 Endpoint key，折叠为同一桶。
+    /// 同一 `instance_id` 来自两条独立的 PortName key，折叠为同一桶。
     /// ## 意义
     /// 验证折叠键是 `instance_id` 而非完整 ID；这是上游想要的语义。
     #[test]
     fn collapse_groups_distinct_keys_by_instance_id() {
         let mut state: HashMap<DiscoveryInstanceId, &'static str> = HashMap::new();
-        state.insert(mk_endpoint_id(7), "a");
+        state.insert(mk_portname_id(7), "a");
         state.insert(mk_model_id(7, None), "b");
         let view = collapse_to_instance_view(&state);
         assert_eq!(view.len(), 1);

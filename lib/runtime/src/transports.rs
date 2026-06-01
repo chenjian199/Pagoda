@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 网络通信栈集合
 //!
 //! ## 设计意图
-//! `transports` 是 dynamo 分布式系统**最底层的字节搬运层**：所有"跟外部服务说话、
+//! `transports` 是 pagoda 分布式系统**最底层的字节搬运层**：所有"跟外部服务说话、
 //! 跨进程把字节挪到对端"的代码都汇聚在这里。再往上才是 `pipeline` 这种语义层。
 //!
 //! 子模块按"角色"切：

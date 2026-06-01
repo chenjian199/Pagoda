@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::ingress::push_handler` —— PushWorkHandler 处理器实现
@@ -10,7 +10,7 @@
 //!
 //! ## 外部契约
 //! - `pub trait PushWorkHandler` 由 ingress.rs 定义；本文件提供其默认实现结构体，
-//!   与 lib-copy 完全一致；不引入额外的 helper 方法或类型别名。
+//!   完全一致；不引入额外的 helper 方法或类型别名。
 //! - `handle_payload(payload, request_id)` 的错误语义、tracing span / metric 增量
 //!   都属于契约。
 //!
@@ -66,13 +66,13 @@ impl WorkHandlerMetrics {
         }
     }
 
-    /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
-    pub fn from_endpoint(
-        endpoint: &crate::component::Endpoint,
+    /// Create WorkHandlerMetrics from an portname using its built-in labeling
+    pub fn from_portname(
+        portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let metrics_labels = metrics_labels.unwrap_or(&[]);
-        let metrics = endpoint.metrics();
+        let metrics = portname.metrics();
         let request_counter = metrics.create_intcounter(
             work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
@@ -164,19 +164,19 @@ where
 {
     fn add_metrics(
         &self,
-        endpoint: &crate::component::Endpoint,
+        portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
         // Call the Ingress-specific add_metrics implementation
         use crate::pipeline::network::Ingress;
-        Ingress::add_metrics(self, endpoint, metrics_labels)
+        Ingress::add_metrics(self, portname, metrics_labels)
     }
 
-    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+    fn set_portname_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
         use crate::pipeline::network::Ingress;
-        self.endpoint_health_check_notifier
+        self.portname_health_check_notifier
             .set(notifier)
-            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+            .map_err(|_| anyhow::anyhow!("PortName health check notifier already set"))?;
         Ok(())
     }
 
@@ -373,7 +373,7 @@ where
             } else if !is_error {
                 // Only notify on non-error chunks — error responses don't prove
                 // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                if let Some(notifier) = self.portname_health_check_notifier.get() {
                     notifier.notify_one();
                 }
             }
@@ -402,7 +402,7 @@ where
             // Only notify on stream completion if no error responses were seen
             if let (false, Some(notifier)) = (
                 saw_error_response,
-                self.endpoint_health_check_notifier.get(),
+                self.portname_health_check_notifier.get(),
             ) {
                 notifier.notify_one();
             }

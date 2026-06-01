@@ -1,22 +1,22 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # K8s 原生发现客户端入口层
 //!
 //! ## 设计意图
 //!
-//! 历史版本的 `KubeDiscoveryClient` 通过自定义资源 `DynamoWorkerMetadata`
+//! 历史版本的 `KubeDiscoveryClient` 通过自定义资源 `PagodaWorkerMetadata`
 //! 在集群中**间接**发布发现状态，存在两个问题：
 //!
 //! 1. 需要预先安装 CRD，Helm chart 与控制面耦合；
-//! 2. 单 Pod 多 endpoint 时所有信息塞在一个 CR `data` 字段里，导致细粒度
+//! 2. 单 Pod 多 portname 时所有信息塞在一个 CR `data` 字段里，导致细粒度
 //!    增量更新（例如单独移除一个 LoRA）只能整段重写。
 //!
 //! 本次重写改为**直接使用 K8s 原生对象**作为信息载体：
 //!
-//! | Dynamo 概念     | K8s 原生对象映射                |
+//! | Pagoda 概念     | K8s 原生对象映射                |
 //! |----------------|-------------------------------|
-//! | `Endpoint`     | `Service` + `EndpointSlice`   |
+//! | `PortName`     | `Service` + `EndpointSlice`   |
 //! | `Model`        | `ConfigMap`                   |
 //! | `EventChannel` | `Lease`                       |
 //!
@@ -140,8 +140,8 @@ impl KubeDiscoveryClient {
     /// 触发同一段“向 K8s 写入”的逻辑，本方法把分支细节集中在一处。
     async fn persist_register(&self, instance: &DiscoveryInstance) -> Result<()> {
         match instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                objects::register_endpoint_instance(&self.kube_client, &self.pod_info, inst).await
+            DiscoveryInstance::PortName(inst) => {
+                objects::register_portname_instance(&self.kube_client, &self.pod_info, inst).await
             }
             DiscoveryInstance::Model { .. } => {
                 objects::apply_model_config_map(&self.kube_client, &self.pod_info, instance).await
@@ -156,19 +156,19 @@ impl KubeDiscoveryClient {
     async fn persist_unregister(&self, instance: &DiscoveryInstance) -> Result<()> {
         let ns = &self.pod_info.pod_namespace;
         match instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                objects::unregister_endpoint_instance(
+            DiscoveryInstance::PortName(inst) => {
+                objects::unregister_portname_instance(
                     &self.kube_client,
                     &self.pod_info.pod_name,
                     ns,
-                    &inst.component,
-                    &inst.endpoint,
+                    &inst.servicegroup,
+                    &inst.portname,
                 )
                 .await
             }
             DiscoveryInstance::Model {
-                component,
-                endpoint,
+                servicegroup,
+                portname,
                 instance_id,
                 model_suffix,
                 ..
@@ -176,20 +176,20 @@ impl KubeDiscoveryClient {
                 objects::delete_model_config_map(
                     &self.kube_client,
                     ns,
-                    component,
-                    endpoint,
+                    servicegroup,
+                    portname,
                     *instance_id,
                     model_suffix.as_deref(),
                 )
                 .await
             }
             DiscoveryInstance::EventChannel {
-                component,
+                servicegroup,
                 topic,
                 instance_id,
                 ..
             } => {
-                objects::delete_event_lease(&self.kube_client, ns, component, topic, *instance_id)
+                objects::delete_event_lease(&self.kube_client, ns, servicegroup, topic, *instance_id)
                     .await
             }
         }
@@ -212,7 +212,7 @@ impl Discovery for KubeDiscoveryClient {
         let snapshot_before = meta.clone();
 
         match &instance {
-            DiscoveryInstance::Endpoint(_) => meta.register_endpoint(instance.clone())?,
+            DiscoveryInstance::PortName(_) => meta.register_portname(instance.clone())?,
             DiscoveryInstance::Model { .. } => meta.register_model_card(instance.clone())?,
             DiscoveryInstance::EventChannel { .. } => {
                 meta.register_event_channel(instance.clone())?
@@ -233,7 +233,7 @@ impl Discovery for KubeDiscoveryClient {
         let snapshot_before = meta.clone();
 
         match &instance {
-            DiscoveryInstance::Endpoint(_) => meta.unregister_endpoint(&instance)?,
+            DiscoveryInstance::PortName(_) => meta.unregister_portname(&instance)?,
             DiscoveryInstance::Model { .. } => meta.unregister_model_card(&instance)?,
             DiscoveryInstance::EventChannel { .. } => meta.unregister_event_channel(&instance)?,
         }
@@ -348,38 +348,38 @@ impl Discovery for KubeDiscoveryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Instance, TransportType};
+    use crate::servicegroup::{Instance, TransportType};
 
-    /// 构造一个 Endpoint `DiscoveryInstance`，仅用于测试 `id()` 派生与差异计算。
-    fn mk_endpoint(suffix: u64) -> DiscoveryInstance {
-        DiscoveryInstance::Endpoint(Instance {
+    /// 构造一个 PortName `DiscoveryInstance`，仅用于测试 `id()` 派生与差异计算。
+    fn mk_portname(suffix: u64) -> DiscoveryInstance {
+        DiscoveryInstance::PortName(Instance {
             instance_id: suffix,
             namespace: "ns".to_owned(),
-            component: "comp".to_owned(),
-            endpoint: "ep".to_owned(),
+            servicegroup: "comp".to_owned(),
+            portname: "ep".to_owned(),
             transport: TransportType::Nats(format!("nats://t/{suffix}")),
             device_type: None,
         })
     }
 
     /// ## 测试过程
-    /// 对两个不同 instance_id 的 Endpoint 调用 `id()`，断言不同。
+    /// 对两个不同 instance_id 的 PortName 调用 `id()`，断言不同。
     /// ## 意义
     /// list_and_watch 内部 diff 逻辑依赖 `DiscoveryInstanceId` 的可哈希区分。
     #[test]
-    fn endpoint_ids_are_distinct() {
-        assert_ne!(mk_endpoint(1).id(), mk_endpoint(2).id());
+    fn portname_ids_are_distinct() {
+        assert_ne!(mk_portname(1).id(), mk_portname(2).id());
     }
 
     /// ## 测试过程
-    /// 把两个不同的 Endpoint 放入 `HashSet`，验证容量为 2。
+    /// 把两个不同的 PortName 放入 `HashSet`，验证容量为 2。
     /// ## 意义
     /// 保证 `DiscoveryInstanceId` 实现了正确的 `Hash + Eq`。
     #[test]
-    fn endpoint_ids_hashable_distinct_in_set() {
+    fn portname_ids_hashable_distinct_in_set() {
         let mut s = std::collections::HashSet::new();
-        s.insert(mk_endpoint(1).id());
-        s.insert(mk_endpoint(2).id());
+        s.insert(mk_portname(1).id());
+        s.insert(mk_portname(2).id());
         assert_eq!(s.len(), 2);
     }
 }

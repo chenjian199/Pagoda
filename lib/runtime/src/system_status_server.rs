@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! 系统状态 / 管理 HTTP 服务（system_status_server）
@@ -18,14 +18,14 @@
 //! - 公开函数 `spawn_system_status_server(host, port, cancel_token, drt, discovery_metadata)`。
 //!   返回 `(SocketAddr, JoinHandle<()>)`；服务在 `cancel_token.cancelled()` 上优雅关闭。
 //! - HTTP 路由集与历史实现严格一致：
-//!   * `GET <health_path>` / `GET <live_path>` —— 返回聚合健康状态与 endpoint 明细；
+//!   * `GET <health_path>` / `GET <live_path>` —— 返回聚合健康状态与 portname 明细；
 //!   * `GET /metrics` —— Prometheus 文本输出；
 //!   * `GET /metadata` —— `DiscoveryMetadata` JSON；
 //!   * `ANY /engine/{*path}` —— 查询 `drt.engine_routes()` 并执行回调；
-//!   * 当 `DYN_LORA_ENABLED=true` 时启用 `GET/POST /v1/loras` 与 `DELETE /v1/loras/{*lora_name}`；
+//!   * 当 `PGD_LORA_ENABLED=true` 时启用 `GET/POST /v1/loras` 与 `DELETE /v1/loras/{*lora_name}`；
 //!   * `GET /v1/metadata/{model_slug}/{model_suffix}/{*filename}` —— 返回本地注册的制品原始字节。
 //!   * Fallback —— `404 "Route not found"`，TraceLayer 负责 span 构造。
-//! - LoRA 调用仅走 `drt.local_endpoint_registry()`；未注册时返回错误文本 “not found in local registry”。
+//! - LoRA 调用仅走 `drt.local_portname_registry()`；未注册时返回错误文本 “not found in local registry”。
 //!
 //! ## 实现要点
 //! - `Router` 按现有 builder 结构依序拼接。考虑到 Axum 子路由的 fallback / state 传播
@@ -195,7 +195,7 @@ pub async fn spawn_system_status_server(
         )
     };
 
-    let lora_enabled = std::env::var(crate::config::environment_names::llm::DYN_LORA_ENABLED)
+    let lora_enabled = std::env::var(crate::config::environment_names::llm::PGD_LORA_ENABLED)
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
@@ -309,7 +309,7 @@ pub async fn spawn_system_status_server(
 async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let system_health = state.drt().system_health();
     let system_health_lock = system_health.lock();
-    let (healthy, endpoints) = system_health_lock.get_health_status();
+    let (healthy, portnames) = system_health_lock.get_health_status();
     let uptime = Some(system_health_lock.uptime());
     drop(system_health_lock);
 
@@ -322,7 +322,7 @@ async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let response = json!({
         "status": healthy_string,
         "uptime": uptime,
-        "endpoints": endpoints,
+        "portnames": portnames,
     });
 
     tracing::trace!("Response {}", response.to_string());
@@ -350,7 +350,7 @@ async fn metrics_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
 #[tracing::instrument(skip_all, level = "trace")]
 async fn metadata_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
     let Some(metadata) = state.discovery_metadata() else {
-        tracing::debug!("Metadata endpoint called but no discovery metadata available");
+        tracing::debug!("Metadata portname called but no discovery metadata available");
         return (
             StatusCode::NOT_FOUND,
             "Discovery metadata not available".to_string(),
@@ -384,7 +384,7 @@ async fn load_lora_handler(
 ) -> impl IntoResponse {
     tracing::info!("Loading LoRA: {}", request.lora_name);
 
-    let endpoint_result = call_lora_endpoint(
+    let portname_result = call_lora_endpoint(
         state.drt(),
         "load_lora",
         json!({
@@ -396,7 +396,7 @@ async fn load_lora_handler(
     )
     .await;
 
-    match endpoint_result {
+    match portname_result {
         Ok(response) => {
             if response.status == "error" {
                 tracing::error!(
@@ -439,7 +439,7 @@ async fn unload_lora_handler(
         .to_string();
     tracing::info!("Unloading LoRA: {lora_name}");
 
-    let endpoint_result = call_lora_endpoint(
+    let portname_result = call_lora_endpoint(
         state.drt(),
         "unload_lora",
         json!({
@@ -448,7 +448,7 @@ async fn unload_lora_handler(
     )
     .await;
 
-    match endpoint_result {
+    match portname_result {
         Ok(response) => {
             if response.status == "error" {
                 tracing::error!(
@@ -551,34 +551,34 @@ async fn metadata_file_handler(
 /// 该函数只走本地注册表，不会在找不到端点时回退到网络发现路径。
 async fn call_lora_endpoint(
     drt: &crate::DistributedRuntime,
-    endpoint_name: &str,
+    portname_name: &str,
     request_body: serde_json::Value,
 ) -> anyhow::Result<LoraResponse> {
     use crate::engine::AsyncEngine;
 
-    tracing::debug!("Calling local endpoint: '{endpoint_name}'");
+    tracing::debug!("Calling local portname: '{portname_name}'");
 
-    let local_registry = drt.local_endpoint_registry();
-    let engine = match local_registry.get(endpoint_name) {
+    let local_registry = drt.local_portname_registry();
+    let engine = match local_registry.get(portname_name) {
         Some(engine) => engine,
         None => {
             anyhow::bail!(
-                "Endpoint '{}' not found in local registry. Make sure it's registered with .register_local_engine()",
-                endpoint_name
+                "PortName '{}' not found in local registry. Make sure it's registered with .register_local_engine()",
+                portname_name
             );
         }
     };
 
     tracing::debug!(
-        "Found endpoint '{}' in local registry, calling directly",
-        endpoint_name
+        "Found portname '{}' in local registry, calling directly",
+        portname_name
     );
 
     let request = crate::pipeline::SingleIn::new(request_body);
     let mut stream = engine.generate(request).await?;
 
     let Some(response) = stream.next().await else {
-        anyhow::bail!("No response received from endpoint '{}'", endpoint_name)
+        anyhow::bail!("No response received from portname '{}'", portname_name)
     };
 
     let response_data = response.data.unwrap_or_default();
@@ -697,7 +697,7 @@ mod tests {
 
     use super::*;
     use crate::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
-    use crate::local_endpoint_registry::LocalAsyncEngine;
+    use crate::local_portname_registry::LocalAsyncEngine;
     use crate::pipeline::{ManyOut, SingleIn};
     use crate::protocols::annotated::Annotated;
     use async_trait::async_trait;
@@ -808,7 +808,7 @@ mod tests {
                 "lora_name": "adapter-a"
             }))],
         });
-        drt.local_endpoint_registry().register(
+        drt.local_portname_registry().register(
             "load_lora".to_string(),
             engine,
         );
@@ -830,7 +830,7 @@ mod tests {
                 "count": 2
             }))],
         });
-        drt.local_endpoint_registry().register(
+        drt.local_portname_registry().register(
             "list_loras".to_string(),
             engine,
         );
@@ -971,7 +971,7 @@ mod tests {
     /// 测试：`SystemHealth` 的 uptime 会随时间推进而增长。
     async fn test_uptime_from_system_health() {
         // 验证可以从 `SystemHealth` 读取 uptime，并且它会持续增长。
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::PGD_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // 读取初始 uptime。
@@ -991,7 +991,7 @@ mod tests {
     /// 测试：运行时指标输出中会包含预期命名空间下的 uptime 指标。
     async fn test_runtime_metrics_initialization_and_namespace() {
         // 验证指标命名空间和 uptime 指标注册是否正确。
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::PGD_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
             // `SystemStatusState` 已在 distributed.rs 中创建，这里直接复用即可。
 
@@ -1001,15 +1001,15 @@ mod tests {
 
             // 校验 uptime_seconds 指标及其命名空间前缀。
             assert!(
-                response.contains("# HELP dynamo_component_uptime_seconds"),
+                response.contains("# HELP pagoda_servicegroup_uptime_seconds"),
                 "Should contain uptime_seconds help text"
             );
             assert!(
-                response.contains("# TYPE dynamo_component_uptime_seconds gauge"),
+                response.contains("# TYPE pagoda_servicegroup_uptime_seconds gauge"),
                 "Should contain uptime_seconds type"
             );
             assert!(
-                response.contains("dynamo_component_uptime_seconds"),
+                response.contains("pagoda_servicegroup_uptime_seconds"),
                 "Should contain uptime_seconds metric with correct namespace"
             );
         })
@@ -1020,7 +1020,7 @@ mod tests {
     /// 测试：uptime gauge 更新后，其对应的时长值会持续增大。
     async fn test_uptime_gauge_updates() {
         // 验证 uptime gauge 会随着时间推进持续更新。
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::PGD_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // 记录初始 uptime。
@@ -1053,7 +1053,7 @@ mod tests {
     /// 测试：当系统状态服务未启用时，DRT 不会暴露服务信息。
     async fn test_http_requests_fail_when_system_disabled() {
         // 验证系统状态服务被禁用时不会启动 HTTP 服务。
-        temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+        temp_env::async_with_vars([(env_system::PGD_SYSTEM_PORT, None::<&str>)], async {
             let drt = create_test_drt_async().await;
 
             // 期望禁用场景下 `system_status_server_info` 为空。
@@ -1086,7 +1086,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "integration")]
     /// 测试：不同健康状态和路径配置下，健康/存活接口的响应符合预期。
-    async fn test_health_endpoints(
+    async fn test_health_portnames(
         #[case] starting_health_status: &'static str,
         #[case] expected_status: u16,
         #[case] expected_body: &'static str,
@@ -1105,13 +1105,13 @@ mod tests {
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
             [
-                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::PGD_SYSTEM_PORT, Some("0")),
                 (
-                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS,
                     Some(starting_health_status),
                 ),
-                (env_system::DYN_SYSTEM_HEALTH_PATH, custom_health_path),
-                (env_system::DYN_SYSTEM_LIVE_PATH, custom_live_path),
+                (env_system::PGD_SYSTEM_HEALTH_PATH, custom_health_path),
+                (env_system::PGD_SYSTEM_LIVE_PATH, custom_live_path),
             ],
             (async || {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -1180,7 +1180,7 @@ mod tests {
 
     #[tokio::test]
     /// 测试：健康检查接口在 tracing 请求头存在时仍能正常处理请求。
-    async fn test_health_endpoint_tracing() -> Result<()> {
+    async fn test_health_portname_tracing() -> Result<()> {
         use std::sync::Arc;
 
         // 这里需要显式调用闭包以适配 `async_with_vars`。
@@ -1188,10 +1188,10 @@ mod tests {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
             [
-                (env_system::DYN_SYSTEM_PORT, Some("0")),
-                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
-                (env_logging::DYN_LOGGING_JSONL, Some("1")),
-                (env_logging::DYN_LOG, Some("trace")),
+                (env_system::PGD_SYSTEM_PORT, Some("0")),
+                (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+                (env_logging::PGD_LOGGING_JSONL, Some("1")),
+                (env_logging::PGD_LOG, Some("trace")),
             ],
             (async || {
                 // TODO: 后续可继续补充对 trace id / parent id 的精确断言。
@@ -1235,15 +1235,15 @@ mod tests {
 
     #[tokio::test]
     /// 测试：当端点健康状态变化时，健康检查接口会从 notready 逐步变为 ready。
-    async fn test_health_endpoint_with_changing_health_status() {
+    async fn test_health_portname_with_changing_health_status() {
         // 验证健康接口会先返回 notready，随后在端点注册并变健康后切换为 ready。
         const ENDPOINT_NAME: &str = "generate";
         const ENDPOINT_HEALTH_CONFIG: &str = "[\"generate\"]";
         temp_env::async_with_vars(
             [
-                (env_system::DYN_SYSTEM_PORT, Some("0")),
-                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
-                (env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, Some(ENDPOINT_HEALTH_CONFIG)),
+                (env_system::PGD_SYSTEM_PORT, Some("0")),
+                (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
+                (env_system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, Some(ENDPOINT_HEALTH_CONFIG)),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -1254,8 +1254,8 @@ mod tests {
                 // 如果这里为空，则说明启动流程没有按预期工作。
                 assert!(
                     system_info_opt.is_some(),
-                    "System status server was not spawned by DRT. Expected DRT to spawn server when DYN_SYSTEM_PORT is set to a positive value, but system_status_server_info() returned None. Environment: DYN_SYSTEM_PORT={:?}",
-                    std::env::var(env_system::DYN_SYSTEM_PORT)
+                    "System status server was not spawned by DRT. Expected DRT to spawn server when PGD_SYSTEM_PORT is set to a positive value, but system_status_server_info() returned None. Environment: PGD_SYSTEM_PORT={:?}",
+                    std::env::var(env_system::PGD_SYSTEM_PORT)
                 );
 
                 // 经过上面的断言后，这里可以安全取得服务信息。
@@ -1274,9 +1274,9 @@ mod tests {
                 assert_eq!(status, 503, "Health should be 503 (not ready) initially, got: {}", status);
                 assert!(body.contains("\"status\":\"notready\""), "Health should contain status notready");
 
-                // 接着创建 namespace/component/endpoint，让系统进入健康状态。
+                // 接着创建 namespace/servicegroup/portname，让系统进入健康状态。
                 let namespace = drt.namespace("ns1234").unwrap();
-                let component = namespace.component("comp1234").unwrap();
+                let servicegroup = namespace.servicegroup("comp1234").unwrap();
 
                 // 构造一个简单测试 handler，作为端点处理逻辑。
                 use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};
@@ -1299,11 +1299,11 @@ mod tests {
                 // 创建 ingress 并启动端点服务。
                 let ingress = Ingress::for_engine(std::sync::Arc::new(TestHandler)).unwrap();
 
-                // Start the service and endpoint with a health check payload
-                // This will automatically register the endpoint for health monitoring
+                // Start the service and portname with a health check payload
+                // This will automatically register the portname for health monitoring
                 tokio::spawn(async move {
-                    let _ = component.endpoint(ENDPOINT_NAME)
-                        .endpoint_builder()
+                    let _ = servicegroup.portname(ENDPOINT_NAME)
+                        .portname_builder()
                         .handler(ingress)
                         .health_check_payload(serde_json::json!({
                             "test": "health_check"
@@ -1312,7 +1312,7 @@ mod tests {
                         .await;
                 });
 
-                // Hit health endpoint 200 times to verify consistency
+                // Hit health portname 200 times to verify consistency
                 let mut success_count = 0;
                 let mut failures = Vec::new();
 
@@ -1331,7 +1331,7 @@ mod tests {
                     }
                 }
 
-                tracing::info!("Health endpoint test results: {success_count}/200 requests succeeded");
+                tracing::info!("Health portname test results: {success_count}/200 requests succeeded");
                 if !failures.is_empty() {
                     tracing::warn!("Failed requests: {}", failures.len());
                 }
@@ -1345,12 +1345,12 @@ mod tests {
 
     #[tokio::test]
     /// 测试：系统状态服务默认端点能够被正常访问并返回预期内容。
-    async fn test_spawn_system_status_server_endpoints() {
+    async fn test_spawn_system_status_server_portnames() {
         // 使用 reqwest 发起 HTTP 请求验证服务端点。
         temp_env::async_with_vars(
             [
-                (env_system::DYN_SYSTEM_PORT, Some("0")),
-                (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+                (env_system::PGD_SYSTEM_PORT, Some("0")),
+                (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -1402,19 +1402,19 @@ mod tests {
 
         temp_env::async_with_vars(
             [
-                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_system::PGD_SYSTEM_PORT, Some("0")),
                 (
-                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS,
                     Some("notready"),
                 ),
                 (
-                    env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
-                    Some("[\"test.endpoint\"]"),
+                    env_system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+                    Some("[\"test.portname\"]"),
                 ),
                 // 为测试缩短健康检查等待和超时时间。
-                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
-                (env_canary::DYN_CANARY_WAIT_TIME, Some("1")), // Send canary after 1 second of inactivity
-                ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("1")), // Immediately timeout to mimic unresponsiveness
+                ("PGD_HEALTH_CHECK_ENABLED", Some("true")),
+                (env_canary::PGD_CANARY_WAIT_TIME, Some("1")), // Send canary after 1 second of inactivity
+                ("PGD_HEALTH_CHECK_REQUEST_TIMEOUT", Some("1")), // Immediately timeout to mimic unresponsiveness
                 ("RUST_LOG", Some("info")),                      // Enable logging for test
             ],
             async {
@@ -1430,7 +1430,7 @@ mod tests {
                 let health_url = format!("http://{}/health", addr);
 
                 // 注册一个带健康检查 payload 的端点。
-                let endpoint = "test.endpoint";
+                let portname = "test.portname";
                 let health_check_payload = serde_json::json!({
                     "prompt": "health check test",
                     "_health_check": true
@@ -1441,13 +1441,13 @@ mod tests {
                     let system_health = drt.system_health();
                     let system_health_lock = system_health.lock();
                     system_health_lock.register_health_check_target(
-                        endpoint,
-                        crate::component::Instance {
-                            component: "test_component".to_string(),
-                            endpoint: "health".to_string(),
+                        portname,
+                        crate::servicegroup::Instance {
+                            servicegroup: "test_servicegroup".to_string(),
+                            portname: "health".to_string(),
                             namespace: "test_namespace".to_string(),
                             instance_id: 1,
-                            transport: crate::component::TransportType::Nats(endpoint.to_string()),
+                            transport: crate::servicegroup::TransportType::Nats(portname.to_string()),
                             device_type: None,
                         },
                         health_check_payload.clone(),
@@ -1467,7 +1467,7 @@ mod tests {
                 // 再把端点手动标记为 Ready。
                 drt.system_health()
                     .lock()
-                    .set_endpoint_health_status(endpoint, HealthStatus::Ready);
+                    .set_portname_health_status(portname, HealthStatus::Ready);
 
                 // 再次访问健康接口，此时应返回 ready。
                 let response = client.get(&health_url).send().await.unwrap();
@@ -1481,14 +1481,14 @@ mod tests {
                 );
 
                 // 最后直接检查 `SystemHealth` 内部状态。
-                let endpoint_status = drt
+                let portname_status = drt
                     .system_health()
                     .lock()
-                    .get_endpoint_health_status(endpoint);
+                    .get_portname_health_status(portname);
                 assert_eq!(
-                    endpoint_status,
+                    portname_status,
                     Some(HealthStatus::Ready),
-                    "SystemHealth should show endpoint as Ready after response"
+                    "SystemHealth should show portname as Ready after response"
                 );
             },
         )

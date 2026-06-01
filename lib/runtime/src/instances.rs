@@ -1,47 +1,47 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
-//! 提供"跨命名空间/组件"的全局实例聚合视图,作为 `component.rs` 中按组件粒度
+//! 提供"跨命名空间/组件"的全局实例聚合视图,作为 `servicegroup.rs` 中按组件粒度
 //! 列表函数的补集.调用方拿一份 `Vec<Instance>` 即可遍历整个发现平面里所有
-//! 服务端点,无需手动迭代 namespace/component.
+//! 服务端点,无需手动迭代 namespace/servicegroup.
 //!
 //! # 外部契约
 //! - `pub async fn list_all_instances(discovery_client: Arc<dyn Discovery>) -> anyhow::Result<Vec<Instance>>`
-//!   - 仅返回 `DiscoveryInstance::Endpoint` 变体;其它变体(Model/EventChannel/...)被静默丢弃;
+//!   - 仅返回 `DiscoveryInstance::PortName` 变体;其它变体(Model/EventChannel/...)被静默丢弃;
 //!   - 返回的 `Vec<Instance>` **必须**已按 `Instance` 的 `Ord` 顺序排好;
 //!   - 任何 `Discovery::list` 失败直接 `?` 透传.
 //!
 //! # 实现要点
 //! - 用 `into_iter().fold` 把过滤与提取合并为单次遍历,避免临时迭代器链.
 //! - 排序复用 `Vec::sort`(稳定排序),`Instance::Ord` 已经按
-//!   `(namespace, component, endpoint, instance_id)` 字段顺序定义.
+//!   `(namespace, servicegroup, portname, instance_id)` 字段顺序定义.
 
 use std::sync::Arc;
 
-use crate::component::Instance;
+use crate::servicegroup::Instance;
 use crate::discovery::{Discovery, DiscoveryInstance, DiscoveryQuery};
 
 // === SECTION: 公开 API ===
 
-/// 列出整个发现平面里所有 `Endpoint` 类型的实例,按字典序返回.
+/// 列出整个发现平面里所有 `PortName` 类型的实例,按字典序返回.
 pub async fn list_all_instances(
     discovery_client: Arc<dyn Discovery>,
 ) -> anyhow::Result<Vec<Instance>> {
-    let raw = discovery_client.list(DiscoveryQuery::AllEndpoints).await?;
-    let mut endpoints = collect_endpoints(raw);
-    endpoints.sort();
-    Ok(endpoints)
+    let raw = discovery_client.list(DiscoveryQuery::AllPortNames).await?;
+    let mut portnames = collect_portnames(raw);
+    portnames.sort();
+    Ok(portnames)
 }
 
 // === SECTION: 内部辅助 ===
 
-/// 从原始 `DiscoveryInstance` 序列中抽取所有 `Endpoint` 变体.
+/// 从原始 `DiscoveryInstance` 序列中抽取所有 `PortName` 变体.
 ///
 /// 用一次 `fold` 完成过滤+解包,避免 `filter_map + match` 的双层语义.
-fn collect_endpoints(items: Vec<DiscoveryInstance>) -> Vec<Instance> {
+fn collect_portnames(items: Vec<DiscoveryInstance>) -> Vec<Instance> {
     items.into_iter().fold(Vec::new(), |mut acc, item| {
-        if let DiscoveryInstance::Endpoint(instance) = item {
+        if let DiscoveryInstance::PortName(instance) = item {
             acc.push(instance);
         }
         acc
@@ -53,7 +53,7 @@ fn collect_endpoints(items: Vec<DiscoveryInstance>) -> Vec<Instance> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::TransportType;
+    use crate::servicegroup::TransportType;
     use crate::discovery::{
         DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
     };
@@ -124,13 +124,13 @@ mod tests {
     // ── 辅助函数 ─────────────────────────────────────────────────────────────
 
     /// 构造一个使用内存 NATS 传输的最小化 Instance。
-    fn make_instance(namespace: &str, component: &str, endpoint: &str, id: u64) -> Instance {
+    fn make_instance(namespace: &str, servicegroup: &str, portname: &str, id: u64) -> Instance {
         Instance {
             namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: endpoint.to_string(),
+            servicegroup: servicegroup.to_string(),
+            portname: portname.to_string(),
             instance_id: id,
-            transport: TransportType::Nats(format!("{namespace}.{component}.{endpoint}.{id:x}")),
+            transport: TransportType::Nats(format!("{namespace}.{servicegroup}.{portname}.{id:x}")),
             device_type: None,
         }
     }
@@ -145,9 +145,9 @@ mod tests {
 
     // ── 测试：单个端点实例被正确返回 ──────────────────────────────────────────
     #[tokio::test]
-    async fn returns_single_endpoint_instance() {
+    async fn returns_single_portname_instance() {
         let inst = make_instance("ns", "comp", "ep", 1);
-        let client = MockDiscovery::with_instances(vec![DiscoveryInstance::Endpoint(inst.clone())]);
+        let client = MockDiscovery::with_instances(vec![DiscoveryInstance::PortName(inst.clone())]);
         let result = list_all_instances(client).await.unwrap();
         assert_eq!(result, vec![inst]);
     }
@@ -158,15 +158,15 @@ mod tests {
         let inst = make_instance("ns", "comp", "ep", 42);
         let model = DiscoveryInstance::Model {
             namespace: "ns".to_string(),
-            component: "comp".to_string(),
-            endpoint: "ep".to_string(),
+            servicegroup: "comp".to_string(),
+            portname: "ep".to_string(),
             instance_id: 99,
             card_json: serde_json::json!({"display_name": "test-model"}),
             model_suffix: None,
         };
         let client = MockDiscovery::with_instances(vec![
             model,
-            DiscoveryInstance::Endpoint(inst.clone()),
+            DiscoveryInstance::PortName(inst.clone()),
         ]);
         let result = list_all_instances(client).await.unwrap();
         assert_eq!(result, vec![inst], "Model 变体应被过滤掉");
@@ -178,7 +178,7 @@ mod tests {
         let inst = make_instance("ns", "comp", "ep", 7);
         let channel = DiscoveryInstance::EventChannel {
             namespace: "ns".to_string(),
-            component: "comp".to_string(),
+            servicegroup: "comp".to_string(),
             topic: "kv-events".to_string(),
             instance_id: 8,
             transport: crate::discovery::EventTransport::Nats {
@@ -187,7 +187,7 @@ mod tests {
         };
         let client = MockDiscovery::with_instances(vec![
             channel,
-            DiscoveryInstance::Endpoint(inst.clone()),
+            DiscoveryInstance::PortName(inst.clone()),
         ]);
         let result = list_all_instances(client).await.unwrap();
         assert_eq!(result, vec![inst], "EventChannel 变体应被过滤掉");
@@ -198,8 +198,8 @@ mod tests {
     async fn returns_empty_when_only_model_cards_present() {
         let model = DiscoveryInstance::Model {
             namespace: "ns".to_string(),
-            component: "comp".to_string(),
-            endpoint: "ep".to_string(),
+            servicegroup: "comp".to_string(),
+            portname: "ep".to_string(),
             instance_id: 1,
             card_json: serde_json::json!({"display_name": "llama"}),
             model_suffix: None,
@@ -217,12 +217,12 @@ mod tests {
         let b = make_instance("ns", "comp", "ep", 1);
         let c = make_instance("ns", "comp", "ep", 2);
         let client = MockDiscovery::with_instances(vec![
-            DiscoveryInstance::Endpoint(a.clone()),
-            DiscoveryInstance::Endpoint(b.clone()),
-            DiscoveryInstance::Endpoint(c.clone()),
+            DiscoveryInstance::PortName(a.clone()),
+            DiscoveryInstance::PortName(b.clone()),
+            DiscoveryInstance::PortName(c.clone()),
         ]);
         let result = list_all_instances(client).await.unwrap();
-        // Instance Ord 按 (namespace, component, endpoint, instance_id) 排序
+        // Instance Ord 按 (namespace, servicegroup, portname, instance_id) 排序
         assert_eq!(result, vec![b, c, a], "结果必须已排序");
     }
 
@@ -233,9 +233,9 @@ mod tests {
         let y = make_instance("beta", "svc", "infer", 1);
         let z = make_instance("alpha", "svc", "infer", 2);
         let client = MockDiscovery::with_instances(vec![
-            DiscoveryInstance::Endpoint(y.clone()),
-            DiscoveryInstance::Endpoint(z.clone()),
-            DiscoveryInstance::Endpoint(x.clone()),
+            DiscoveryInstance::PortName(y.clone()),
+            DiscoveryInstance::PortName(z.clone()),
+            DiscoveryInstance::PortName(x.clone()),
         ]);
         let result = list_all_instances(client).await.unwrap();
         assert_eq!(result, vec![x, z, y]);
@@ -254,22 +254,22 @@ mod tests {
         );
     }
 
-    // ── 测试：三种变体混合时只有 Endpoint 通过 ──────────────────────────────
+    // ── 测试：三种变体混合时只有 PortName 通过 ──────────────────────────────
     #[tokio::test]
-    async fn mixed_variants_only_endpoints_returned() {
+    async fn mixed_variants_only_portnames_returned() {
         let ep1 = make_instance("ns", "a", "ep", 1);
         let ep2 = make_instance("ns", "b", "ep", 2);
         let model = DiscoveryInstance::Model {
             namespace: "ns".to_string(),
-            component: "a".to_string(),
-            endpoint: "ep".to_string(),
+            servicegroup: "a".to_string(),
+            portname: "ep".to_string(),
             instance_id: 10,
             card_json: serde_json::json!({"display_name": "m"}),
             model_suffix: None,
         };
         let channel = DiscoveryInstance::EventChannel {
             namespace: "ns".to_string(),
-            component: "a".to_string(),
+            servicegroup: "a".to_string(),
             topic: "t".to_string(),
             instance_id: 20,
             transport: crate::discovery::EventTransport::Nats {
@@ -277,10 +277,10 @@ mod tests {
             },
         };
         let client = MockDiscovery::with_instances(vec![
-            DiscoveryInstance::Endpoint(ep2.clone()),
+            DiscoveryInstance::PortName(ep2.clone()),
             model,
             channel,
-            DiscoveryInstance::Endpoint(ep1.clone()),
+            DiscoveryInstance::PortName(ep1.clone()),
         ]);
         let result = list_all_instances(client).await.unwrap();
         assert_eq!(result, vec![ep1, ep2]);
@@ -291,7 +291,7 @@ mod tests {
     async fn handles_large_number_of_instances() {
         let n = 200u64;
         let raw: Vec<DiscoveryInstance> = (0..n)
-            .map(|i| DiscoveryInstance::Endpoint(make_instance("ns", "comp", "ep", i)))
+            .map(|i| DiscoveryInstance::PortName(make_instance("ns", "comp", "ep", i)))
             .collect();
         let client = MockDiscovery::with_instances(raw);
         let result = list_all_instances(client).await.unwrap();
@@ -302,17 +302,17 @@ mod tests {
         }
     }
 
-    // ── 测试：collect_endpoints 助手在零拷贝路径下行为一致 ───────────────────
+    // ── 测试：collect_portnames 助手在零拷贝路径下行为一致 ───────────────────
     #[test]
-    fn collect_endpoints_preserves_input_order() {
+    fn collect_portnames_preserves_input_order() {
         let a = make_instance("z", "c", "e", 9);
         let b = make_instance("a", "c", "e", 1);
         let items = vec![
-            DiscoveryInstance::Endpoint(a.clone()),
-            DiscoveryInstance::Endpoint(b.clone()),
+            DiscoveryInstance::PortName(a.clone()),
+            DiscoveryInstance::PortName(b.clone()),
         ];
         // 助手本身不排序;排序是 list_all_instances 的额外步骤.
-        let out = collect_endpoints(items);
+        let out = collect_portnames(items);
         assert_eq!(out, vec![a, b]);
     }
 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 事件平面：ZMQ PUB/SUB transport
@@ -29,13 +29,13 @@
 //!   补充测试访问（必须保持不变）。
 //!
 //! ## 实现要点
-//! 与 lib-copy 的差异：
+//! 差异：
 //! 1. **抽取 `decode_pump_message`** —— 把"解析四帧 + 解析 Frame"的 11 个
 //!    早返回点从 `start_socket_pump` 的主循环里挪出来，作为 `Result<Bytes,
 //!    PumpDecodeError>`；主循环变成"recv → decode → broadcast"三步直叙。
 //! 2. **常量 `EXPECTED_FRAME_COUNT = 4`**，告别裸 4。
-//! 3. **空 endpoint 列表错误信息**与 lib-copy 完全一致（"Cannot connect to
-//!    zero endpoints"）—— 补充测试在断言该字符串，不能动。
+//! 3. **空 portname 列表错误信息**与 lib-copy 完全一致（"Cannot connect to
+//!    zero portnames"）—— 补充测试在断言该字符串，不能动。
 //! 4. publisher 的 `Mutex<Publish>` 保留 —— ZMQ socket 对 send 不是 Sync 安全，
 //!    必须串行化。这是 ZMQ 协议本身的约束，无法发散。
 
@@ -112,19 +112,19 @@ pub struct ZmqPubTransport {
 }
 
 impl ZmqPubTransport {
-    /// 在 `endpoint` 上 bind 一个 PUB socket。
+    /// 在 `portname` 上 bind 一个 PUB socket。
     ///
-    /// 若 endpoint 以 `:0` 结尾，先用 tokio TcpListener 占一个空闲端口、释放、
+    /// 若 portname 以 `:0` 结尾，先用 tokio TcpListener 占一个空闲端口、释放、
     /// 再让 ZMQ bind 上去 —— 解决了 ZMQ 没有 "实际绑定端口" API 的痛点。
     /// 返回 `(transport, actual_endpoint)`。
-    pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
+    pub async fn bind(portname: &str, topic: &str) -> Result<(Self, String)> {
+        let actual_endpoint = if portname.ends_with(":0") {
             let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
             let port = listener.local_addr()?.port();
             drop(listener);
             format!("tcp://0.0.0.0:{port}")
         } else {
-            endpoint.to_string()
+            portname.to_string()
         };
 
         let ctx = Context::new();
@@ -132,7 +132,7 @@ impl ZmqPubTransport {
             configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
 
         tracing::info!(
-            endpoint = %actual_endpoint,
+            portname = %actual_endpoint,
             topic = %topic,
             sndhwm = ZMQ_SNDHWM,
             "ZMQ PUB transport bound with configured HWM"
@@ -158,7 +158,7 @@ impl ZmqPubTransport {
             configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
 
         tracing::info!(
-            endpoint = %xsub_endpoint,
+            portname = %xsub_endpoint,
             topic = %topic,
             sndhwm = ZMQ_SNDHWM,
             "ZMQ PUB transport connected to broker XSUB"
@@ -170,11 +170,11 @@ impl ZmqPubTransport {
         })
     }
 
-    /// 同时连接多个 broker XSUB 端点（HA 模式）。`endpoints` 不能为空。
+    /// 同时连接多个 broker XSUB 端点（HA 模式）。`portnames` 不能为空。
     pub async fn connect_multiple(xsub_endpoints: &[String], topic: &str) -> Result<Self> {
         let mut iter = xsub_endpoints.iter();
         let Some(first) = iter.next() else {
-            anyhow::bail!("Cannot connect to zero endpoints");
+            anyhow::bail!("Cannot connect to zero portnames");
         };
 
         let ctx = Context::new();
@@ -182,11 +182,11 @@ impl ZmqPubTransport {
 
         for ep in iter {
             socket.get_socket().connect(ep)?;
-            tracing::debug!(endpoint = %ep, "ZMQ PUB connected to broker XSUB");
+            tracing::debug!(portname = %ep, "ZMQ PUB connected to broker XSUB");
         }
 
         tracing::info!(
-            num_endpoints = xsub_endpoints.len(),
+            num_portnames = xsub_endpoints.len(),
             topic = %topic,
             sndhwm = ZMQ_SNDHWM,
             "ZMQ PUB transport connected to multiple broker XSUBs with configured HWM"
@@ -253,14 +253,14 @@ pub struct ZmqSubTransport {
 
 impl ZmqSubTransport {
     /// 连接单个 publisher 端点。
-    pub async fn connect(endpoint: &str, topic: &str) -> Result<Self> {
+    pub async fn connect(portname: &str, topic: &str) -> Result<Self> {
         let ctx = Context::new();
         let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(endpoint)?
+            .connect(portname)?
             .subscribe(topic.as_bytes())?;
 
         tracing::info!(
-            endpoint = %endpoint,
+            portname = %portname,
             topic = %topic,
             rcvhwm = ZMQ_RCVHWM,
             "ZMQ SUB transport connected with configured HWM"
@@ -285,11 +285,11 @@ impl ZmqSubTransport {
         Self::connect_multiple(xpub_endpoints, topic).await
     }
 
-    /// 同时连接多个 publisher 端点做 fan-in。`endpoints` 不能为空。
-    pub async fn connect_multiple(endpoints: &[String], topic: &str) -> Result<Self> {
-        let mut iter = endpoints.iter();
+    /// 同时连接多个 publisher 端点做 fan-in。`portnames` 不能为空。
+    pub async fn connect_multiple(portnames: &[String], topic: &str) -> Result<Self> {
+        let mut iter = portnames.iter();
         let Some(first) = iter.next() else {
-            anyhow::bail!("Cannot connect to zero endpoints");
+            anyhow::bail!("Cannot connect to zero portnames");
         };
 
         let ctx = Context::new();
@@ -299,14 +299,14 @@ impl ZmqSubTransport {
 
         for ep in iter {
             socket.get_socket().connect(ep)?;
-            tracing::debug!(endpoint = %ep, "ZMQ SUB connected to endpoint");
+            tracing::debug!(portname = %ep, "ZMQ SUB connected to portname");
         }
 
         tracing::info!(
-            num_endpoints = endpoints.len(),
+            num_portnames = portnames.len(),
             topic = %topic,
             rcvhwm = ZMQ_RCVHWM,
-            "ZMQ SUB transport connected to multiple endpoints with configured HWM"
+            "ZMQ SUB transport connected to multiple portnames with configured HWM"
         );
 
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -443,16 +443,16 @@ mod tests {
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
         let port = 25555;
-        let endpoint = format!("tcp://127.0.0.1:{port}");
+        let portname = format!("tcp://127.0.0.1:{port}");
         let topic = "test-topic";
 
-        let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
+        let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&portname, topic)
             .await
             .expect("Failed to create publisher");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let subscriber = ZmqSubTransport::connect(&endpoint, topic)
+        let subscriber = ZmqSubTransport::connect(&portname, topic)
             .await
             .expect("Failed to create subscriber");
 
@@ -493,13 +493,13 @@ mod tests {
     #[tokio::test]
     async fn test_zmq_multiple_messages() {
         let port = 25556;
-        let endpoint = format!("tcp://127.0.0.1:{port}");
+        let portname = format!("tcp://127.0.0.1:{port}");
         let topic = "multi-test";
 
-        let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let (publisher, _) = ZmqPubTransport::bind(&portname, topic).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let subscriber = ZmqSubTransport::connect(&endpoint, topic).await.unwrap();
+        let subscriber = ZmqSubTransport::connect(&portname, topic).await.unwrap();
         let mut stream = subscriber.subscribe(topic).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -578,21 +578,21 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// bind `tcp://0.0.0.0:0`，断言返回的 endpoint 是真实端口，且 topic 字段写对。
+    /// bind `tcp://0.0.0.0:0`，断言返回的 portname 是真实端口，且 topic 字段写对。
     /// ## 意义
     /// 锁定 ":0 端口" 自动分配契约。
     #[tokio::test]
     async fn zmq_pub_bind_with_zero_port_returns_real_endpoint_and_topic() {
-        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://0.0.0.0:0", "topic-a")
+        let (publisher, portname) = ZmqPubTransport::bind("tcp://0.0.0.0:0", "topic-a")
             .await
             .expect("bind with :0 should succeed");
 
-        assert!(endpoint.starts_with("tcp://0.0.0.0:"));
+        assert!(portname.starts_with("tcp://0.0.0.0:"));
         assert_eq!(publisher.topic(), "topic-a");
     }
 
     /// ## 测试过程
-    /// 空 endpoint 列表传给 connect_multiple，断言报特定字符串错误。
+    /// 空 portname 列表传给 connect_multiple，断言报特定字符串错误。
     /// ## 意义
     /// 锁定错误信息字面值（与 lib-copy 一致）。
     #[tokio::test]
@@ -600,8 +600,8 @@ mod tests {
         let err = ZmqPubTransport::connect_multiple(&[], "topic")
             .await
             .err()
-            .expect("connecting to zero endpoints should fail");
-        assert!(err.to_string().contains("Cannot connect to zero endpoints"));
+            .expect("connecting to zero portnames should fail");
+        assert!(err.to_string().contains("Cannot connect to zero portnames"));
     }
 
     /// ## 测试过程
@@ -613,8 +613,8 @@ mod tests {
         let err = ZmqSubTransport::connect_multiple(&[], "topic")
             .await
             .err()
-            .expect("connecting to zero endpoints should fail");
-        assert!(err.to_string().contains("Cannot connect to zero endpoints"));
+            .expect("connecting to zero portnames should fail");
+        assert!(err.to_string().contains("Cannot connect to zero portnames"));
     }
 
     /// ## 测试过程
@@ -623,8 +623,8 @@ mod tests {
     /// 锁定 publish 的"先 decode envelope"前置条件。
     #[tokio::test]
     async fn zmq_pub_publish_rejects_invalid_envelope_bytes() {
-        let endpoint = reserve_tcp_endpoint().await;
-        let (publisher, _endpoint) = ZmqPubTransport::bind(&endpoint, "topic-invalid")
+        let portname = reserve_tcp_endpoint().await;
+        let (publisher, _portname) = ZmqPubTransport::bind(&portname, "topic-invalid")
             .await
             .expect("publisher bind should succeed");
 
@@ -643,37 +643,37 @@ mod tests {
     /// 锁定连接 API 矩阵的完备性 + kind 自报家门。
     #[tokio::test]
     async fn zmq_pub_sub_connect_variants_and_kind_work() {
-        let endpoint = reserve_tcp_endpoint().await;
+        let portname = reserve_tcp_endpoint().await;
         let topic = "variant-topic";
 
-        let (_publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
+        let (_publisher, _actual_endpoint) = ZmqPubTransport::bind(&portname, topic)
             .await
             .expect("publisher bind should succeed");
         tokio::time::sleep(Duration::from_millis(80)).await;
 
-        let pub_client = ZmqPubTransport::connect(&endpoint, topic)
+        let pub_client = ZmqPubTransport::connect(&portname, topic)
             .await
             .expect("pub connect should succeed");
         assert_eq!(EventTransportTx::kind(&pub_client), EventTransportKind::Zmq);
 
-        let sub_direct = ZmqSubTransport::connect(&endpoint, topic)
+        let sub_direct = ZmqSubTransport::connect(&portname, topic)
             .await
             .expect("sub connect should succeed");
         assert_eq!(EventTransportRx::kind(&sub_direct), EventTransportKind::Zmq);
 
-        let _sub_broker = ZmqSubTransport::connect_broker(&endpoint, topic)
+        let _sub_broker = ZmqSubTransport::connect_broker(&portname, topic)
             .await
             .expect("connect_broker should delegate to connect");
 
         let _pub_multi =
-            ZmqPubTransport::connect_multiple(std::slice::from_ref(&endpoint), topic)
+            ZmqPubTransport::connect_multiple(std::slice::from_ref(&portname), topic)
                 .await
-                .expect("pub connect_multiple with one endpoint should succeed");
+                .expect("pub connect_multiple with one portname should succeed");
 
         let _sub_multi =
-            ZmqSubTransport::connect_broker_multiple(std::slice::from_ref(&endpoint), topic)
+            ZmqSubTransport::connect_broker_multiple(std::slice::from_ref(&portname), topic)
                 .await
-                .expect("sub connect_broker_multiple with one endpoint should succeed");
+                .expect("sub connect_broker_multiple with one portname should succeed");
     }
 
     /// ## 测试过程
@@ -684,19 +684,19 @@ mod tests {
     /// 锁定 pump 任务对畸形输入的"静默丢弃"契约。
     #[tokio::test]
     async fn socket_pump_ignores_malformed_frames_and_forwards_valid_frame_payload() {
-        let endpoint = reserve_tcp_endpoint().await;
+        let portname = reserve_tcp_endpoint().await;
         let topic = "pump-topic";
 
         let ctx_pub = Context::new();
         let mut raw_pub = publish(&ctx_pub)
-            .bind(&endpoint)
+            .bind(&portname)
             .expect("raw publisher bind should succeed");
 
         tokio::time::sleep(Duration::from_millis(80)).await;
 
         let ctx_sub = Context::new();
         let sub_socket = configure_subscribe_builder(subscribe(&ctx_sub))
-            .connect(&endpoint)
+            .connect(&portname)
             .expect("subscriber connect should succeed")
             .subscribe(topic.as_bytes())
             .expect("subscriber topic subscribe should succeed");

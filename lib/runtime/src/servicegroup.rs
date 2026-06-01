@@ -1,44 +1,44 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # `component` —— 分布式应用的顶层构件树
+//! # `servicegroup` —— 分布式应用的顶层构件树
 //!
-//! 本模块定义了构建 Dynamo 分布式应用所需的最核心三层模型：
+//! 本模块定义了构建 Pagoda 分布式应用所需的最核心三层模型：
 //!
 //! ```text
 //! Namespace
-//!   └── Component
-//!         └── Endpoint
+//!   └── ServiceGroup
+//!         └── PortName
 //! ```
 //!
 //! - [`Namespace`]：逻辑分组，可嵌套（父 namespace → 子 namespace），
 //!   用作发现平面（discovery）的命名空间隔离；
-//! - [`Component`]：一个具体的"工作单元"，比如 Preprocessor、
+//! - [`ServiceGroup`]：一个具体的"工作单元"，比如 Preprocessor、
 //!   SmartRouter，承载若干配置文件与可调用端点；
-//! - [`Endpoint`]：网络可达的服务入口，绑定到具体的请求平面（NATS /
+//! - [`PortName`]：网络可达的服务入口，绑定到具体的请求平面（NATS /
 //!   TCP / HTTP）；
-//! - [`Instance`]：上述 endpoint 的某一次具体注册（连接 ID 维度）。
+//! - [`Instance`]：上述 portname 的某一次具体注册（连接 ID 维度）。
 //!
 //! 此外模块还公开了：
 //!
 //! - [`TransportType`] / [`DeviceType`]：用于发现平面的传输地址与硬件
 //!   维度；
 //! - [`Registry`] + `RegistryInner`：NATS 服务句柄的进程级表；
-//! - [`build_transport_type`]（来自子模块 `endpoint`）的 re-export。
+//! - [`build_transport_type`]（来自子模块 `portname`）的 re-export。
 //!
 //! ## 设计意图
 //!
 //! 1. **数据模型与生命周期分离**：本文件只放结构定义、字段拼装、最
 //!    常见的查询方法；真正涉及"挂指标 / 启动端点 / 注册到发现平面"
-//!    的复杂编排放在子模块 [`endpoint`] 里，避免文件过长。
-//! 2. **构造器统一走 derive_builder**：`Component` / `Namespace` 都用
+//!    的复杂编排放在子模块 [`portname`] 里，避免文件过长。
+//! 2. **构造器统一走 derive_builder**：`ServiceGroup` / `Namespace` 都用
 //!    `#[derive(Builder)]`，使外部可以以"小步快跑"的方式拼装对象，同
 //!    时通过 `#[validate(...)]` 在 `build()` 出口做名字合法性校验。
-//! 3. **可观测树形结构**：`MetricsHierarchy` 让 namespace → component
-//!    → endpoint 自然形成一棵指标树，根永远是 `DistributedRuntime`，
+//! 3. **可观测树形结构**：`MetricsHierarchy` 让 namespace → servicegroup
+//!    → portname 自然形成一棵指标树，根永远是 `DistributedRuntime`，
 //!    路径拼装与 connection_id 透传都在这棵树上完成。
-//! 4. **NATS 服务注册的可靠性**：`ComponentBuilder::build()` 在 NATS
-//!    模式下必须等到服务被 component registry 真正写入再返回，否则后
+//! 4. **NATS 服务注册的可靠性**：`ServiceGroupBuilder::build()` 在 NATS
+//!    模式下必须等到服务被 servicegroup registry 真正写入再返回，否则后
 //!    续 `serve_endpoint()` 会出现 lookup 失败。本文件在这里用
 //!    `block_in_place + blocking_recv` 把异步注册"塞"进同步出口，并
 //!    把这一段抽成单独 helper 以便阅读。
@@ -67,7 +67,7 @@ use crate::{
 use super::{DistributedRuntime, Runtime, traits::*, transports::nats::Slug, utils::Duration};
 
 use crate::pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint};
-use crate::protocols::EndpointId;
+use crate::protocols::PortNameId;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -86,17 +86,17 @@ use validator::{Validate, ValidationError};
 
 mod client;
 #[allow(clippy::module_inception)]
-mod component;
-mod endpoint;
+mod servicegroup;
+mod portname;
 mod namespace;
 mod registry;
 pub mod service;
 
 pub use client::Client;
-pub(crate) use client::EndpointDiscoverySource;
+pub(crate) use client::PortNameDiscoverySource;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
-pub use endpoint::build_transport_type;
+pub use portname::build_transport_type;
 
 // ============================================================================
 // 传输类型 & 设备类型
@@ -108,7 +108,7 @@ pub use endpoint::build_transport_type;
 ///
 /// - [`TransportType::Nats`]：NATS subject 字符串；
 /// - [`TransportType::Http`]：完整的 HTTP URL（含 host / port / path）；
-/// - [`TransportType::Tcp`]：`host:port/instance_id_hex/endpoint_name` 形式。
+/// - [`TransportType::Tcp`]：`host:port/instance_id_hex/portname_name` 形式。
 ///
 /// 在 JSON 中以 `snake_case` 输出，且 `Nats` 变体被特意 rename 为
 /// `nats_tcp`（保留历史兼容性）。
@@ -134,7 +134,7 @@ pub enum DeviceType {
 // ============================================================================
 
 /// 进程级 NATS 服务表的底层数据。`Registry` 持有该结构的 Arc<Mutex<>>
-/// 句柄。键是 component 的 service_name，值是 NATS 服务句柄。
+/// 句柄。键是 servicegroup 的 service_name，值是 NATS 服务句柄。
 #[derive(Default)]
 pub struct RegistryInner {
     pub(crate) services: HashMap<String, Service>,
@@ -142,7 +142,7 @@ pub struct RegistryInner {
 
 /// 共享句柄，多处持有同一个 `RegistryInner`。
 ///
-/// 构造与默认值在 [`crate::component::registry`] 子模块里实现。
+/// 构造与默认值在 [`crate::servicegroup::registry`] 子模块里实现。
 #[derive(Clone)]
 pub struct Registry {
     pub(crate) inner: Arc<tokio::sync::Mutex<RegistryInner>>,
@@ -159,8 +159,8 @@ pub struct Registry {
 /// 路由器据此选择目标 worker。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Instance {
-    pub component: String,
-    pub endpoint: String,
+    pub servicegroup: String,
+    pub portname: String,
     pub namespace: String,
     pub instance_id: u64,
     pub transport: TransportType,
@@ -176,37 +176,37 @@ impl Instance {
         self.instance_id
     }
 
-    /// 把三元组 `(namespace, component, endpoint)` 打包成 `EndpointId`。
+    /// 把三元组 `(namespace, servicegroup, portname)` 打包成 `PortNameId`。
     ///
     /// 不附带 `instance_id`——这是一个"端点身份"而不是"实例身份"。
-    pub fn endpoint_id(&self) -> EndpointId {
-        EndpointId {
+    pub fn portname_id(&self) -> PortNameId {
+        PortNameId {
             namespace: self.namespace.clone(),
-            component: self.component.clone(),
-            name: self.endpoint.clone(),
+            servicegroup: self.servicegroup.clone(),
+            name: self.portname.clone(),
         }
     }
 
-    /// 把四元组 `(namespace, component, endpoint, instance_id)` 打包成
-    /// `discovery::EndpointInstanceId`，供发现平面定位"具体实例"。
-    pub fn endpoint_instance_id(&self) -> crate::discovery::EndpointInstanceId {
-        crate::discovery::EndpointInstanceId {
+    /// 把四元组 `(namespace, servicegroup, portname, instance_id)` 打包成
+    /// `discovery::PortNameInstanceId`，供发现平面定位"具体实例"。
+    pub fn portname_instance_id(&self) -> crate::discovery::PortNameInstanceId {
+        crate::discovery::PortNameInstanceId {
             namespace: self.namespace.clone(),
-            component: self.component.clone(),
-            endpoint: self.endpoint.clone(),
+            servicegroup: self.servicegroup.clone(),
+            portname: self.portname.clone(),
             instance_id: self.instance_id,
         }
     }
 }
 
 impl fmt::Display for Instance {
-    /// Display 格式：`{namespace}/{component}/{endpoint}/{instance_id}`。
+    /// Display 格式：`{namespace}/{servicegroup}/{portname}/{instance_id}`。
     /// 这一格式同时被 `Ord` 实现作为排序键，**不可随意更改**。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}/{}/{}/{}",
-            self.namespace, self.component, self.endpoint, self.instance_id
+            self.namespace, self.servicegroup, self.portname, self.instance_id
         )
     }
 }
@@ -225,22 +225,22 @@ impl PartialOrd for Instance {
 }
 
 // ============================================================================
-// Component：分布式应用的核心构件
+// ServiceGroup：分布式应用的核心构件
 // ============================================================================
 
-/// 分布式应用的"组件"——可在发现平面被找到，可托管若干 [`Endpoint`]。
+/// 分布式应用的"组件"——可在发现平面被找到，可托管若干 [`PortName`]。
 ///
-/// `Component` 通过 [`ComponentBuilder`] 构造（`#[derive(Builder)]`），
+/// `ServiceGroup` 通过 [`ServiceGroupBuilder`] 构造（`#[derive(Builder)]`），
 /// `name` 字段会被 [`validate_allowed_chars`] 校验。
 #[derive(Educe, Builder, Clone, Validate)]
 #[educe(Debug)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
-pub struct Component {
+pub struct ServiceGroup {
     #[builder(private)]
     #[educe(Debug(ignore))]
     drt: Arc<DistributedRuntime>,
 
-    /// Name of the component
+    /// Name of the servicegroup
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
@@ -261,25 +261,25 @@ pub struct Component {
 
 // ----- Hash / Eq：身份等价定义为 `(namespace.name, name)` -----
 
-impl Hash for Component {
+impl Hash for ServiceGroup {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // namespace.name() 已经把祖先链拼成完整路径，再加 component name
+        // namespace.name() 已经把祖先链拼成完整路径，再加 servicegroup name
         // 即可得到全局唯一身份。
         self.namespace.name().hash(state);
         self.name.hash(state);
     }
 }
 
-impl PartialEq for Component {
+impl PartialEq for ServiceGroup {
     fn eq(&self, other: &Self) -> bool {
         self.namespace.name() == other.namespace.name() && self.name == other.name
     }
 }
 
-impl Eq for Component {}
+impl Eq for ServiceGroup {}
 
-impl std::fmt::Display for Component {
-    /// `{namespace}.{component}`。
+impl std::fmt::Display for ServiceGroup {
+    /// `{namespace}.{servicegroup}`。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}", self.namespace.name(), self.name)
     }
@@ -287,19 +287,19 @@ impl std::fmt::Display for Component {
 
 // ----- Runtime / MetricsHierarchy 透传 -----
 
-impl DistributedRuntimeProvider for Component {
+impl DistributedRuntimeProvider for ServiceGroup {
     fn drt(&self) -> &DistributedRuntime {
         &self.drt
     }
 }
 
-impl RuntimeProvider for Component {
+impl RuntimeProvider for ServiceGroup {
     fn rt(&self) -> &Runtime {
         self.drt.rt()
     }
 }
 
-impl MetricsHierarchy for Component {
+impl MetricsHierarchy for ServiceGroup {
     fn basename(&self) -> String {
         self.name.clone()
     }
@@ -324,7 +324,7 @@ impl MetricsHierarchy for Component {
 
 // ----- 业务方法 -----
 
-impl Component {
+impl ServiceGroup {
     /// 拼出本组件在 NATS / 服务平面的对外名称。
     ///
     /// 格式：`slugify({namespace}_{name})`，确保不出现 `.` 等会破坏
@@ -349,20 +349,20 @@ impl Component {
         &self.labels
     }
 
-    /// 在本组件下创建一个新的 [`Endpoint`]。
+    /// 在本组件下创建一个新的 [`PortName`]。
     ///
     /// ## 副作用
     ///
-    /// 会把 endpoint 的 `MetricsRegistry` 作为 child 挂到 component 的
+    /// 会把 portname 的 `MetricsRegistry` 作为 child 挂到 servicegroup 的
     /// 注册表下，确保 Prometheus scrape 时能遍历到（且避免命名冲突）。
-    pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
-        let ep = Endpoint {
-            component: self.clone(),
-            name: endpoint.into(),
+    pub fn portname(&self, portname: impl Into<String>) -> PortName {
+        let ep = PortName {
+            servicegroup: self.clone(),
+            name: portname.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
         };
-        // 把新 endpoint 的注册表挂到当前 component 的注册表下，让指标
+        // 把新 portname 的注册表挂到当前 servicegroup 的注册表下，让指标
         // 抓取时形成正确的树形遍历。
         self.get_metrics_registry()
             .add_child_registry(ep.get_metrics_registry());
@@ -373,21 +373,21 @@ impl Component {
     ///
     /// ## 实现步骤
     ///
-    /// 1. 构造一次 `DiscoveryQuery::ComponentEndpoints`；
-    /// 2. 把发现平面返回的 `DiscoveryInstance` 过滤成只剩 `Endpoint` 变
+    /// 1. 构造一次 `DiscoveryQuery::ServiceGroupPortNames`；
+    /// 2. 把发现平面返回的 `DiscoveryInstance` 过滤成只剩 `PortName` 变
     ///    体（忽略 ModelCard 之类的非端点条目）；
     /// 3. 按 `Instance::cmp`（字典序）排序后返回。
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
         let discovery = self.drt.discovery();
-        let query = crate::discovery::DiscoveryQuery::ComponentEndpoints {
+        let query = crate::discovery::DiscoveryQuery::ServiceGroupPortNames {
             namespace: self.namespace.name(),
-            component: self.name.clone(),
+            servicegroup: self.name.clone(),
         };
         let raw = discovery.list(query).await?;
         let mut instances: Vec<Instance> = raw
             .into_iter()
             .filter_map(|di| match di {
-                crate::discovery::DiscoveryInstance::Endpoint(inst) => Some(inst),
+                crate::discovery::DiscoveryInstance::PortName(inst) => Some(inst),
                 _ => None,
             })
             .collect();
@@ -397,17 +397,17 @@ impl Component {
 }
 
 // ============================================================================
-// ComponentBuilder：构造 + NATS 服务注册的同步等待
+// ServiceGroupBuilder：构造 + NATS 服务注册的同步等待
 // ============================================================================
 
-impl ComponentBuilder {
-    /// 由 `Namespace::component` 间接调用。预填 `drt` 字段，外部使用方
+impl ServiceGroupBuilder {
+    /// 由 `Namespace::servicegroup` 间接调用。预填 `drt` 字段，外部使用方
     /// 只需提供 name / namespace。
     pub fn from_runtime(drt: Arc<DistributedRuntime>) -> Self {
         Self::default().drt(drt)
     }
 
-    /// 构造 `Component`。
+    /// 构造 `ServiceGroup`。
     ///
     /// ## 行为
     ///
@@ -418,25 +418,25 @@ impl ComponentBuilder {
     ///
     /// 同步等待这一步通过 `tokio::task::block_in_place + blocking_recv`
     /// 实现，并被抽到 [`await_nats_registration`] 助手里。
-    pub fn build(self) -> Result<Component, anyhow::Error> {
-        let component = self.build_internal()?;
-        if component.drt().request_plane().is_nats() {
-            await_nats_registration(&component)?;
+    pub fn build(self) -> Result<ServiceGroup, anyhow::Error> {
+        let servicegroup = self.build_internal()?;
+        if servicegroup.drt().request_plane().is_nats() {
+            await_nats_registration(&servicegroup)?;
         }
-        Ok(component)
+        Ok(servicegroup)
     }
 }
 
-/// 同步等待 `register_nats_service` 在 component registry 上写入完成。
+/// 同步等待 `register_nats_service` 在 servicegroup registry 上写入完成。
 ///
 /// ## 失败语义
 ///
 /// - `Some(Ok(()))` → NATS 服务注册完成；
 /// - `Some(Err(e))` → 注册期间报错；
 /// - `None` → 注册通道意外关闭（很可能是运行时正在关闭）。
-fn await_nats_registration(component: &Component) -> anyhow::Result<()> {
-    let drt = component.drt();
-    let mut rx = drt.register_nats_service(component.clone());
+fn await_nats_registration(servicegroup: &ServiceGroup) -> anyhow::Result<()> {
+    let drt = servicegroup.drt();
+    let mut rx = drt.register_nats_service(servicegroup.clone());
 
     // block_in_place 把当前异步任务暂时移出运行时线程，让 blocking_recv
     // 能合法阻塞而不致使整个 runtime 卡死。
@@ -445,38 +445,38 @@ fn await_nats_registration(component: &Component) -> anyhow::Result<()> {
     match received {
         Some(Ok(())) => {
             tracing::debug!(
-                component = component.service_name(),
+                servicegroup = servicegroup.service_name(),
                 "NATS service registration completed",
             );
             Ok(())
         }
         Some(Err(e)) => Err(anyhow::anyhow!(
-            "NATS service registration failed for component '{}': {}",
-            component.service_name(),
+            "NATS service registration failed for servicegroup '{}': {}",
+            servicegroup.service_name(),
             e
         )),
         None => Err(anyhow::anyhow!(
-            "NATS service registration channel closed unexpectedly for component '{}'",
-            component.service_name()
+            "NATS service registration channel closed unexpectedly for servicegroup '{}'",
+            servicegroup.service_name()
         )),
     }
 }
 
 // ============================================================================
-// Endpoint：可调用入口
+// PortName：可调用入口
 // ============================================================================
 
-/// 一个 component 下的具体调用入口。
+/// 一个 servicegroup 下的具体调用入口。
 ///
-/// `Endpoint` 不走 `#[derive(Builder)]`——构造路径都是
-/// `Component::endpoint(name)`，外部不直接 new。它的 lifecycle 编排在
-/// [`endpoint`] 子模块中实现。
+/// `PortName` 不走 `#[derive(Builder)]`——构造路径都是
+/// `ServiceGroup::portname(name)`，外部不直接 new。它的 lifecycle 编排在
+/// [`portname`] 子模块中实现。
 #[derive(Debug, Clone)]
-pub struct Endpoint {
-    component: Component,
+pub struct PortName {
+    servicegroup: ServiceGroup,
 
     // todo - restrict alphabet
-    /// Endpoint name
+    /// PortName name
     name: String,
 
     /// Additional labels for metrics
@@ -486,48 +486,48 @@ pub struct Endpoint {
     metrics_registry: crate::MetricsRegistry,
 }
 
-// ----- Hash / Eq：身份等价定义为 `(component, name)` -----
+// ----- Hash / Eq：身份等价定义为 `(servicegroup, name)` -----
 
-impl Hash for Endpoint {
+impl Hash for PortName {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.component.hash(state);
+        self.servicegroup.hash(state);
         self.name.hash(state);
     }
 }
 
-impl PartialEq for Endpoint {
+impl PartialEq for PortName {
     fn eq(&self, other: &Self) -> bool {
-        self.component == other.component && self.name == other.name
+        self.servicegroup == other.servicegroup && self.name == other.name
     }
 }
 
-impl Eq for Endpoint {}
+impl Eq for PortName {}
 
 // ----- Runtime / MetricsHierarchy 透传 -----
 
-impl DistributedRuntimeProvider for Endpoint {
+impl DistributedRuntimeProvider for PortName {
     fn drt(&self) -> &DistributedRuntime {
-        self.component.drt()
+        self.servicegroup.drt()
     }
 }
 
-impl RuntimeProvider for Endpoint {
+impl RuntimeProvider for PortName {
     fn rt(&self) -> &Runtime {
-        self.component.rt()
+        self.servicegroup.rt()
     }
 }
 
-impl MetricsHierarchy for Endpoint {
+impl MetricsHierarchy for PortName {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    /// 祖先链 = component 的祖先链 + component 本身。
+    /// 祖先链 = servicegroup 的祖先链 + servicegroup 本身。
     fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
-        let comp_chain = self.component.parent_hierarchies();
+        let comp_chain = self.servicegroup.parent_hierarchies();
         let mut out: Vec<&dyn MetricsHierarchy> = Vec::with_capacity(comp_chain.len() + 1);
         out.extend(comp_chain);
-        out.push(&self.component as &dyn MetricsHierarchy);
+        out.push(&self.servicegroup as &dyn MetricsHierarchy);
         out
     }
 
@@ -536,18 +536,18 @@ impl MetricsHierarchy for Endpoint {
     }
 
     fn connection_id(&self) -> Option<u64> {
-        Some(self.component.drt().connection_id())
+        Some(self.servicegroup.drt().connection_id())
     }
 }
 
 // ----- 业务方法 -----
 
-impl Endpoint {
+impl PortName {
     /// 返回端点三元组 ID（不含 instance_id）。
-    pub fn id(&self) -> EndpointId {
-        EndpointId {
-            namespace: self.component.namespace().name().to_string(),
-            component: self.component.name().to_string(),
+    pub fn id(&self) -> PortNameId {
+        PortNameId {
+            namespace: self.servicegroup.namespace().name().to_string(),
+            servicegroup: self.servicegroup.name().to_string(),
             name: self.name.clone(),
         }
     }
@@ -557,9 +557,9 @@ impl Endpoint {
         &self.name
     }
 
-    /// 返回所属 component 引用。
-    pub fn component(&self) -> &Component {
-        &self.component
+    /// 返回所属 servicegroup 引用。
+    pub fn servicegroup(&self) -> &ServiceGroup {
+        &self.servicegroup
     }
 
     /// 异步构造一个该端点的 [`Client`]，供调用方发起 push / response。
@@ -567,10 +567,10 @@ impl Endpoint {
         client::Client::new(self.clone()).await
     }
 
-    /// 取一个 endpoint config builder，用于 `start()` 端点。详见
-    /// [`endpoint::EndpointConfigBuilder`]。
-    pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {
-        endpoint::EndpointConfigBuilder::from_endpoint(self.clone())
+    /// 取一个 portname config builder，用于 `start()` 端点。详见
+    /// [`portname::PortNameConfigBuilder`]。
+    pub fn portname_builder(&self) -> portname::PortNameConfigBuilder {
+        portname::PortNameConfigBuilder::from_portname(self.clone())
     }
 }
 
@@ -603,12 +603,12 @@ pub struct Namespace {
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
 
-    /// Cache for components to avoid duplicate registrations and metrics collisions.
-    /// When the same component is requested multiple times, we return the cached instance
-    /// to ensure all endpoints share the same Component and MetricsRegistry.
+    /// Cache for servicegroups to avoid duplicate registrations and metrics collisions.
+    /// When the same servicegroup is requested multiple times, we return the cached instance
+    /// to ensure all portnames share the same ServiceGroup and MetricsRegistry.
     /// Uses DashMap for lock-free reads and automatic handling of concurrent inserts.
     #[builder(default = "Arc::new(DashMap::new())")]
-    component_cache: Arc<DashMap<String, Component>>,
+    servicegroup_cache: Arc<DashMap<String, ServiceGroup>>,
 }
 
 // ----- Runtime 透传 -----
@@ -626,7 +626,7 @@ impl RuntimeProvider for Namespace {
 }
 
 impl std::fmt::Debug for Namespace {
-    /// 自定义 Debug，避免把整张 `component_cache` / `metrics_registry`
+    /// 自定义 Debug，避免把整张 `servicegroup_cache` / `metrics_registry`
     /// 打印出来。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -665,33 +665,33 @@ impl Namespace {
     ///
     /// ## 同名缓存
     ///
-    /// 同一 namespace 多次以同一名字调用 `component(name)`，必须返回
-    /// 同一个 `Component` 实例。否则 endpoint 会被挂到不同的
+    /// 同一 namespace 多次以同一名字调用 `servicegroup(name)`，必须返回
+    /// 同一个 `ServiceGroup` 实例。否则 portname 会被挂到不同的
     /// `MetricsRegistry`，造成同名指标重复注册。
     ///
     /// 用 `DashMap` 既保证 lock-free 读，又能处理并发插入。
-    pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
+    pub fn servicegroup(&self, name: impl Into<String>) -> anyhow::Result<ServiceGroup> {
         let name = name.into();
 
         // 快路径：命中缓存直接返回 clone。
-        if let Some(hit) = self.component_cache.get(&name) {
+        if let Some(hit) = self.servicegroup_cache.get(&name) {
             return Ok(hit.value().clone());
         }
 
-        // 慢路径：构造一个新 component。
-        let component = ComponentBuilder::from_runtime(self.runtime.clone())
+        // 慢路径：构造一个新 servicegroup。
+        let servicegroup = ServiceGroupBuilder::from_runtime(self.runtime.clone())
             .name(&name)
             .namespace(self.clone())
             .build()?;
 
-        // 把 component 的指标注册表挂到 namespace 注册表下（树形挂载）。
+        // 把 servicegroup 的指标注册表挂到 namespace 注册表下（树形挂载）。
         self.get_metrics_registry()
-            .add_child_registry(component.get_metrics_registry());
+            .add_child_registry(servicegroup.get_metrics_registry());
 
         // 写入缓存。即使并发场景下我们和别的线程同时插入同一个 key，
         // DashMap 也能正确合并。
-        self.component_cache.insert(name, component.clone());
-        Ok(component)
+        self.servicegroup_cache.insert(name, servicegroup.clone());
+        Ok(servicegroup)
     }
 
     /// 在本 namespace 下创建子 namespace（仍是 `Namespace` 类型）。
@@ -721,7 +721,7 @@ impl Namespace {
 
 /// 校验"名字"字段是否只包含允许的字符。
 ///
-/// 用于 `Component.name` 与 `Namespace.name` 的 `#[validate(custom = ...)]`
+/// 用于 `ServiceGroup.name` 与 `Namespace.name` 的 `#[validate(custom = ...)]`
 /// 钩子。允许字符集合：小写字母 / 数字 / 短横线 `-` / 下划线 `_`。
 ///
 /// ## 入参
@@ -771,8 +771,8 @@ mod tests {
     fn fake_instance(ns: &str, comp: &str, ep: &str, id: u64) -> Instance {
         Instance {
             namespace: ns.to_string(),
-            component: comp.to_string(),
-            endpoint: ep.to_string(),
+            servicegroup: comp.to_string(),
+            portname: ep.to_string(),
             instance_id: id,
             transport: TransportType::Nats(format!("{ns}.{comp}.{ep}.{id}")),
             device_type: Some(DeviceType::Cuda),
@@ -880,25 +880,25 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// `Instance::endpoint_id()` 应正确从三元组字段提取 `EndpointId`。
+    /// `Instance::portname_id()` 应正确从三元组字段提取 `PortNameId`。
     #[test]
-    fn instance_endpoint_id_fields() {
+    fn instance_portname_id_fields() {
         let inst = fake_instance("mynamespace", "mycomp", "myep", 7);
-        let eid = inst.endpoint_id();
+        let eid = inst.portname_id();
         assert_eq!(eid.namespace, "mynamespace");
-        assert_eq!(eid.component, "mycomp");
+        assert_eq!(eid.servicegroup, "mycomp");
         assert_eq!(eid.name, "myep");
     }
 
     /// ## 测试过程
-    /// `Instance::endpoint_instance_id()` 应额外带上 instance_id。
+    /// `Instance::portname_instance_id()` 应额外带上 instance_id。
     #[test]
-    fn instance_endpoint_instance_id_includes_id() {
+    fn instance_portname_instance_id_includes_id() {
         let inst = fake_instance("ns", "comp", "ep", 99);
-        let eiid = inst.endpoint_instance_id();
+        let eiid = inst.portname_instance_id();
         assert_eq!(eiid.namespace, "ns");
-        assert_eq!(eiid.component, "comp");
-        assert_eq!(eiid.endpoint, "ep");
+        assert_eq!(eiid.servicegroup, "comp");
+        assert_eq!(eiid.portname, "ep");
         assert_eq!(eiid.instance_id, 99);
     }
 

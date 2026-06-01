@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # NATS JetStream KV 后端
 //!
 //! ## 设计意图
-//! 将 dynamo 的 `Store`/`Bucket` 抽象桥接到 NATS JetStream KV。本实现与
-//! lib-copy 标准版**契约完全等价**，但内部走了与之不同的代码组织：
+//! 将 pagoda 的 `Store`/`Bucket` 抽象桥接到 NATS JetStream KV。本实现与
+//! 标准版**契约完全等价**，但内部走了与之不同的代码组织：
 //! - 入口点 `get_or_create_key_value` 改为"先尝试创建，遇到 AlreadyExists
 //!   再回退到 get"的乐观路径，省去 lib-copy 的"先 get 失败再 create"的两次
 //!   往返；
@@ -13,7 +13,7 @@
 //! - `entries()` 改为流式收集（`map` + `collect_into`），避免显式可变 HashMap。
 //!
 //! ## 外部契约
-//! - 公开 `NATSStore::new(client, endpoint)`、`NATSBucket`。
+//! - 公开 `NATSStore::new(client, portname)`、`NATSBucket`。
 //! - `connection_id()` 返回 NATS 客户端的 server-assigned `client_id`。
 //! - `get_or_create_bucket(name, ttl)`：用 `Slug::slugify` 规范桶名；ttl 仅在
 //!   "新建"路径上生效。
@@ -32,7 +32,7 @@ use async_nats::jetstream::kv::Operation;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::{protocols::EndpointId, slug::Slug, storage::kv, transports::nats::Client};
+use crate::{protocols::PortNameId, slug::Slug, storage::kv, transports::nats::Client};
 
 use super::{Bucket, Store, StoreError, StoreOutcome};
 
@@ -44,12 +44,12 @@ use super::{Bucket, Store, StoreError, StoreOutcome};
 #[derive(Clone)]
 pub struct NATSStore {
     client: Client,
-    endpoint: EndpointId,
+    portname: PortNameId,
 }
 
 impl NATSStore {
-    pub fn new(client: Client, endpoint: EndpointId) -> Self {
-        NATSStore { client, endpoint }
+    pub fn new(client: Client, portname: PortNameId) -> Self {
+        NATSStore { client, portname }
     }
 
     // -------------------------------------------------------------------------
@@ -58,7 +58,7 @@ impl NATSStore {
 
     /// 获取或创建 KV bucket。
     ///
-    /// 与 lib-copy 不同：先尝试 create（乐观），遇到 AlreadyExists 再 fallback 到 get。
+    /// 与先尝试 create（乐观），遇到 AlreadyExists 再 fallback 到 get。
     /// 这样在"第一次 deploy"场景下能省一次 RTT。
     async fn get_or_create_key_value(
         &self,
@@ -127,7 +127,7 @@ impl Store for NATSStore {
     ) -> Result<Self::Bucket, StoreError> {
         let slug = Slug::slugify(bucket_name);
         let nats_store = self
-            .get_or_create_key_value(&self.endpoint.namespace, &slug, ttl)
+            .get_or_create_key_value(&self.portname.namespace, &slug, ttl)
             .await?;
         Ok(NATSBucket { nats_store })
     }
@@ -135,7 +135,7 @@ impl Store for NATSStore {
     async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
         let slug = Slug::slugify(bucket_name);
         Ok(self
-            .get_key_value(&self.endpoint.namespace, &slug)
+            .get_key_value(&self.portname.namespace, &slug)
             .await?
             .map(|nats_store| NATSBucket { nats_store }))
     }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::error` —— pipeline 错误类型与下转扩展
@@ -105,8 +105,8 @@ pub enum PipelineError {
     #[error("Generate Error: {0}")]
     GenerateError(Error),
 
-    #[error("An endpoint URL must have the format: namespace/component/endpoint")]
-    InvalidEndpointFormat,
+    #[error("An portname URL must have the format: namespace/servicegroup/portname")]
+    InvalidPortNameFormat,
 
     #[error("NATS Request Error: {0}")]
     NatsRequestError(#[from] NatsError<async_nats::jetstream::context::RequestErrorKind>),

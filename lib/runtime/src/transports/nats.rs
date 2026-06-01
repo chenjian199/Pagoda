@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -10,7 +10,7 @@
 //!   3. [`NatsQueue`] — 基于 JetStream 的命名队列,支持广播消费/独占消费/纯发布三种形态.
 //!
 //! # 外部契约
-//! - 公共 API 与 lib-copy 完全对齐,包括方法签名/类型暴露/再导出;
+//! - 公共 API 完全对齐,包括方法签名/类型暴露/再导出;
 //! - 环境变量驱动的默认值集中在 [`crate::config::environment_names::nats`];
 //! - 常量 [`URL_PREFIX`] = `"nats://"` 是 wire-level 协议前缀,不可改;
 //! - 鉴权优先级(由 [`NatsAuth::default`] 实现):
@@ -31,7 +31,7 @@
 //!   避免误删未消费的消息.
 
 use crate::metrics::MetricsHierarchy;
-use crate::protocols::EndpointId;
+use crate::protocols::PortNameId;
 
 use anyhow::Result;
 use async_nats::connection::State;
@@ -488,8 +488,8 @@ impl NatsQueue {
         let client_options = Client::builder().server(self.nats_server.clone()).build()?;
         let client = client_options.connect().await?;
 
-        // 老化时间从环境变量 DYN_NATS_STREAM_MAX_AGE 读取(秒),否则默认 1 小时.
-        let max_age = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_AGE)
+        // 老化时间从环境变量 PGD_NATS_STREAM_MAX_AGE 读取(秒),否则默认 1 小时.
+        let max_age = std::env::var(env_nats::stream::PGD_NATS_STREAM_MAX_AGE)
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .map(time::Duration::from_secs)
@@ -811,14 +811,14 @@ impl NatsQueue {
     }
 }
 
-/// 根据 endpoint 与实例号构造实例级消息 subject.
+/// 根据 portname 与实例号构造实例级消息 subject.
 ///
-/// 格式 `"{ns}_{component}.{name}-{instance:x}"` 是协议级承诺,不可改.
-pub fn instance_subject(endpoint_id: &EndpointId, instance_id: u64) -> String {
-    let namespace = &endpoint_id.namespace;
-    let component = &endpoint_id.component;
-    let name = &endpoint_id.name;
-    format!("{namespace}_{component}.{name}-{instance_id:x}")
+/// 格式 `"{ns}_{servicegroup}.{name}-{instance:x}"` 是协议级承诺,不可改.
+pub fn instance_subject(portname_id: &PortNameId, instance_id: u64) -> String {
+    let namespace = &portname_id.namespace;
+    let servicegroup = &portname_id.servicegroup;
+    let name = &portname_id.name;
+    format!("{namespace}_{servicegroup}.{name}-{instance_id:x}")
 }
 
 // === SECTION: tests ===
@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     fn maybe_test_nats_server() -> String {
-        std::env::var("DYNAMO_TEST_NATS_URL")
+        std::env::var("PAGODA_TEST_NATS_URL")
             .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string())
     }
 
@@ -1239,7 +1239,7 @@ mod tests {
         let no_bucket = Url::parse("nats://localhost/").expect("url should parse");
         let no_bucket_err = url_to_bucket_and_key(&no_bucket)
             .err()
-            .expect("missing path components should fail")
+            .expect("missing path servicegroups should fail")
             .to_string();
         assert!(no_bucket_err.contains("No bucket") || no_bucket_err.contains("No key"));
 
@@ -1252,8 +1252,8 @@ mod tests {
                 .contains("No key")
         );
 
-        let endpoint = EndpointId::from("ns/comp/ep");
-        let subject = instance_subject(&endpoint, 0x2a);
+        let portname = PortNameId::from("ns/comp/ep");
+        let subject = instance_subject(&portname, 0x2a);
         assert_eq!(subject, "ns_comp.ep-2a");
     }
 

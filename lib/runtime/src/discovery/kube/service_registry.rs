@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 原生 Kubernetes Service / EndpointSlice 注册构建层
@@ -22,7 +22,7 @@
 //! ## Label 最少原则
 //!
 //! - `EndpointSlice` 必须携带 [`SERVICE_NAME_LABEL`]（K8s 标准，kube-proxy 依赖）
-//! - `EndpointSlice` 携带 [`MANAGED_BY_LABEL`] 隔离 Dynamo 自管理 slice
+//! - `EndpointSlice` 携带 [`MANAGED_BY_LABEL`] 隔离 Pagoda 自管理 slice
 //! - 可选 [`REGISTRY_MODE_LABEL`] 进一步缩小查询范围
 
 use std::collections::BTreeMap;
@@ -46,7 +46,7 @@ use super::utils::{sanitize, short_hash};
 /// server-side apply 时声明的 field manager 名称，标识字段所有权归属。
 ///
 /// 同一 field manager 多次 apply 是幂等的（patch 不存在则创建，存在则覆盖自己的字段）。
-const FIELD_MANAGER: &str = "dynamo-worker-native";
+const FIELD_MANAGER: &str = "pagoda-worker-native";
 
 /// K8s 标准 label：将 EndpointSlice 关联到 Service。
 ///
@@ -56,17 +56,17 @@ pub const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
 /// K8s 标准 label：声明 EndpointSlice 的管理控制器。
 ///
-/// 用于将 Dynamo 自管理的 slice 与 K8s 内置 EndpointSlice 控制器生成的 slice 区分开，
-/// 防止内置控制器意外删除或覆盖 Dynamo 的 slice。
+/// 用于将 Pagoda 自管理的 slice 与 K8s 内置 EndpointSlice 控制器生成的 slice 区分开，
+/// 防止内置控制器意外删除或覆盖 Pagoda 的 slice。
 pub const MANAGED_BY_LABEL: &str = "endpointslice.kubernetes.io/managed-by";
 
-/// [`MANAGED_BY_LABEL`] 的具体值，标识 Dynamo worker 进程是此 slice 的管理者。
-pub const MANAGED_BY_VALUE: &str = "dynamo-worker";
+/// [`MANAGED_BY_LABEL`] 的具体值，标识 Pagoda worker 进程是此 slice 的管理者。
+pub const MANAGED_BY_VALUE: &str = "pagoda-worker";
 
-/// 可选的 Dynamo 发现模式 label，区分原生 Service 模式与旧 CRD 模式的对象。
+/// 可选的 Pagoda 发现模式 label，区分原生 Service 模式与旧 CRD 模式的对象。
 ///
 /// 在 list/watch 时作为额外过滤条件，避免处理不属于原生模式的遗留对象。
-pub const REGISTRY_MODE_LABEL: &str = "nvidia.com/dynamo-discovery-mode";
+pub const REGISTRY_MODE_LABEL: &str = "bedicloud.com/pagoda-discovery-mode";
 
 /// [`REGISTRY_MODE_LABEL`] 的具体值，标识此对象属于原生 Service 注册模式。
 pub const REGISTRY_MODE_VALUE: &str = "native-service";
@@ -77,21 +77,21 @@ pub const REGISTRY_MODE_VALUE: &str = "native-service";
 ///
 /// ## 命名格式
 ///
-/// `dyn-<service>-<port>-<hash8>`
+/// `pag-<service>-<port>-<hash8>`
 ///
 /// - `<service>`：Service 名称规范化后的前 20 字符
 /// - `<port>`：端口名称规范化后的前 15 字符
-/// - `<hash8>`：`"<service_name>/<port_name>/<pod_name>"` 的 32-bit hash
+/// - `<hash8>`：`"<service_name>/<portname>/<pod_name>"` 的 32-bit hash
 ///
 /// ## 确定性保证
 ///
-/// 相同的 `(service_name, port_name, pod_name)` 三元组永远产生相同名称，
+/// 相同的 `(service_name, portname, pod_name)` 三元组永远产生相同名称，
 /// 使 server-side apply 可以幂等地 upsert，无需先查询再决定 create/update。
 ///
 /// ## 长度保证
 ///
 /// 格式设计确保总长度 ≤ 63 字符（K8s DNS label 上限）：
-/// - `"dyn-"` = 4
+/// - `"pag-"` = 4
 /// - service（≤20） + `"-"` = 21
 /// - port（≤15） + `"-"` = 16
 /// - hash = 8
@@ -104,13 +104,13 @@ impl EndpointSliceName {
     ///
     /// # 参数
     /// - `service_name`：K8s Service 名称（原始值，内部会规范化）
-    /// - `port_name`：端口名称（对应 Dynamo endpoint 字符串）
+    /// - `portname`：端口名称（对应 Pagoda portname 字符串）
     /// - `pod_name`：Pod 名称（参与 hash 计算，区分同 service 的多个 Pod）
-    pub fn new(service_name: &str, port_name: &str, pod_name: &str) -> Self {
+    pub fn new(service_name: &str, portname: &str, pod_name: &str) -> Self {
         let svc = sanitize(service_name, 20);
-        let port = sanitize(port_name, 15);
-        let digest = short_hash(&format!("{service_name}/{port_name}/{pod_name}"));
-        Self(format!("dyn-{svc}-{port}-{digest}"))
+        let port = sanitize(portname, 15);
+        let digest = short_hash(&format!("{service_name}/{portname}/{pod_name}"));
+        Self(format!("pag-{svc}-{port}-{digest}"))
     }
 
     /// 返回内部字符串的引用。
@@ -143,7 +143,7 @@ impl From<EndpointSliceName> for String {
 /// let reg = Registration::builder("svc-name", "grpc", 8080, "pod-0", "uid-abc", "10.0.0.1")
 ///     .hostname("pod-0")
 ///     .app_protocol("grpc")
-///     .service_annotation("nvidia.com/dynamo-namespace", "prod")
+///     .service_annotation("bedicloud.com/pagoda-namespace", "prod")
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -156,8 +156,8 @@ impl From<EndpointSliceName> for String {
 pub struct RegistrationBuilder {
     /// K8s Service 名称（必填）
     service_name: String,
-    /// 端口名称，即 Dynamo endpoint 字符串（必填）
-    port_name: String,
+    /// 端口名称，即 Pagoda portname 字符串（必填）
+    portname: String,
     /// 端口号，1-65535（必填）
     port: i32,
     /// Pod 名称（必填，用于 ownerReference 和 EndpointSlice targetRef）
@@ -174,18 +174,18 @@ pub struct RegistrationBuilder {
     app_protocol: Option<String>,
     /// 是否创建 headless Service（`clusterIP=None`），默认 `true`
     headless: bool,
-    /// Service 额外 labels（如 Dynamo namespace/component 信息）
+    /// Service 额外 labels（如 Pagoda namespace/servicegroup 信息）
     service_labels: BTreeMap<String, String>,
-    /// Service 额外 annotations（如 Dynamo 逻辑路径信息）
+    /// Service 额外 annotations（如 Pagoda 逻辑路径信息）
     service_annotations: BTreeMap<String, String>,
     /// EndpointSlice 额外 labels
     endpoint_slice_labels: BTreeMap<String, String>,
-    /// EndpointSlice 额外 annotations（如 transport JSON、endpoint 路径）
+    /// EndpointSlice 额外 annotations（如 transport JSON、portname 路径）
     endpoint_slice_annotations: BTreeMap<String, String>,
 }
 
 impl RegistrationBuilder {
-    /// 设置 DNS hostname（写入 `endpoint.hostname`）。
+    /// 设置 DNS hostname（写入 `portname.hostname`）。
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
         self.hostname = Some(hostname.into());
         self
@@ -203,7 +203,7 @@ impl RegistrationBuilder {
         self
     }
 
-    /// 设置是否创建 headless Service（默认 `true`，Dynamo 标准模式）。
+    /// 设置是否创建 headless Service（默认 `true`，Pagoda 标准模式）。
     pub fn headless(mut self, headless: bool) -> Self {
         self.headless = headless;
         self
@@ -222,13 +222,13 @@ impl RegistrationBuilder {
     }
 
     /// 向 EndpointSlice 追加一个 label。
-    pub fn endpoint_label(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
+    pub fn portname_label(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.endpoint_slice_labels.insert(key.into(), val.into());
         self
     }
 
     /// 向 EndpointSlice 追加一个 annotation。
-    pub fn endpoint_annotation(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
+    pub fn portname_annotation(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.endpoint_slice_annotations.insert(key.into(), val.into());
         self
     }
@@ -238,11 +238,11 @@ impl RegistrationBuilder {
     /// # 返回
     /// 所有必填字段合法时返回 `Ok(Registration)`，否则返回描述问题的错误。
     pub fn build(self) -> Result<Registration> {
-        validate_registration(&self.service_name, &self.port_name, &self.pod_name,
+        validate_registration(&self.service_name, &self.portname, &self.pod_name,
                               &self.pod_uid, &self.pod_ip, self.port)?;
         Ok(Registration {
             service_name: self.service_name,
-            port_name: self.port_name,
+            portname: self.portname,
             port: self.port,
             pod_name: self.pod_name,
             pod_uid: self.pod_uid,
@@ -261,7 +261,7 @@ impl RegistrationBuilder {
 
 // ─── Registration ─────────────────────────────────────────────────────────────
 
-/// 注册一个 Dynamo endpoint 实例所需的全部参数，构建后不可变。
+/// 注册一个 Pagoda portname 实例所需的全部参数，构建后不可变。
 ///
 /// ## 创建方式
 ///
@@ -274,19 +274,19 @@ impl RegistrationBuilder {
 /// - [`apply_service`] / [`apply_endpoint_slice`] 持久化到 K8s
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
-    /// 对应 component 的 K8s Service 名称（由 [`component_service_name`] 生成）。
+    /// 对应 servicegroup 的 K8s Service 名称（由 [`servicegroup_service_name`] 生成）。
     pub service_name: String,
-    /// 端口名称，对应 Dynamo endpoint 字符串（如 `"grpc"`、`"http"`）。
-    pub port_name: String,
+    /// 端口名称，对应 Pagoda portname 字符串（如 `"grpc"`、`"http"`）。
+    pub portname: String,
     /// 端口号（1-65535）。
     pub port: i32,
     /// Pod 名称，用于 ownerReference 和 EndpointSlice targetRef。
     pub pod_name: String,
     /// Pod UID，用于 ownerReference 精确定位（防止同名 Pod 重建后 GC 误操作）。
     pub pod_uid: String,
-    /// Pod IP，写入 EndpointSlice `endpoint.addresses`。
+    /// Pod IP，写入 EndpointSlice `portname.addresses`。
     pub pod_ip: String,
-    /// 可选的 DNS hostname，写入 EndpointSlice `endpoint.hostname`。
+    /// 可选的 DNS hostname，写入 EndpointSlice `portname.hostname`。
     pub hostname: Option<String>,
     /// 传输层协议，通常为 `"TCP"`。
     pub protocol: String,
@@ -294,7 +294,7 @@ pub struct Registration {
     pub app_protocol: Option<String>,
     /// 是否创建 headless Service（`clusterIP=None`）。
     ///
-    /// Dynamo 默认 `true`：headless 模式下 K8s 不分配虚拟 IP，
+    /// Pagoda 默认 `true`：headless 模式下 K8s 不分配虚拟 IP，
     /// 客户端通过直连 Pod IP 通信，适合点对点路由模型。
     pub headless: bool,
     /// Service 额外 labels。
@@ -311,15 +311,15 @@ impl Registration {
     /// 创建 [`RegistrationBuilder`]，开始链式配置。
     ///
     /// # 参数（均为必填）
-    /// - `service_name`：K8s Service 名称（通常由 [`component_service_name`] 生成）
-    /// - `port_name`：端口名称（Dynamo endpoint 字符串）
+    /// - `service_name`：K8s Service 名称（通常由 [`servicegroup_service_name`] 生成）
+    /// - `portname`：端口名称（Pagoda portname 字符串）
     /// - `port`：端口号
     /// - `pod_name`：Pod 名称
     /// - `pod_uid`：Pod UID
     /// - `pod_ip`：Pod IP
     pub fn builder(
         service_name: impl Into<String>,
-        port_name: impl Into<String>,
+        portname: impl Into<String>,
         port: i32,
         pod_name: impl Into<String>,
         pod_uid: impl Into<String>,
@@ -327,7 +327,7 @@ impl Registration {
     ) -> RegistrationBuilder {
         RegistrationBuilder {
             service_name: service_name.into(),
-            port_name: port_name.into(),
+            portname: portname.into(),
             port,
             pod_name: pod_name.into(),
             pod_uid: pod_uid.into(),
@@ -345,10 +345,10 @@ impl Registration {
 
     /// 计算并返回此注册参数对应的 EndpointSlice 名称。
     ///
-    /// 名称由 `(service_name, port_name, pod_name)` 三元组确定性生成，
+    /// 名称由 `(service_name, portname, pod_name)` 三元组确定性生成，
     /// 确保 server-side apply 可以幂等地 upsert 同一 slice。
     pub fn endpoint_slice_name(&self) -> EndpointSliceName {
-        EndpointSliceName::new(&self.service_name, &self.port_name, &self.pod_name)
+        EndpointSliceName::new(&self.service_name, &self.portname, &self.pod_name)
     }
 }
 
@@ -358,9 +358,9 @@ impl Registration {
 ///
 /// ## 设计意图
 ///
-/// 将 Dynamo component 映射为一个 K8s Service：
-/// - 同一 component 下所有 endpoint 共享此 Service
-/// - 每个 endpoint 对应 Service 的一个具名端口（`spec.ports[i].name = endpoint`）
+/// 将 Pagoda servicegroup 映射为一个 K8s Service：
+/// - 同一 servicegroup 下所有 portname 共享此 Service
+/// - 每个 portname 对应 Service 的一个具名端口（`spec.ports[i].name = portname`）
 /// - `headless=true`（`clusterIP=None`）时 K8s 不分配虚拟 IP，适合直连路由
 ///
 /// ## 处理过程
@@ -394,7 +394,7 @@ pub fn build_service(reg: &Registration) -> Service {
             // headless：clusterIP="None"；非 headless：omit（K8s 自动分配）
             cluster_ip: reg.headless.then(|| "None".to_owned()),
             ports: Some(vec![ServicePort {
-                name: Some(reg.port_name.clone()),
+                name: Some(reg.portname.clone()),
                 port: reg.port,
                 protocol: Some(reg.protocol.clone()),
                 app_protocol: reg.app_protocol.clone(),
@@ -411,7 +411,7 @@ pub fn build_service(reg: &Registration) -> Service {
 ///
 /// ## 设计意图
 ///
-/// 每个 `(component, endpoint, pod)` 三元组对应一个独立的 EndpointSlice。
+/// 每个 `(servicegroup, portname, pod)` 三元组对应一个独立的 EndpointSlice。
 /// `ownerReference → Pod` 确保 Pod 删除时 GC 自动清理 slice，
 /// 避免出现无对应 Pod 的僵尸端点影响路由。
 ///
@@ -420,8 +420,8 @@ pub fn build_service(reg: &Registration) -> Service {
 /// 1. 组装标准 labels（`service-name`、`managed-by`、`registry-mode`）
 /// 2. 合并调用方额外 labels / annotations
 /// 3. 设置 `ownerReference → Pod`（`controller=true`，`blockOwnerDeletion=false`）
-/// 4. 组装 endpoints 列表（单 Pod IP，`ready=true`，`serving=true`）
-/// 5. 组装 ports 列表（对应 endpoint 的具名端口）
+/// 4. 组装 portnames 列表（单 Pod IP，`ready=true`，`serving=true`）
+/// 5. 组装 ports 列表（对应 portname 的具名端口）
 ///
 /// # 参数
 /// - `reg`：已通过 `build()` 校验的 [`Registration`]
@@ -466,7 +466,7 @@ pub fn build_endpoint_slice(reg: &Registration) -> EndpointSlice {
             ..Default::default()
         }],
         ports: Some(vec![EndpointPort {
-            name: Some(reg.port_name.clone()),
+            name: Some(reg.portname.clone()),
             port: Some(reg.port),
             protocol: Some(reg.protocol.clone()),
             app_protocol: reg.app_protocol.clone(),
@@ -539,7 +539,7 @@ pub async fn apply_endpoint_slice(
 ///
 /// ## 设计意图
 ///
-/// Pod 主动注销某 endpoint 时调用，触发集群内其他 Pod 的 watch 立刻收到 Removed 事件，
+/// Pod 主动注销某 portname 时调用，触发集群内其他 Pod 的 watch 立刻收到 Removed 事件，
 /// 比等待 Pod 死亡后 GC 响应更及时。
 ///
 /// # 参数
@@ -564,7 +564,7 @@ pub async fn delete_endpoint_slice(client: &KubeClient, namespace: &str, name: &
 ///
 /// ## 设计意图
 ///
-/// 当一个 component Service 下不再有任何端口注册时，由上层调用删除整个 Service，
+/// 当一个 servicegroup Service 下不再有任何端口注册时，由上层调用删除整个 Service，
 /// 避免集群中积累大量只含空 spec.ports 的过期 Service。
 ///
 /// # 参数
@@ -587,20 +587,20 @@ pub async fn delete_service(client: &KubeClient, namespace: &str, name: &str) ->
 
 // ─── 命名辅助 ─────────────────────────────────────────────────────────────────
 
-/// 为 Dynamo component 生成共享 K8s Service 名称。
+/// 为 Pagoda servicegroup 生成共享 K8s Service 名称。
 ///
 /// ## 约束
 ///
-/// 同一 component 下的所有 endpoint 共用一个 Service，通过端口名区分。
-/// 使用 `"dyn-comp-"` 前缀 + 规范化后的 component 名（最长 40 字符）。
+/// 同一 servicegroup 下的所有 portname 共用一个 Service，通过端口名区分。
+/// 使用 `"pag-comp-"` 前缀 + 规范化后的 servicegroup 名（最长 40 字符）。
 ///
 /// # 参数
-/// - `component`：Dynamo component 字符串（可含任意字符）
+/// - `servicegroup`：Pagoda servicegroup 字符串（可含任意字符）
 ///
 /// # 返回
 /// 符合 K8s Service 命名规范的字符串
-pub fn component_service_name(component: &str) -> String {
-    format!("dyn-comp-{}", sanitize(component, 40))
+pub fn servicegroup_service_name(servicegroup: &str) -> String {
+    format!("pag-comp-{}", sanitize(servicegroup, 40))
 }
 
 // ─── 内部辅助 ─────────────────────────────────────────────────────────────────
@@ -635,17 +635,17 @@ fn nonempty_map(map: BTreeMap<String, String>) -> Option<BTreeMap<String, String
 /// | 字段 | 规则 |
 /// |------|------|
 /// | `service_name` | 非空字符串 |
-/// | `port_name` | 非空字符串 |
+/// | `portname` | 非空字符串 |
 /// | `pod_name` | 非空字符串 |
 /// | `pod_uid` | 非空字符串 |
 /// | `pod_ip` | 非空字符串 |
 /// | `port` | 1-65535 |
 fn validate_registration(
-    service_name: &str, port_name: &str, pod_name: &str,
+    service_name: &str, portname: &str, pod_name: &str,
     pod_uid: &str, pod_ip: &str, port: i32,
 ) -> Result<()> {
     if service_name.trim().is_empty() { bail!("service_name 不能为空"); }
-    if port_name.trim().is_empty()   { bail!("port_name 不能为空"); }
+    if portname.trim().is_empty()   { bail!("portname 不能为空"); }
     if pod_name.trim().is_empty()    { bail!("pod_name 不能为空"); }
     if pod_uid.trim().is_empty()     { bail!("pod_uid 不能为空"); }
     if pod_ip.trim().is_empty()      { bail!("pod_ip 不能为空"); }
@@ -684,11 +684,11 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// 名称以 "dyn-" 开头。
+    /// 名称以 "pag-" 开头。
     #[test]
     fn slice_name_has_prefix() {
         let name = EndpointSliceName::new("svc", "port", "pod");
-        assert!(name.as_str().starts_with("dyn-"), "名称必须以 dyn- 开头");
+        assert!(name.as_str().starts_with("pag-"), "名称必须以 pag- 开头");
     }
 
     /// 名称长度不超过 63 字符（K8s DNS label 上限）。
@@ -760,7 +760,7 @@ mod tests {
             .hostname("pod-0")
             .app_protocol("grpc")
             .service_annotation("key", "val")
-            .endpoint_label("lk", "lv")
+            .portname_label("lk", "lv")
             .build()
             .unwrap();
 
@@ -838,14 +838,14 @@ mod tests {
         assert_eq!(owners[0].kind, "Pod");
     }
 
-    /// EndpointSlice endpoint.addresses 包含 Pod IP。
+    /// EndpointSlice portname.addresses 包含 Pod IP。
     #[test]
     fn build_endpoint_slice_address() {
         let slice = build_endpoint_slice(&base_reg());
         assert_eq!(slice.endpoints[0].addresses, vec!["10.0.0.1".to_owned()]);
     }
 
-    /// EndpointSlice endpoint 的就绪状态全部为 true。
+    /// EndpointSlice portname 的就绪状态全部为 true。
     #[test]
     fn build_endpoint_slice_ready_conditions() {
         let slice = build_endpoint_slice(&base_reg());
@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(cond.terminating, Some(false));
     }
 
-    /// 带 hostname 的注册参数正确设置 endpoint.hostname。
+    /// 带 hostname 的注册参数正确设置 portname.hostname。
     #[test]
     fn build_endpoint_slice_with_hostname() {
         let reg = Registration::builder("svc", "grpc", 8080, "pod-0", "uid", "10.0.0.1")
@@ -866,23 +866,23 @@ mod tests {
         assert_eq!(slice.endpoints[0].hostname.as_deref(), Some("pod-0.svc.local"));
     }
 
-    // ── component_service_name ───────────────────────────────────────────────
+    // ── servicegroup_service_name ───────────────────────────────────────────────
 
-    /// 相同 component 产生相同 Service 名称（幂等性，多 Pod 共享同一 Service）。
+    /// 相同 servicegroup 产生相同 Service 名称（幂等性，多 Pod 共享同一 Service）。
     #[test]
-    fn component_service_name_idempotent() {
-        assert_eq!(component_service_name("planner"), component_service_name("planner"));
+    fn servicegroup_service_name_idempotent() {
+        assert_eq!(servicegroup_service_name("planner"), servicegroup_service_name("planner"));
     }
 
-    /// 不同 component 产生不同 Service 名称。
+    /// 不同 servicegroup 产生不同 Service 名称。
     #[test]
-    fn component_service_name_differs() {
-        assert_ne!(component_service_name("a"), component_service_name("b"));
+    fn servicegroup_service_name_differs() {
+        assert_ne!(servicegroup_service_name("a"), servicegroup_service_name("b"));
     }
 
-    /// 名称以 "dyn-comp-" 开头。
+    /// 名称以 "pag-comp-" 开头。
     #[test]
-    fn component_service_name_prefix() {
-        assert!(component_service_name("test").starts_with("dyn-comp-"));
+    fn servicegroup_service_name_prefix() {
+        assert!(servicegroup_service_name("test").starts_with("pag-comp-"));
     }
 }

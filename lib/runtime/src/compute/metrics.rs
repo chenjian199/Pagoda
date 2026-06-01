@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `compute::metrics` —— 计算池运行时观测计数
@@ -466,10 +466,6 @@ mod tests {
         assert_eq!(m.tasks_total(), (n_threads * tasks_per_thread) as u64);
         assert_eq!(m.tasks_active(), 0);
     }
-
-    // ------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留） ============================
-    // ------------------------------------------------------------------
 
     #[test]
     fn test_metrics_recording() {

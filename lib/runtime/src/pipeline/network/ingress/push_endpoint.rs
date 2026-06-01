@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::ingress::push_endpoint` —— NATS Push 服务端点单体启动器
@@ -11,8 +11,8 @@
 //!   实现单端点内部的全并发服务；
 //! - `AtomicU64` 维护 inflight 计数，`Notify` 在每条任务完成时 `notify_one`，
 //!   `graceful_shutdown=true` 时主循环在取消后会阻塞等待 inflight 归零。
-//! - 与 `SystemHealth` 联动：启动时 `set_endpoint_registered`、退出时
-//!   `set_endpoint_health_status(NotReady)`。
+//! - 与 `SystemHealth` 联动：启动时 `set_portname_registered`、退出时
+//!   `set_portname_health_status(NotReady)`。
 //!
 //! ## 外部契约
 //! - `pub struct PushEndpoint` 字段全部 `pub`：`service_handler`、`cancellation_token`、
@@ -20,18 +20,18 @@
 //! - `pub const VERSION = env!("CARGO_PKG_VERSION")`。
 //! - `pub fn builder() -> PushEndpointBuilder`（由 `derive_builder` 生成的 builder 类型
 //!   `PushEndpointBuilder` 同样 pub）。
-//! - `pub async fn start(self, endpoint, namespace, component_name, endpoint_name,
+//! - `pub async fn start(self, portname, namespace, servicegroup_name, portname_name,
 //!   instance_id, system_health)` —— 形参签名与顺序为契约。
-//! - **不**提供 `new` / `endpoint_name` / `request_span` / `enter` / `leave` /
-//!   `count` / `wait_until_empty` / `stop_endpoint` / `mark_*` / `acknowledge_request`
+//! - **不**提供 `new` / `portname_name` / `request_span` / `enter` / `leave` /
+//!   `count` / `wait_until_empty` / `stop_portname` / `mark_*` / `acknowledge_request`
 //!   等私有抽取出来的辅助方法；inflight、Notify、span 逻辑全部内联在 `start` 中。
 //!
 //! ## 实现要点
 //! - `parking_lot::Mutex` 用于 `SystemHealth` 锁；与 `std::sync::Mutex` 不同 API
 //!   (`lock()` 不返回 `Result`)，这是契约的一部分（不可换为 std）。
-//! - `Arc<String>`（不是 `Arc<str>`）三件套 `component_name_local / endpoint_name_local
+//! - `Arc<String>`（不是 `Arc<str>`）三件套 `servicegroup_name_local / portname_name_local
 //!   / namespace_local` 提前装箱，避免每次 spawn clone 字符串。
-//! - request-id 优先从 `request-id`、回退到 `x-dynamo-request-id`，再传入 handler。
+//! - request-id 优先从 `request-id`、回退到 `x-pagoda-request-id`，再传入 handler。
 //! - `req.respond(Ok("".into()))` 是 NATS 服务即时 ACK：必须紧跟在 `next()` 之后、
 //!   在 spawn 之前，让客户端尽快释放半同步等待。
 
@@ -75,8 +75,8 @@ impl PushEndpoint {
         self,
         endpoint: Endpoint,
         namespace: String,
-        component_name: String,
-        endpoint_name: String,
+        servicegroup_name: String,
+        portname_name: String,
         instance_id: u64,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
@@ -84,13 +84,13 @@ impl PushEndpoint {
 
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
-        let component_name_local: Arc<String> = Arc::from(component_name);
-        let endpoint_name_local: Arc<String> = Arc::from(endpoint_name);
+        let servicegroup_name_local: Arc<String> = Arc::from(servicegroup_name);
+        let portname_name_local: Arc<String> = Arc::from(portname_name);
         let namespace_local: Arc<String> = Arc::from(namespace);
 
         system_health
             .lock()
-            .set_endpoint_registered(endpoint_name_local.as_str());
+            .set_portname_registered(portname_name_local.as_str());
 
         loop {
             let req = tokio::select! {
@@ -121,8 +121,8 @@ impl PushEndpoint {
                 }
 
                 let ingress = self.service_handler.clone();
-                let endpoint_name: Arc<String> = Arc::clone(&endpoint_name_local);
-                let component_name: Arc<String> = Arc::clone(&component_name_local);
+                let portname_name: Arc<String> = Arc::clone(&portname_name_local);
+                let servicegroup_name: Arc<String> = Arc::clone(&servicegroup_name_local);
                 let namespace: Arc<String> = Arc::clone(&namespace_local);
 
                 // increment the inflight counter
@@ -134,8 +134,8 @@ impl PushEndpoint {
                 let span = if let Some(headers) = req.message.headers.as_ref() {
                     make_handle_payload_span(
                         headers,
-                        component_name.as_ref(),
-                        endpoint_name.as_ref(),
+                        servicegroup_name.as_ref(),
+                        portname_name.as_ref(),
                         namespace.as_ref(),
                         instance_id,
                     )
@@ -153,7 +153,7 @@ impl PushEndpoint {
                         req.message
                             .headers
                             .as_ref()
-                            .and_then(|h| h.get("x-dynamo-request-id").map(|v| v.to_string()))
+                            .and_then(|h| h.get("x-pagoda-request-id").map(|v| v.to_string()))
                     });
 
                 tokio::spawn(async move {
@@ -182,14 +182,14 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
+            .set_portname_health_status(portname_name_local.as_str(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
             let inflight_count = inflight.load(Ordering::SeqCst);
             if inflight_count > 0 {
                 tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
+                    portname_name = portname_name_local.as_str(),
                     inflight_count = inflight_count,
                     "Waiting for inflight NATS requests to complete"
                 );
@@ -197,13 +197,13 @@ impl PushEndpoint {
                     notify.notified().await;
                 }
                 tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
+                    portname_name = portname_name_local.as_str(),
                     "All inflight NATS requests completed"
                 );
             }
         } else {
             tracing::info!(
-                endpoint_name = endpoint_name_local.as_str(),
+                portname_name = portname_name_local.as_str(),
                 "Skipping graceful shutdown, not waiting for inflight requests"
             );
         }
@@ -245,7 +245,7 @@ mod tests {
         }
         fn add_metrics(
             &self,
-            _endpoint: &crate::component::Endpoint,
+            _portname: &crate::servicegroup::PortName,
             _metrics_labels: Option<&[(&str, &str)]>,
         ) -> Result<()> {
             Ok(())

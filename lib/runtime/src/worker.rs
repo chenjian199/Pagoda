@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! 进程级运行入口：[`Worker`] 封装 [`Runtime`] 构造与应用执行
@@ -9,7 +9,7 @@
 //! 中调用一次 [`Worker::execute`]，即可获得：
 //! * 全局唯一、可被进程内任意位置复用的 Tokio runtime；
 //! * 自动注册的 `SIGINT` / `SIGTERM` 信号处理与统一取消令牌；
-//! * 由环境变量 `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` 控制的优雅关闭窗口，
+//! * 由环境变量 `PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` 控制的优雅关闭窗口，
 //!   超时则以 exit code 911 强制退出。
 //!
 //! 默认超时在 debug 与 release 构建下分别为
@@ -54,7 +54,7 @@ use crate::config::environment_names::worker as env_worker;
 const SHUTDOWN_MESSAGE: &str =
     "Application received shutdown signal; attempting to gracefully shutdown";
 const SHUTDOWN_TIMEOUT_MESSAGE: &str =
-    "Use DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to control the graceful shutdown timeout";
+    "Use PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to control the graceful shutdown timeout";
 
 /// Default graceful shutdown timeout in seconds in debug mode
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG: u64 = 5;
@@ -227,7 +227,7 @@ impl Worker {
         } else {
             DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
         };
-        let configured_timeout = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
+        let configured_timeout = std::env::var(env_worker::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
             .ok()
             .and_then(|value| value.parse::<u64>().ok());
         let timeout = configured_timeout.unwrap_or(default_timeout);
@@ -467,9 +467,9 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                (runtime::DYN_RUNTIME_NUM_WORKER_THREADS, Some("1")),
-                (runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS, Some("1")),
-                (system::DYN_SYSTEM_PORT, Some("-1")),
+                (runtime::PGD_RUNTIME_NUM_WORKER_THREADS, Some("1")),
+                (runtime::PGD_RUNTIME_MAX_BLOCKING_THREADS, Some("1")),
+                (system::PGD_SYSTEM_PORT, Some("-1")),
             ],
             || {
                 assert!(!Worker::has_existing_runtime());
@@ -550,7 +550,7 @@ mod tests {
     fn subprocess_from_current_success() {
         use crate::config::environment_names::runtime::system;
 
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_PORT, Some("-1"))], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_PORT, Some("-1"))], || {
             assert!(!Worker::has_existing_runtime());
 
             let external = tokio::runtime::Builder::new_current_thread()
@@ -578,7 +578,7 @@ mod tests {
         use crate::config::environment_names::worker as env_worker_test;
 
         temp_env::with_vars(
-            vec![(env_worker_test::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("1"))],
+            vec![(env_worker_test::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("1"))],
             || {
                 let worker = Worker::from_config(RuntimeConfig::single_threaded()).unwrap();
                 let token_slot = Arc::new(StdMutex::new(None::<CancellationToken>));
@@ -615,7 +615,7 @@ mod tests {
         use crate::config::environment_names::worker as env_worker_test;
 
         temp_env::with_vars(
-            vec![(env_worker_test::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("1"))],
+            vec![(env_worker_test::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("1"))],
             || {
                 let worker = Worker::from_config(RuntimeConfig::single_threaded()).unwrap();
                 let token_slot = Arc::new(StdMutex::new(None::<CancellationToken>));
@@ -657,7 +657,7 @@ mod tests {
         use crate::config::environment_names::worker as env_worker_test;
 
         temp_env::with_vars(
-            vec![(env_worker_test::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("1"))],
+            vec![(env_worker_test::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("1"))],
             || {
                 let worker = Worker::from_config(RuntimeConfig::single_threaded()).unwrap();
                 let runtime = worker.runtime().clone();

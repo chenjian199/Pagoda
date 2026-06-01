@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::egress::http_router` —— HTTP/2 出站路由客户端
@@ -10,8 +10,8 @@
 //!
 //! ## 外部契约
 //! - 公开结构与 `RequestPlaneClient` 实现；`send_request` / `transport_name() -> "http"`
-//!   / `is_healthy()` 行为与 lib-copy 一致。
-//! - 内部统计字段、构造器参数、错误映射规则均与 lib-copy 一致，不引入新的 helper。
+//!   / `is_healthy()` 行为一致。
+//! - 内部统计字段、构造器参数、错误映射规则均一致，不引入新的 helper。
 //!
 //! ## 实现要点
 //! - `reqwest::Client` 使用 HTTP/2 优先 + keep-alive；连接复用由 reqwest 自身负责，
@@ -19,7 +19,7 @@
 //! - `Http2Config::from_env` 中八处类似的「读取变量 → parse 成字段」逻辑收敛到私有
 //!   [`env_parse<T>`] helper，避免调用一次动一次独立书写。
 //! - 错误统一包装到 [`connect_error`] helper 下，该 helper 负责构造
-//!   `DynamoError::CannotConnect` + 携带 cause。
+//!   `PagodaError::CannotConnect` + 携带 cause。
 
 //! HTTP/2 client for request plane
 
@@ -59,10 +59,10 @@ fn env_parse<T: FromStr>(name: &str) -> Option<T> {
     std::env::var(name).ok().and_then(|v| v.parse::<T>().ok())
 }
 
-/// 把 `reqwest::Error` 包装为 `anyhow::Error(DynamoError::CannotConnect)`，保留 cause 链。
+/// 把 `reqwest::Error` 包装为 `anyhow::Error(PagodaError::CannotConnect)`，保留 cause 链。
 fn connect_error(address: &str, cause: reqwest::Error) -> anyhow::Error {
     anyhow::anyhow!(
-        crate::error::DynamoError::builder()
+        crate::error::PagodaError::builder()
             .error_type(crate::error::ErrorType::CannotConnect)
             .message(format!("HTTP request to {address} failed"))
             .cause(cause)
@@ -107,29 +107,29 @@ impl Http2Config {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Some(v) = env_parse::<u32>("DYN_HTTP2_MAX_FRAME_SIZE") {
+        if let Some(v) = env_parse::<u32>("PGD_HTTP2_MAX_FRAME_SIZE") {
             config.max_frame_size = v;
         }
-        if let Some(v) = env_parse::<u32>("DYN_HTTP2_MAX_CONCURRENT_STREAMS") {
+        if let Some(v) = env_parse::<u32>("PGD_HTTP2_MAX_CONCURRENT_STREAMS") {
             config.max_concurrent_streams = v;
         }
-        if let Some(v) = env_parse::<usize>("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST") {
+        if let Some(v) = env_parse::<usize>("PGD_HTTP2_POOL_MAX_IDLE_PER_HOST") {
             config.pool_max_idle_per_host = v;
         }
-        if let Some(v) = env_parse::<u64>("DYN_HTTP2_POOL_IDLE_TIMEOUT_SECS") {
+        if let Some(v) = env_parse::<u64>("PGD_HTTP2_POOL_IDLE_TIMEOUT_SECS") {
             config.pool_idle_timeout = Duration::from_secs(v);
         }
-        if let Some(v) = env_parse::<u64>("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS") {
+        if let Some(v) = env_parse::<u64>("PGD_HTTP2_KEEP_ALIVE_INTERVAL_SECS") {
             config.keep_alive_interval = Duration::from_secs(v);
         }
-        if let Some(v) = env_parse::<u64>("DYN_HTTP2_KEEP_ALIVE_TIMEOUT_SECS") {
+        if let Some(v) = env_parse::<u64>("PGD_HTTP2_KEEP_ALIVE_TIMEOUT_SECS") {
             config.keep_alive_timeout = Duration::from_secs(v);
         }
-        if let Ok(val) = std::env::var("DYN_HTTP2_ADAPTIVE_WINDOW") {
+        if let Ok(val) = std::env::var("PGD_HTTP2_ADAPTIVE_WINDOW") {
             // 保留 lib-copy 语义：变量存在但解析失败 → 回退默认值。
             config.adaptive_window = val.parse().unwrap_or(DEFAULT_HTTP2_ADAPTIVE_WINDOW);
         }
-        if let Some(v) = env_parse::<u64>("DYN_HTTP_REQUEST_TIMEOUT") {
+        if let Some(v) = env_parse::<u64>("PGD_HTTP_REQUEST_TIMEOUT") {
             config.request_timeout = Duration::from_secs(v);
         }
 
@@ -269,8 +269,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex as TokioMutex;
 
-    // ── lib-copy 同名测试 ─────────────────────────────────────────────────
-
     #[test]
     fn test_http_client_creation() {
         let client = HttpRequestClient::new();
@@ -291,11 +289,11 @@ mod tests {
     fn test_http2_config_from_env() {
         // Set environment variables
         unsafe {
-            std::env::set_var("DYN_HTTP2_MAX_FRAME_SIZE", "2097152"); // 2MB
-            std::env::set_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS", "2000");
-            std::env::set_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST", "200");
-            std::env::set_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS", "60");
-            std::env::set_var("DYN_HTTP2_ADAPTIVE_WINDOW", "false");
+            std::env::set_var("PGD_HTTP2_MAX_FRAME_SIZE", "2097152"); // 2MB
+            std::env::set_var("PGD_HTTP2_MAX_CONCURRENT_STREAMS", "2000");
+            std::env::set_var("PGD_HTTP2_POOL_MAX_IDLE_PER_HOST", "200");
+            std::env::set_var("PGD_HTTP2_KEEP_ALIVE_INTERVAL_SECS", "60");
+            std::env::set_var("PGD_HTTP2_ADAPTIVE_WINDOW", "false");
         }
 
         let config = Http2Config::from_env();
@@ -308,11 +306,11 @@ mod tests {
 
         // Clean up
         unsafe {
-            std::env::remove_var("DYN_HTTP2_MAX_FRAME_SIZE");
-            std::env::remove_var("DYN_HTTP2_MAX_CONCURRENT_STREAMS");
-            std::env::remove_var("DYN_HTTP2_POOL_MAX_IDLE_PER_HOST");
-            std::env::remove_var("DYN_HTTP2_KEEP_ALIVE_INTERVAL_SECS");
-            std::env::remove_var("DYN_HTTP2_ADAPTIVE_WINDOW");
+            std::env::remove_var("PGD_HTTP2_MAX_FRAME_SIZE");
+            std::env::remove_var("PGD_HTTP2_MAX_CONCURRENT_STREAMS");
+            std::env::remove_var("PGD_HTTP2_POOL_MAX_IDLE_PER_HOST");
+            std::env::remove_var("PGD_HTTP2_KEEP_ALIVE_INTERVAL_SECS");
+            std::env::remove_var("PGD_HTTP2_ADAPTIVE_WINDOW");
         }
     }
 
@@ -771,13 +769,13 @@ mod tests {
     #[test]
     fn test_env_parse_returns_none_when_var_missing() {
         // 使用极不可能存在的变量名
-        let v = env_parse::<u32>("DYN_TEST_HTTP_PROBABLY_NOT_SET_47A9B3");
+        let v = env_parse::<u32>("PGD_TEST_HTTP_PROBABLY_NOT_SET_47A9B3");
         assert!(v.is_none());
     }
 
     #[test]
     fn test_env_parse_returns_none_when_malformed() {
-        let name = "DYN_TEST_HTTP_MALFORMED_INT_47A9B3";
+        let name = "PGD_TEST_HTTP_MALFORMED_INT_47A9B3";
         unsafe {
             std::env::set_var(name, "not-a-number");
         }
@@ -790,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_env_parse_succeeds_for_typical_types() {
-        let name = "DYN_TEST_HTTP_TYPED_47A9B3";
+        let name = "PGD_TEST_HTTP_TYPED_47A9B3";
         unsafe {
             std::env::set_var(name, "12345");
         }

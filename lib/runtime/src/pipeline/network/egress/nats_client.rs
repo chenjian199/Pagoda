@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::egress::nats_client` —— NATS 请求平面客户端适配器
@@ -7,14 +7,14 @@
 //! 把 `async_nats::Client` 包装成统一 `RequestPlaneClient` trait，使上层路由代码
 //! 可以以 transport-agnostic 的方式发送请求：根据配置选择 HTTP / TCP / NATS
 //! 三种客户端而不需修改调用点。本文件只负责“headers 转换 + request_with_headers
-//! 调用 + 错误包装为 `DynamoError`”三步。
+//! 调用 + 错误包装为 `PagodaError`”三步。
 //!
 //! ## 外部契约
 //! - `pub struct NatsRequestClient { client: async_nats::Client }`：唯一公开构造点
 //!   `NatsRequestClient::new(client)`。
 //! - `impl RequestPlaneClient for NatsRequestClient`：
 //!   - `send_request(address, payload, headers)`：成功返回 `response.payload`；
-//!     失败时递增 `NATS_ERRORS_TOTAL{kind="request_failed"}` 并返回 `DynamoError`
+//!     失败时递增 `NATS_ERRORS_TOTAL{kind="request_failed"}` 并返回 `PagodaError`
 //!     （`ErrorType::CannotConnect`，消息 "NATS request to {address} failed"）。
 //!   - `transport_name() -> "nats"`。
 //!   - `is_healthy() -> true`（NATS 客户端不暴露连接状态，默认乐观上报）。
@@ -28,11 +28,11 @@
 //!   - `record_request_failure()`：集中递增计数器的调用，为后续可能加入额外
 //!     指标预留唯一入口。
 //!   - `request_failure_error(address, cause) -> anyhow::Error`：把 "计数器递增 +
-//!     DynamoError 构造" 这对孪生动作原子化，避免遗漏任一侧。
+//!     PagodaError 构造" 这对孪生动作原子化，避免遗漏任一侧。
 //! - 上述 helper 均为模块私有（无 `pub`），不改变 `RequestPlaneClient` 契约。
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
-use crate::error::{DynamoError, ErrorType};
+use crate::error::{PagodaError, ErrorType};
 use crate::metrics::transport_metrics::NATS_ERRORS_TOTAL;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -78,7 +78,7 @@ impl NatsRequestClient {
     ) -> anyhow::Error {
         Self::record_request_failure();
         anyhow::anyhow!(
-            DynamoError::builder()
+            PagodaError::builder()
                 .error_type(ErrorType::CannotConnect)
                 .message(format!("NATS request to {address} failed"))
                 .cause(cause)
@@ -152,7 +152,7 @@ mod tests {
     //! | `test_headers_for_nats_single_kv` | 单 key/value 透传（happy path） |
     //! | `test_headers_for_nats_preserves_multiple_keys` | 多 key 全部保留（不变式） |
     //! | `test_record_request_failure_increments_counter` | 计数器 +1（指标契约） |
-    //! | `test_request_failure_error_wraps_cause_and_increments` | 同步触发计数 + 构造 DynamoError（孪生原子化） |
+    //! | `test_request_failure_error_wraps_cause_and_increments` | 同步触发计数 + 构造 PagodaError（孪生原子化） |
     //! | `test_request_failure_error_message_contains_address` | 错误消息包含目标地址（可观测性） |
     //!
     //! 说明：`transport_name()` / `is_healthy()` / `stats()` / `close()` / `send_request()`

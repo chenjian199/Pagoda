@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -111,7 +111,7 @@ impl TaskError {
 ///
 /// # Example
 /// ```rust
-/// # use dynamo_runtime::utils::tasks::tracker::*;
+/// # use pagoda_runtime::utils::tasks::tracker::*;
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new())?;
@@ -258,7 +258,7 @@ impl FailedWithContinuation {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::*;
+    /// # use pagoda_runtime::utils::tasks::tracker::*;
     /// # use anyhow::anyhow;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -291,7 +291,7 @@ impl FailedWithContinuation {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::*;
+    /// # use pagoda_runtime::utils::tasks::tracker::*;
     /// # use anyhow::anyhow;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1230,52 +1230,52 @@ impl PrometheusTaskMetrics {
     ///
     /// # Arguments
     /// * `registry` - MetricsRegistry for creating Prometheus metrics
-    /// * `component_name` - Name for the component/tracker (used in metric names)
+    /// * `servicegroup_name` - Name for the servicegroup/tracker (used in metric names)
     ///
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
-    /// # use dynamo_runtime::utils::tasks::tracker::PrometheusTaskMetrics;
-    /// # use dynamo_runtime::DistributedRuntime;
+    /// # use pagoda_runtime::utils::tasks::tracker::PrometheusTaskMetrics;
+    /// # use pagoda_runtime::DistributedRuntime;
     /// # fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
     /// let metrics = PrometheusTaskMetrics::new(drt, "main_tracker")?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new<R: MetricsHierarchy>(registry: &R, component_name: &str) -> anyhow::Result<Self> {
+    pub fn new<R: MetricsHierarchy>(registry: &R, servicegroup_name: &str) -> anyhow::Result<Self> {
         let metrics = registry.metrics();
         let issued_counter = metrics.create_intcounter(
-            &format!("{}_{}", component_name, task_tracker::TASKS_ISSUED_TOTAL),
+            &format!("{}_{}", servicegroup_name, task_tracker::TASKS_ISSUED_TOTAL),
             "Total number of tasks issued/submitted",
             &[],
         )?;
 
         let started_counter = metrics.create_intcounter(
-            &format!("{}_{}", component_name, task_tracker::TASKS_STARTED_TOTAL),
+            &format!("{}_{}", servicegroup_name, task_tracker::TASKS_STARTED_TOTAL),
             "Total number of tasks started",
             &[],
         )?;
 
         let success_counter = metrics.create_intcounter(
-            &format!("{}_{}", component_name, task_tracker::TASKS_SUCCESS_TOTAL),
+            &format!("{}_{}", servicegroup_name, task_tracker::TASKS_SUCCESS_TOTAL),
             "Total number of successfully completed tasks",
             &[],
         )?;
 
         let cancelled_counter = metrics.create_intcounter(
-            &format!("{}_{}", component_name, task_tracker::TASKS_CANCELLED_TOTAL),
+            &format!("{}_{}", servicegroup_name, task_tracker::TASKS_CANCELLED_TOTAL),
             "Total number of cancelled tasks",
             &[],
         )?;
 
         let failed_counter = metrics.create_intcounter(
-            &format!("{}_{}", component_name, task_tracker::TASKS_FAILED_TOTAL),
+            &format!("{}_{}", servicegroup_name, task_tracker::TASKS_FAILED_TOTAL),
             "Total number of failed tasks",
             &[],
         )?;
 
         let rejected_counter = metrics.create_intcounter(
-            &format!("{}_{}", component_name, task_tracker::TASKS_REJECTED_TOTAL),
+            &format!("{}_{}", servicegroup_name, task_tracker::TASKS_REJECTED_TOTAL),
             "Total number of rejected tasks",
             &[],
         )?;
@@ -1452,7 +1452,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler};
     /// # fn example(parent: &TaskTracker) {
     /// let child = parent.child_tracker_builder()
     ///     .scheduler(SemaphoreScheduler::with_permits(5))
@@ -1475,7 +1475,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, LogOnlyPolicy};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, LogOnlyPolicy};
     /// # fn example(parent: &TaskTracker) {
     /// let child = parent.child_tracker_builder()
     ///     .error_policy(LogOnlyPolicy::new())
@@ -1582,7 +1582,7 @@ struct TaskTrackerInner {
 /// ```rust
 /// # use std::sync::Arc;
 /// # use tokio::sync::Semaphore;
-/// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy, CancellableTaskResult};
+/// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy, CancellableTaskResult};
 /// # async fn example() -> anyhow::Result<()> {
 /// // Create a task tracker with semaphore-based scheduling
 /// let scheduler = SemaphoreScheduler::with_permits(3);
@@ -1679,7 +1679,7 @@ impl TaskTracker {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn main() -> anyhow::Result<()> {
     /// let scheduler = SemaphoreScheduler::with_permits(10);
     /// let error_policy = LogOnlyPolicy::new();
@@ -1707,7 +1707,7 @@ impl TaskTracker {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn main() -> anyhow::Result<()> {
     /// let scheduler = SemaphoreScheduler::with_permits(10);
     /// let error_policy = LogOnlyPolicy::new();
@@ -1729,14 +1729,14 @@ impl TaskTracker {
     /// * `scheduler` - Scheduling policy to use for all tasks
     /// * `error_policy` - Error handling policy for this tracker
     /// * `registry` - MetricsRegistry for Prometheus integration
-    /// * `component_name` - Name for this tracker component
+    /// * `servicegroup_name` - Name for this tracker servicegroup
     ///
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-    /// # use dynamo_runtime::DistributedRuntime;
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+    /// # use pagoda_runtime::DistributedRuntime;
     /// # fn example(drt: &DistributedRuntime) -> anyhow::Result<()> {
     /// let scheduler = SemaphoreScheduler::with_permits(10);
     /// let error_policy = LogOnlyPolicy::new();
@@ -1753,9 +1753,9 @@ impl TaskTracker {
         scheduler: Arc<dyn TaskScheduler>,
         error_policy: Arc<dyn OnErrorPolicy>,
         registry: &R,
-        component_name: &str,
+        servicegroup_name: &str,
     ) -> anyhow::Result<Self> {
-        let metrics = PrometheusTaskMetrics::new(registry, component_name)?;
+        let metrics = PrometheusTaskMetrics::new(registry, servicegroup_name)?;
         let builder = Self::builder()
             .scheduler(scheduler)
             .error_policy(error_policy)
@@ -1780,7 +1780,7 @@ impl TaskTracker {
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(root_tracker: TaskTracker) -> anyhow::Result<()> {
     /// let child_tracker = root_tracker.child_tracker()?;
     /// // Child inherits parent's policies but has separate metrics and lifecycle
@@ -1801,7 +1801,7 @@ impl TaskTracker {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn example(root_tracker: TaskTracker) {
     /// // Custom scheduler, inherit error policy
     /// let child1 = root_tracker.child_tracker_builder()
@@ -1838,7 +1838,7 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
     /// let handle = tracker.spawn(async {
     ///     // Your async work here
@@ -1883,7 +1883,7 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, CancellableTaskResult};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, CancellableTaskResult};
     /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
     /// let handle = tracker.spawn_cancellable(|cancel_token| async move {
     ///     tokio::select! {
@@ -1920,7 +1920,7 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(tracker: &TaskTracker) {
     /// let metrics = tracker.metrics();
     /// println!("Success: {}, Failed: {}", metrics.success(), metrics.failed());
@@ -1937,16 +1937,16 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
     /// // Spawn a long-running task
     /// let handle = tracker.spawn_cancellable(|cancel_token| async move {
     ///     tokio::select! {
     ///         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-    ///             dynamo_runtime::utils::tasks::tracker::CancellableTaskResult::Ok(42)
+    ///             pagoda_runtime::utils::tasks::tracker::CancellableTaskResult::Ok(42)
     ///         }
     ///         _ = cancel_token.cancelled() => {
-    ///             dynamo_runtime::utils::tasks::tracker::CancellableTaskResult::Cancelled
+    ///             pagoda_runtime::utils::tasks::tracker::CancellableTaskResult::Cancelled
     ///         }
     ///     }
     /// }).await?;
@@ -1971,7 +1971,7 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(tracker: &TaskTracker) {
     /// let token = tracker.cancellation_token();
     /// // Can check cancellation state or cancel manually
@@ -1992,7 +1992,7 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(tracker: &TaskTracker) {
     /// let child_count = tracker.child_count();
     /// println!("This tracker has {} active children", child_count);
@@ -2012,7 +2012,7 @@ impl TaskTracker {
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+    /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn example(parent: &TaskTracker) {
     /// // Custom scheduler, inherit error policy
     /// let child1 = parent.child_tracker_builder()
@@ -2050,7 +2050,7 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # async fn example(tracker: TaskTracker) {
     /// tracker.join().await;
     /// # }
@@ -2532,7 +2532,7 @@ impl ResourceGuard for UnlimitedGuard {
 ///
 /// # Example
 /// ```rust
-/// # use dynamo_runtime::utils::tasks::tracker::UnlimitedScheduler;
+/// # use pagoda_runtime::utils::tasks::tracker::UnlimitedScheduler;
 /// let scheduler = UnlimitedScheduler::new();
 /// ```
 #[derive(Debug)]
@@ -2603,7 +2603,7 @@ impl ResourceGuard for SemaphoreGuard {
 /// ```rust
 /// # use std::sync::Arc;
 /// # use tokio::sync::Semaphore;
-/// # use dynamo_runtime::utils::tasks::tracker::SemaphoreScheduler;
+/// # use pagoda_runtime::utils::tasks::tracker::SemaphoreScheduler;
 /// // Allow up to 5 concurrent tasks
 /// let semaphore = Arc::new(Semaphore::new(5));
 /// let scheduler = SemaphoreScheduler::new(semaphore);
@@ -2678,7 +2678,7 @@ impl TaskScheduler for SemaphoreScheduler {
 ///
 /// # Example
 /// ```rust
-/// # use dynamo_runtime::utils::tasks::tracker::CancelOnError;
+/// # use pagoda_runtime::utils::tasks::tracker::CancelOnError;
 /// // Cancel on any error
 /// let policy = CancelOnError::new();
 ///
@@ -2793,7 +2793,7 @@ impl OnErrorPolicy for LogOnlyPolicy {
 ///
 /// # Example
 /// ```rust
-/// # use dynamo_runtime::utils::tasks::tracker::ThresholdCancelPolicy;
+/// # use pagoda_runtime::utils::tasks::tracker::ThresholdCancelPolicy;
 /// // Cancel after 5 failures
 /// let policy = ThresholdCancelPolicy::with_threshold(5);
 /// ```
@@ -2893,7 +2893,7 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
 ///
 /// # Example
 /// ```rust
-/// # use dynamo_runtime::utils::tasks::tracker::RateCancelPolicy;
+/// # use pagoda_runtime::utils::tasks::tracker::RateCancelPolicy;
 /// // Cancel if more than 50% of tasks fail within any 60-second window
 /// let (policy, token) = RateCancelPolicy::builder()
 ///     .rate(0.5)
@@ -3033,7 +3033,7 @@ impl OnErrorAction for TriggerCancellationTokenAction {
 /// # Example
 /// ```rust
 /// # use tokio_util::sync::CancellationToken;
-/// # use dynamo_runtime::utils::tasks::tracker::TriggerCancellationTokenOnError;
+/// # use pagoda_runtime::utils::tasks::tracker::TriggerCancellationTokenOnError;
 /// let cancel_token = CancellationToken::new();
 /// let policy = TriggerCancellationTokenOnError::new(cancel_token.clone());
 ///

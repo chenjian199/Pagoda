@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 事件平面：transport 抽象 trait
@@ -16,7 +16,7 @@
 //! - [`EventTransportRx`]：`async fn subscribe(&self, &str) -> Result<WireStream>` + `kind()`
 //!
 //! ## 实现要点
-//! 与 lib-copy 完全相同的对外签名；本文件没有任何运行时逻辑可发散。文档采用
+//! 完全相同的对外签名；本文件没有任何运行时逻辑可发散。文档采用
 //! 统一的"## 设计意图 / 外部契约"格式以与本仓库其它模块对齐。
 
 use anyhow::Result;

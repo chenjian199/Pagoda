@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Transport 层 Prometheus 计数器
@@ -32,7 +32,7 @@ use super::prometheus_names::{name_prefix, transport};
 
 // === 公共命名 helper =========================================================
 
-/// 拼接 `dynamo_transport_<suffix>` 形式的指标全名。
+/// 拼接 `pagoda_transport_<suffix>` 形式的指标全名。
 fn transport_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::TRANSPORT, suffix)
 }
@@ -170,24 +170,24 @@ mod tests {
     fn test_supplemental_transport_metric_name_and_descriptors() {
         assert_eq!(
             transport_metric_name(transport::tcp::BYTES_SENT_TOTAL),
-            "dynamo_transport_tcp_bytes_sent_total"
+            "pagoda_transport_tcp_bytes_sent_total"
         );
         assert_eq!(
             transport_metric_name(transport::tcp::BYTES_RECEIVED_TOTAL),
-            "dynamo_transport_tcp_bytes_received_total"
+            "pagoda_transport_tcp_bytes_received_total"
         );
         assert_eq!(
             transport_metric_name(transport::tcp::ERRORS_TOTAL),
-            "dynamo_transport_tcp_errors_total"
+            "pagoda_transport_tcp_errors_total"
         );
         assert_eq!(
             transport_metric_name(transport::nats::ERRORS_TOTAL),
-            "dynamo_transport_nats_errors_total"
+            "pagoda_transport_nats_errors_total"
         );
         assert_eq!(transport_metric_name(""), format!("{}_", name_prefix::TRANSPORT));
         assert_eq!(
             transport_metric_name("custom-suffix"),
-            "dynamo_transport_custom-suffix"
+            "pagoda_transport_custom-suffix"
         );
 
         let sent_desc = TCP_BYTES_SENT_TOTAL.desc();

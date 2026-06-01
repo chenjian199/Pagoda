@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -359,7 +359,7 @@ mod tests {
 
     static PORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    fn unique_endpoint() -> String {
+    fn unique_portname() -> String {
         // Reserve a best-effort unique local TCP port for test bindings.
         let probe = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("should bind an ephemeral probe port");
@@ -395,10 +395,10 @@ mod tests {
     #[tokio::test]
     async fn client_new_and_dealer_send_message() -> Result<()> {
         let context = TmqContext::new();
-        let endpoint = unique_endpoint();
+        let portname = unique_portname();
         let token = CancellationToken::new();
 
-        let (server, handle) = Server::new(&context, &endpoint, token.clone()).await?;
+        let (server, handle) = Server::new(&context, &portname, token.clone()).await?;
 
         let id = "req-client".to_string();
         let (tx, mut rx) = mpsc::channel(8);
@@ -408,7 +408,7 @@ mod tests {
             .await
             .register_stream(id.clone(), tx, mpsc::channel(1).0);
 
-        let mut client = Client::new(&context, &endpoint)?;
+        let mut client = Client::new(&context, &portname)?;
         client
             .dealer()
             .send(tmq::Multipart::from(vec![
@@ -431,10 +431,10 @@ mod tests {
     #[tokio::test]
     async fn server_execution_handle_methods_cover_lifecycle() -> Result<()> {
         let context = TmqContext::new();
-        let endpoint = unique_endpoint();
+        let portname = unique_portname();
         let token = CancellationToken::new();
 
-        let (_server, handle) = Server::new(&context, &endpoint, token.clone()).await?;
+        let (_server, handle) = Server::new(&context, &portname, token.clone()).await?;
         let _ = handle.is_finished();
         assert!(!handle.is_cancelled());
 
@@ -448,11 +448,11 @@ mod tests {
     #[tokio::test]
     async fn server_run_ignores_unknown_stream_request_ids() -> Result<()> {
         let context = TmqContext::new();
-        let endpoint = unique_endpoint();
+        let portname = unique_portname();
         let token = CancellationToken::new();
-        let (_server, handle) = Server::new(&context, &endpoint, token.clone()).await?;
+        let (_server, handle) = Server::new(&context, &portname, token.clone()).await?;
 
-        let mut client = Client::new(&context, &endpoint)?;
+        let mut client = Client::new(&context, &portname)?;
         client
             .dealer()
             .send(tmq::Multipart::from(vec![
@@ -473,9 +473,9 @@ mod tests {
     #[tokio::test]
     async fn server_full_channel_triggers_delayed_send_path() -> Result<()> {
         let context = TmqContext::new();
-        let endpoint = unique_endpoint();
+        let portname = unique_portname();
         let token = CancellationToken::new();
-        let (server, handle) = Server::new(&context, &endpoint, token.clone()).await?;
+        let (server, handle) = Server::new(&context, &portname, token.clone()).await?;
 
         let id = "req-full".to_string();
         let (tx, mut rx) = mpsc::channel::<Bytes>(1);
@@ -485,7 +485,7 @@ mod tests {
             .await
             .register_stream(id.clone(), tx, mpsc::channel(1).0);
 
-        let mut client = Client::new(&context, &endpoint)?;
+        let mut client = Client::new(&context, &portname)?;
 
         // First message fills the channel via eager send.
         client
@@ -527,11 +527,11 @@ mod tests {
     async fn server_new_propagates_fatal_broken_contract_error_and_cancels_parent_token()
     -> Result<()> {
         let context = TmqContext::new();
-        let endpoint = unique_endpoint();
+        let portname = unique_portname();
         let parent = CancellationToken::new();
 
-        let (_server, handle) = Server::new(&context, &endpoint, parent.clone()).await?;
-        let mut client = Client::new(&context, &endpoint)?;
+        let (_server, handle) = Server::new(&context, &portname, parent.clone()).await?;
+        let mut client = Client::new(&context, &portname)?;
 
         // Sending a single frame results in identity+payload (2 frames) at router,
         // which violates the 3-frame contract and should terminate the server.

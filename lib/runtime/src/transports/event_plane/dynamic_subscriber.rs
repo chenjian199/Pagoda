@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 动态订阅器：跟随 discovery 自动连接 / 断开 ZMQ publisher
@@ -8,11 +8,11 @@
 //! 监听 [`Discovery`] 上的事件流，按"Added/Removed"动作动态维护"对每个 publisher
 //! 的 ZMQ SUB 连接"：
 //!
-//! - **Added**：发现新 publisher → 拿到它的 ZMQ endpoint → 启动一条 `consume_endpoint_stream`
+//! - **Added**：发现新 publisher → 拿到它的 ZMQ portname → 启动一条 `consume_endpoint_stream`
 //!   后台任务把 SUB 流的字节灌进汇聚通道。
-//! - **Removed**：publisher 下线 → 触发该 endpoint 的 cancel token → 后台任务退出 → 删表项。
+//! - **Removed**：publisher 下线 → 触发该 portname 的 cancel token → 后台任务退出 → 删表项。
 //!
-//! 所有 endpoint 流汇聚到**单个 mpsc 通道**，对外暴露为一个 [`WireStream`]。
+//! 所有 portname 流汇聚到**单个 mpsc 通道**，对外暴露为一个 [`WireStream`]。
 //!
 //! ## 外部契约
 //! - [`DynamicSubscriber::new(discovery, query, topic)`]
@@ -21,18 +21,18 @@
 //! - `Drop` 触发 cancel —— "丢一定停"。
 //!
 //! ## 实现要点
-//! 与 lib-copy 的差异：
-//! 1. **存储结构**：active endpoint 表从 `RwLock<HashMap<String, (String, CancellationToken)>>`
+//! 差异：
+//! 1. **存储结构**：active portname 表从 `RwLock<HashMap<String, (String, CancellationToken)>>`
 //!    换成 [`DashMap`]，去掉读写锁热路径。
 //! 2. **代码切分**：lib-copy 把整个 watch loop 塞进 `start_zmq` 一个超长 async
 //!    block 里；本实现拆成 [`Self::watch_loop`] / [`Self::handle_added`] /
-//!    [`Self::handle_removed`] / [`Self::cancel_all_endpoints`] 四个小方法，
+//!    [`Self::handle_removed`] / [`Self::cancel_all_portnames`] 四个小方法，
 //!    每个都不超过一屏 —— 测试和阅读都更友好。
 //! 3. **取消时清理**：lib-copy 在 watch loop 退出时**逐个 cancel** 然后让后台
-//!    任务自清理；本实现额外在 `cancel_all_endpoints` 里 `clear()` 表，避免
+//!    任务自清理；本实现额外在 `cancel_all_portnames` 里 `clear()` 表，避免
 //!    被 cancel 后表项还短暂残留。
 //! 4. **错误传播**：consume 内部把 `Some(Err)` 视为致命退出 —— 与 lib-copy 一致；
-//!    但日志改为带 endpoint 字段，便于排查。
+//!    但日志改为带 portname 字段，便于排查。
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -52,11 +52,11 @@ use crate::discovery::{
 // === DynamicSubscriber =======================================================
 // =============================================================================
 
-/// 一个 endpoint 表项：endpoint 字符串 + 其取消令牌。
-type EndpointSlot = (String, CancellationToken);
+/// 一个 portname 表项：portname 字符串 + 其取消令牌。
+type PortNameSlot = (String, CancellationToken);
 
-/// instance_id (作为 String) → endpoint slot 的活跃表。
-type ActiveEndpoints = Arc<DashMap<String, EndpointSlot>>;
+/// instance_id (作为 String) → portname slot 的活跃表。
+type ActivePortNames = Arc<DashMap<String, PortNameSlot>>;
 
 pub struct DynamicSubscriber {
     discovery: Arc<dyn Discovery>,
@@ -82,7 +82,7 @@ impl DynamicSubscriber {
     /// 启动 discovery watch + ZMQ 动态订阅，返回字节汇聚流。
     pub async fn start_zmq(self: Arc<Self>) -> Result<WireStream> {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<Bytes>();
-        let active: ActiveEndpoints = Arc::new(DashMap::new());
+        let active: ActivePortNames = Arc::new(DashMap::new());
 
         // 启动后台 watch 任务
         let driver_self = Arc::clone(&self);
@@ -108,7 +108,7 @@ impl DynamicSubscriber {
     /// 监听 discovery 事件流并按事件分派。退出条件：cancel / discovery 出错 / 流结束。
     async fn watch_loop(
         this: Arc<Self>,
-        active: ActiveEndpoints,
+        active: ActivePortNames,
         event_tx: mpsc::UnboundedSender<Bytes>,
     ) {
         let query = this.query.clone();
@@ -155,12 +155,12 @@ impl DynamicSubscriber {
             }
         }
 
-        Self::cancel_all_endpoints(&active);
+        Self::cancel_all_portnames(&active);
         tracing::info!("Discovery watch stream ended");
     }
 
     fn handle_added(
-        active: &ActiveEndpoints,
+        active: &ActivePortNames,
         event_tx: &mpsc::UnboundedSender<Bytes>,
         zmq_topic: &str,
         instance: DiscoveryInstance,
@@ -168,10 +168,10 @@ impl DynamicSubscriber {
         tracing::info!(instance = ?instance, "Discovery Added event received");
         let instance_id = instance.instance_id().to_string();
 
-        let Some(endpoint) = Self::extract_zmq_endpoint(&instance) else {
+        let Some(portname) = Self::extract_zmq_endpoint(&instance) else {
             tracing::warn!(
                 instance = ?instance,
-                "Discovery Added event did not contain a ZMQ endpoint"
+                "Discovery Added event did not contain a ZMQ portname"
             );
             return;
         };
@@ -179,7 +179,7 @@ impl DynamicSubscriber {
         // 已连接的同 instance_id 直接跳过
         if active.contains_key(&instance_id) {
             tracing::debug!(
-                endpoint = %endpoint,
+                portname = %portname,
                 instance_id = %instance_id,
                 "Already connected to ZMQ publisher"
             );
@@ -187,33 +187,33 @@ impl DynamicSubscriber {
         }
 
         tracing::info!(
-            endpoint = %endpoint,
+            portname = %portname,
             instance_id = %instance_id,
             "Connecting to new ZMQ publisher"
         );
 
-        let endpoint_cancel = CancellationToken::new();
-        active.insert(instance_id.clone(), (endpoint.clone(), endpoint_cancel.clone()));
+        let portname_cancel = CancellationToken::new();
+        active.insert(instance_id.clone(), (portname.clone(), portname_cancel.clone()));
 
         let event_tx = event_tx.clone();
         let zmq_topic = zmq_topic.to_string();
-        let endpoint_for_task = endpoint.clone();
+        let portname_for_task = portname.clone();
         let active_for_cleanup = Arc::clone(active);
         let id_for_cleanup = instance_id.clone();
 
         tokio::spawn(async move {
             if let Err(e) = Self::consume_endpoint_stream(
-                &endpoint_for_task,
+                &portname_for_task,
                 &zmq_topic,
                 event_tx,
-                endpoint_cancel,
+                portname_cancel,
             )
             .await
             {
                 tracing::warn!(
-                    endpoint = %endpoint_for_task,
+                    portname = %portname_for_task,
                     error = %e,
-                    "Error consuming ZMQ endpoint stream"
+                    "Error consuming ZMQ portname stream"
                 );
             }
             // 退出后从活跃表里摘除
@@ -221,26 +221,26 @@ impl DynamicSubscriber {
         });
     }
 
-    fn handle_removed(active: &ActiveEndpoints, id_str: String) {
+    fn handle_removed(active: &ActivePortNames, id_str: String) {
         tracing::info!(
             instance_id = %id_str,
-            "ZMQ publisher removed from discovery, cancelling endpoint stream"
+            "ZMQ publisher removed from discovery, cancelling portname stream"
         );
         match active.remove(&id_str) {
-            Some((_, (_endpoint, cancel))) => {
+            Some((_, (_portname, cancel))) => {
                 cancel.cancel();
-                tracing::info!(instance_id = %id_str, "Cancelled endpoint stream");
+                tracing::info!(instance_id = %id_str, "Cancelled portname stream");
             }
             None => {
                 tracing::warn!(
                     instance_id = %id_str,
-                    "No active endpoint found for removed stream instance"
+                    "No active portname found for removed stream instance"
                 );
             }
         }
     }
 
-    fn cancel_all_endpoints(active: &ActiveEndpoints) {
+    fn cancel_all_portnames(active: &ActivePortNames) {
         for entry in active.iter() {
             entry.value().1.cancel();
         }
@@ -248,39 +248,39 @@ impl DynamicSubscriber {
     }
 
     // ---------------------------------------------------------------------
-    // === 单 endpoint 消费 ================================================
+    // === 单 portname 消费 ================================================
     // ---------------------------------------------------------------------
 
-    /// 仅供外部测试可见：从 discovery instance 里抽 ZMQ endpoint。
+    /// 仅供外部测试可见：从 discovery instance 里抽 ZMQ portname。
     fn extract_zmq_endpoint(instance: &DiscoveryInstance) -> Option<String> {
         if let DiscoveryInstance::EventChannel { transport, .. } = instance
-            && let EventTransport::Zmq { endpoint } = transport
+            && let EventTransport::Zmq { portname } = transport
         {
-            return Some(endpoint.clone());
+            return Some(portname.clone());
         }
         None
     }
 
-    /// 把单个 endpoint 的 SUB 流抽进汇聚 channel。
+    /// 把单个 portname 的 SUB 流抽进汇聚 channel。
     async fn consume_endpoint_stream(
-        endpoint: &str,
+        portname: &str,
         zmq_topic: &str,
         event_tx: mpsc::UnboundedSender<Bytes>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        let sub_transport = ZmqSubTransport::connect(endpoint, zmq_topic).await?;
+        let sub_transport = ZmqSubTransport::connect(portname, zmq_topic).await?;
         let mut stream = sub_transport.subscribe(zmq_topic).await?;
 
         tracing::info!(
-            endpoint = %endpoint,
+            portname = %portname,
             topic = %zmq_topic,
-            "Started consuming ZMQ endpoint stream"
+            "Started consuming ZMQ portname stream"
         );
 
         loop {
             let next_event = tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    tracing::info!(endpoint = %endpoint, "Endpoint stream cancelled");
+                    tracing::info!(portname = %portname, "PortName stream cancelled");
                     break;
                 }
                 e = stream.next() => e,
@@ -290,22 +290,22 @@ impl DynamicSubscriber {
                 Some(Ok(bytes)) => {
                     if event_tx.send(bytes).is_err() {
                         tracing::warn!(
-                            endpoint = %endpoint,
-                            "Event channel closed, stopping endpoint stream"
+                            portname = %portname,
+                            "Event channel closed, stopping portname stream"
                         );
                         break;
                     }
                 }
                 Some(Err(error)) => {
                     tracing::error!(
-                        endpoint = %endpoint,
+                        portname = %portname,
                         error = %error,
-                        "Error receiving from ZMQ endpoint"
+                        "Error receiving from ZMQ portname"
                     );
                     break;
                 }
                 None => {
-                    tracing::info!(endpoint = %endpoint, "ZMQ endpoint stream ended");
+                    tracing::info!(portname = %portname, "ZMQ portname stream ended");
                     break;
                 }
             }
@@ -318,7 +318,7 @@ impl DynamicSubscriber {
     // === 取消 ============================================================
     // ---------------------------------------------------------------------
 
-    /// 显式取消订阅器。后台 watch 与所有 endpoint 任务都会观察到该信号并退出。
+    /// 显式取消订阅器。后台 watch 与所有 portname 任务都会观察到该信号并退出。
     pub fn cancel(&self) {
         self.cancel_token.cancel();
     }
@@ -353,7 +353,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     const NAMESPACE: &str = "supplemental-ns";
-    const COMPONENT: &str = "supplemental-component";
+    const COMPONENT: &str = "supplemental-servicegroup";
     const TOPIC: &str = "supplemental-topic";
 
     fn discovery_query() -> DiscoveryQuery {
@@ -363,7 +363,7 @@ mod tests {
     fn event_channel_instance(instance_id: u64, transport: EventTransport) -> DiscoveryInstance {
         DiscoveryInstance::EventChannel {
             namespace: NAMESPACE.to_string(),
-            component: COMPONENT.to_string(),
+            servicegroup: COMPONENT.to_string(),
             topic: TOPIC.to_string(),
             instance_id,
             transport,
@@ -374,8 +374,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         drop(listener);
-        let endpoint = format!("tcp://127.0.0.1:{port}");
-        ZmqPubTransport::bind(&endpoint, topic).await
+        let portname = format!("tcp://127.0.0.1:{port}");
+        ZmqPubTransport::bind(&portname, topic).await
     }
 
     fn encode_envelope(topic: &str, sequence: u64, payload: &[u8]) -> Bytes {
@@ -493,10 +493,10 @@ mod tests {
     /// 启 consume_endpoint_stream 后台任务，publish 一条消息，期望从 mpsc 收到；
     /// 然后 cancel，期望任务正常退出。
     /// ## 意义
-    /// 锁定单 endpoint 消费循环的"转发 + 取消"行为。
+    /// 锁定单 portname 消费循环的"转发 + 取消"行为。
     #[tokio::test(flavor = "multi_thread")]
     async fn consume_endpoint_stream_forwards_bytes_until_cancelled() {
-        let (publisher, endpoint) = bind_test_publisher(TOPIC)
+        let (publisher, portname) = bind_test_publisher(TOPIC)
             .await
             .expect("publisher should bind on localhost");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -504,7 +504,7 @@ mod tests {
         let task_cancel = cancel_token.clone();
 
         let task = tokio::spawn(async move {
-            DynamicSubscriber::consume_endpoint_stream(&endpoint, TOPIC, event_tx, task_cancel)
+            DynamicSubscriber::consume_endpoint_stream(&portname, TOPIC, event_tx, task_cancel)
                 .await
         });
 
@@ -532,7 +532,7 @@ mod tests {
     /// 锁定下游断开时的优雅退出契约。
     #[tokio::test(flavor = "multi_thread")]
     async fn consume_endpoint_stream_stops_when_receiver_is_closed() {
-        let (publisher, endpoint) = bind_test_publisher(TOPIC)
+        let (publisher, portname) = bind_test_publisher(TOPIC)
             .await
             .expect("publisher should bind on localhost");
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -540,7 +540,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
 
         let task = tokio::spawn(async move {
-            DynamicSubscriber::consume_endpoint_stream(&endpoint, TOPIC, event_tx, cancel_token)
+            DynamicSubscriber::consume_endpoint_stream(&portname, TOPIC, event_tx, cancel_token)
                 .await
         });
 
@@ -570,7 +570,7 @@ mod tests {
             TOPIC.to_string(),
         ));
 
-        let (publisher, endpoint) = bind_test_publisher(TOPIC)
+        let (publisher, portname) = bind_test_publisher(TOPIC)
             .await
             .expect("publisher should bind on localhost");
 
@@ -582,9 +582,9 @@ mod tests {
         let instance = discovery
             .register(DiscoverySpec::EventChannel {
                 namespace: NAMESPACE.to_string(),
-                component: COMPONENT.to_string(),
+                servicegroup: COMPONENT.to_string(),
                 topic: TOPIC.to_string(),
-                transport: EventTransport::zmq(endpoint.clone()),
+                transport: EventTransport::zmq(portname.clone()),
             })
             .await
             .expect("registering the event channel should succeed");
@@ -625,7 +625,7 @@ mod tests {
             TOPIC.to_string(),
         ));
 
-        let (publisher, endpoint) = bind_test_publisher(TOPIC)
+        let (publisher, portname) = bind_test_publisher(TOPIC)
             .await
             .expect("publisher should bind on localhost");
 
@@ -639,9 +639,9 @@ mod tests {
         let instance = discovery
             .register(DiscoverySpec::EventChannel {
                 namespace: NAMESPACE.to_string(),
-                component: COMPONENT.to_string(),
+                servicegroup: COMPONENT.to_string(),
                 topic: TOPIC.to_string(),
-                transport: EventTransport::zmq(endpoint.clone()),
+                transport: EventTransport::zmq(portname.clone()),
             })
             .await
             .expect("registering the event channel should succeed");

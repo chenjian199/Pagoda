@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `compute::pool` —— Rayon 计算池的 async 桥与扩展
 //!
 //! ## 设计意图
 //!
-//! [`ComputePool`] 是 Dynamo runtime 里所有"CPU 密集型工作"的统一入
+//! [`ComputePool`] 是 Pagoda runtime 里所有"CPU 密集型工作"的统一入
 //! 口。它在三件事上做了取舍：
 //!
 //! 1. **复用同一 Rayon 池**：多个 async 任务并发提交 `execute /
@@ -502,7 +502,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留） ============================
+    // === lib 标准契约测试 ============================
     // ------------------------------------------------------------------
 
     #[tokio::test]

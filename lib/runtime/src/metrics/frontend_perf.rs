@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2027 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Frontend Pipeline 阶段细粒度性能指标
@@ -9,7 +9,7 @@
 //! 阶段，再加上 tokenize、template、detokenize 等更细粒度子任务。本模块统一
 //! 暴露这些阶段的：
 //!
-//! - 当前在飞请求数（按 stage + phase 拆分）；
+//! - 当前在途请求数（按 stage + phase 拆分）；
 //! - 阶段耗时直方图；
 //! - tokenize / template 子任务耗时；
 //! - detokenize 累计时长（μs）+ 累计 token 数（让 Prometheus 端算 per-token）。
@@ -322,27 +322,27 @@ mod tests {
     fn test_supplemental_frontend_metric_name_and_descriptors() {
         assert_eq!(
             frontend_metric_name(frontend_perf::STAGE_REQUESTS),
-            "dynamo_frontend_stage_requests"
+            "pagoda_frontend_stage_requests"
         );
         assert_eq!(
             frontend_metric_name(frontend_perf::STAGE_DURATION_SECONDS),
-            "dynamo_frontend_stage_duration_seconds"
+            "pagoda_frontend_stage_duration_seconds"
         );
         assert_eq!(
             frontend_metric_name(frontend_perf::TOKENIZE_SECONDS),
-            "dynamo_frontend_tokenize_seconds"
+            "pagoda_frontend_tokenize_seconds"
         );
         assert_eq!(
             frontend_metric_name(frontend_perf::TEMPLATE_SECONDS),
-            "dynamo_frontend_template_seconds"
+            "pagoda_frontend_template_seconds"
         );
         assert_eq!(
             frontend_metric_name(frontend_perf::DETOKENIZE_TOTAL_US),
-            "dynamo_frontend_detokenize_total_us"
+            "pagoda_frontend_detokenize_total_us"
         );
         assert_eq!(
             frontend_metric_name(frontend_perf::DETOKENIZE_TOKEN_COUNT),
-            "dynamo_frontend_detokenize_token_count"
+            "pagoda_frontend_detokenize_token_count"
         );
 
         let sr = STAGE_REQUESTS.desc();

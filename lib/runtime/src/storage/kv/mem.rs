@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 内存 KV 后端
@@ -17,11 +17,11 @@
 //! - `MemoryStore::new()` 限定 `pub(super)`：仅由上层 [`super::Manager`] 构造。
 //! - `MemoryStore: Clone + Default`；`Default` 等价于 `new()`。
 //! - `connection_id()` 在每次 `new()` 时随机生成、克隆共享。
-//! - `Bucket::entries()` 返回的 `Key` **包含桶名前缀**，与 lib-copy 一致。
+//! - `Bucket::entries()` 返回的 `Key` **包含桶名前缀**一致。
 //! - `Bucket::insert(key, value, rev)`：
 //!     * 桶内不存在 key → `Created(rev)` 并广播 `Put`；
 //!     * 已存在且 revision 相同 → `Exists(rev)`，**不**广播；
-//!     * 已存在但 revision 不同 → `Created(rev)`，**不**广播（与 lib-copy 一致）。
+//!     * 已存在但 revision 不同 → `Created(rev)`，**不**广播。
 //! - `Bucket::watch()`：先 yield 当前所有键值（去重），随后 yield 新事件，
 //!   流在 `MemoryStore` 被全部 drop 时自然结束。
 //!
@@ -330,7 +330,7 @@ mod tests {
     use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _};
 
     // ---------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留）================================
+    // ===标准契约测试================================
     // ---------------------------------------------------------------------
 
     #[tokio::test]

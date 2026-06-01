@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::egress::unified_client` —— 出站请求平面的传输无关抽象
@@ -27,7 +27,7 @@
 //! ## 实现要点
 //! - `start_warmup` 默认 no-op，是为了让 HTTP/NATS 客户端不必关心 TCP 才用得到的
 //!   `instance_rx: watch::Receiver<Vec<Instance>>`；签名出现 `tokio` 与
-//!   `crate::component::Instance` 是契约。
+//!   `crate::servicegroup::Instance` 是契约。
 //! - `is_available` 选用"请求活动 OR 连接活动"作为可用性启发，让"还没发请求但已连上"
 //!   的客户端也被视为 available，便于 dashboard 展示。
 
@@ -59,14 +59,14 @@ pub type Headers = HashMap<String, String>;
 /// # Example
 ///
 /// ```ignore
-/// use dynamo_runtime::pipeline::network::egress::RequestPlaneClient;
+/// use pagoda_runtime::pipeline::network::egress::RequestPlaneClient;
 ///
 /// async fn send_request(client: &dyn RequestPlaneClient) -> Result<()> {
 ///     let mut headers = HashMap::new();
 ///     headers.insert("x-request-id".to_string(), "123".to_string());
 ///
 ///     let response = client.send_request(
-///         "service-endpoint".to_string(),
+///         "service-portname".to_string(),
 ///         Bytes::from("payload"),
 ///         headers,
 ///     ).await?;
@@ -96,7 +96,7 @@ pub trait RequestPlaneClient: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Connection to the endpoint fails
+    /// - Connection to the portname fails
     /// - Request times out
     /// - Transport-specific errors occur (e.g., NATS server unavailable)
     async fn send_request(
@@ -141,7 +141,7 @@ pub trait RequestPlaneClient: Send + Sync {
     /// Only TCP overrides this; HTTP and NATS clients inherit the no-op.
     fn start_warmup(
         &self,
-        _instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
+        _instance_rx: tokio::sync::watch::Receiver<Vec<crate::servicegroup::Instance>>,
         _cancel_token: tokio_util::sync::CancellationToken,
     ) {
         // No-op default
@@ -212,8 +212,8 @@ mod tests {
     //!
     //! | 测试名 | 覆盖维度 |
     //! |---|---|
-    //! | `test_client_stats_default` | （lib-copy）`Default` 全零 + `is_available()=false` |
-    //! | `test_client_stats_is_available` | （lib-copy）`requests_sent` / `active_connections` 任一非零都为 true |
+    //! | `test_client_stats_default` | `Default` 全零 + `is_available()=false` |
+    //! | `test_client_stats_is_available` | `requests_sent` / `active_connections` 任一非零都为 true |
     //! | `test_client_stats_new_equals_default` | `new()` 与 `default()` 字段级等价 |
     //! | `test_client_stats_clone_and_debug` | `Clone + Debug` 衍生（契约面） |
     //! | `test_client_stats_other_fields_do_not_imply_available` | `errors`/`bytes_*`/`idle_connections` 单独非零仍为 false（OR 语义边界） |
@@ -350,7 +350,7 @@ mod tests {
         assert!(c.close().await.is_ok());
 
         // 默认 start_warmup 是 no-op：调用不应 panic，也不会触碰任何标志位
-        let (_tx, rx) = tokio::sync::watch::channel(Vec::<crate::component::Instance>::new());
+        let (_tx, rx) = tokio::sync::watch::channel(Vec::<crate::servicegroup::Instance>::new());
         let cancel = tokio_util::sync::CancellationToken::new();
         c.start_warmup(rx, cancel);
         assert!(!warmup_called.load(Ordering::SeqCst));

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Tokio Runtime 指标 + 事件循环 canary
@@ -48,7 +48,7 @@ fn tokio_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::TOKIO, suffix)
 }
 
-/// 事件循环 canary 指标使用 `dynamo_frontend_` 前缀（与 frontend_perf 同一命名空间），
+/// 事件循环 canary 指标使用 `pagoda_frontend_` 前缀（与 frontend_perf 同一命名空间），
 /// 因为它们衡量的是“前端事件循环卡顿”这一外部可观察行为。
 fn frontend_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::FRONTEND, suffix)
@@ -468,7 +468,7 @@ mod tests {
     fn test_supplemental_tokio_metric_name_and_descriptors() {
         assert_eq!(
             tokio_metric_name(names::GLOBAL_QUEUE_DEPTH),
-            "dynamo_tokio_global_queue_depth"
+            "pagoda_tokio_global_queue_depth"
         );
         assert_eq!(tokio_metric_name(""), format!("{}_", name_prefix::TOKIO));
 

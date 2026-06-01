@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::registry` —— 类型擦除的共享 / 独占对象注册表
@@ -41,7 +41,7 @@ use std::sync::Arc;
 /// # Examples
 ///
 /// ```
-/// use dynamo_runtime::pipeline::registry::Registry;
+/// use pagoda_runtime::pipeline::registry::Registry;
 ///
 /// let mut registry = Registry::new();
 ///

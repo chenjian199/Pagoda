@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `MaybeError`：可选携带错误的统一接口
@@ -14,7 +14,7 @@
 //!
 //! 实现者必须提供两个核心方法：
 //! - [`MaybeError::from_err`]：从任意 `std::error::Error` 构造自身错误态；
-//! - [`MaybeError::err`]：把当前状态投影为 [`DynamoError`] 的可选值。
+//! - [`MaybeError::err`]：把当前状态投影为 [`PagodaError`] 的可选值。
 //!
 //! 在此之上提供两个默认方法 [`is_ok`](MaybeError::is_ok) /
 //! [`is_err`](MaybeError::is_err)，**完全用 `err()` 表达**，保证默认实现
@@ -28,37 +28,37 @@
 //! - `is_ok` / `is_err` 互为反义，简单委托给 `err().is_none()` /
 //!   `err().is_some()`，避免实现者两边各重写一遍走偏。
 
-use crate::error::DynamoError;
+use crate::error::PagodaError;
 
 // === TRAIT ==================================================================
 
 /// 表示“可能携带错误”的容器统一接口。
 ///
-/// 该 trait 让实现者同时承载成功值与错误信息，并通过 [`DynamoError`] 暴露
+/// 该 trait 让实现者同时承载成功值与错误信息，并通过 [`PagodaError`] 暴露
 /// 结构化错误。详见模块级文档的契约说明。
 ///
 /// # 示例
 ///
 /// ```rust,ignore
-/// use dynamo_runtime::protocols::maybe_error::MaybeError;
-/// use dynamo_runtime::error::DynamoError;
+/// use pagoda_runtime::protocols::maybe_error::MaybeError;
+/// use pagoda_runtime::error::PagodaError;
 ///
 /// struct MyResponse {
 ///     data: Option<String>,
-///     error: Option<DynamoError>,
+///     error: Option<PagodaError>,
 /// }
 ///
 /// impl MaybeError for MyResponse {
 ///     fn from_err(err: impl std::error::Error + 'static) -> Self {
 ///         MyResponse {
 ///             data: None,
-///             error: Some(DynamoError::from(
+///             error: Some(PagodaError::from(
 ///                 Box::new(err) as Box<dyn std::error::Error + 'static>
 ///             )),
 ///         }
 ///     }
 ///
-///     fn err(&self) -> Option<DynamoError> {
+///     fn err(&self) -> Option<PagodaError> {
 ///         self.error.clone()
 ///     }
 /// }
@@ -67,14 +67,14 @@ pub trait MaybeError {
     /// 从任意 `std::error::Error` 构造一个“错误态”的容器实例。
     ///
     /// 推荐做法是先把 `err` 装箱成 `Box<dyn Error>` 再交给
-    /// `DynamoError::from`，以兼容下游统一序列化路径。
+    /// `PagodaError::from`，以兼容下游统一序列化路径。
     fn from_err(err: impl std::error::Error + 'static) -> Self;
 
     /// 投影当前实例的错误视图。
     ///
     /// - 成功态返回 `None`；
-    /// - 错误态返回 `Some(DynamoError)`。
-    fn err(&self) -> Option<DynamoError>;
+    /// - 错误态返回 `Some(PagodaError)`。
+    fn err(&self) -> Option<PagodaError>;
 
     /// 是否表示成功状态。默认实现：`err().is_none()`。
     fn is_ok(&self) -> bool {
@@ -95,38 +95,38 @@ mod tests {
 
     /// 测试用容器：只保存一个可选错误。
     struct TestError {
-        error: Option<DynamoError>,
+        error: Option<PagodaError>,
     }
 
     impl MaybeError for TestError {
         fn from_err(err: impl std::error::Error + 'static) -> Self {
             let boxed: Box<dyn std::error::Error + 'static> = Box::new(err);
             TestError {
-                error: Some(DynamoError::from(boxed)),
+                error: Some(PagodaError::from(boxed)),
             }
         }
 
-        fn err(&self) -> Option<DynamoError> {
+        fn err(&self) -> Option<PagodaError> {
             self.error.clone()
         }
     }
 
     /// ## 测试过程
-    /// 用 `DynamoError::msg` 构造一个错误，再借助 `from_err` 放入容器，
+    /// 用 `PagodaError::msg` 构造一个错误，再借助 `from_err` 放入容器，
     /// 断言 `err()` 文本、`is_ok()` / `is_err()` 行为符合契约。
     /// ## 意义
     /// 锁定默认方法与 `err()` 的等价性。
     #[test]
     fn test_maybe_error_default_implementations() {
-        let dynamo_err = DynamoError::msg("Test error");
-        let err = TestError::from_err(dynamo_err);
+        let pagoda_err = PagodaError::msg("Test error");
+        let err = TestError::from_err(pagoda_err);
         assert!(err.err().unwrap().to_string().contains("Test error"));
         assert!(!err.is_ok());
         assert!(err.is_err());
     }
 
     /// ## 测试过程
-    /// 用 `std::io::Error::other` 构造非 DynamoError 错误，验证 `from_err`
+    /// 用 `std::io::Error::other` 构造非 PagodaError 错误，验证 `from_err`
     /// 能透传文本。
     /// ## 意义
     /// 确保任何 `std::error::Error` 都能无损接入。
@@ -161,7 +161,7 @@ mod tests {
     fn test_default_helpers_follow_err_contract() {
         let success = TestError { error: None };
         let failure = TestError {
-            error: Some(DynamoError::msg("boom")),
+            error: Some(PagodaError::msg("boom")),
         };
 
         assert!(success.is_ok());

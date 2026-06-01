@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # `component::client` —— 端点客户端 + 路由占用计数
+//! # `servicegroup::client` —— 端点客户端 + 路由占用计数
 //!
 //! ## 设计意图
 //!
-//! 本文件提供"调用方视角"下访问一个 [`Endpoint`] 所需的全部基础设
+//! 本文件提供"调用方视角"下访问一个 [`PortName`] 所需的全部基础设
 //! 施。其核心问题是：
 //!
 //! - **怎么知道端点在哪些 worker 上**：需要持续 watch 发现平面
@@ -13,7 +13,7 @@
 //!   `tokio::sync::watch<Vec<Instance>>` 形式提供给路由层。
 //! - **怎么避免大量重复 watch**：一个进程里同时有多个 [`Client`] 监
 //!   听同一个端点是常见情况；本文件把发现源做成"按端点共享"——多
-//!   个 client 通过 [`EndpointDiscoverySource`] 复用同一个底层 watch
+//!   个 client 通过 [`PortNameDiscoverySource`] 复用同一个底层 watch
 //!   流，控制平面 traffic 不会随 client 数量线性放大。
 //! - **怎么实现"最少负载"路由**：所谓 least-loaded 需要进程级共享
 //!   的 per-worker 在途计数。[`RoutingOccupancyState`] 用 `DashMap`
@@ -29,11 +29,11 @@
 //!
 //! 下列项目对父模块及调用方公开，**签名 / 字段名 / 可见性保持不变**：
 //!
-//! - `pub struct Client { pub endpoint, pub instance_source, ... }`
+//! - `pub struct Client { pub portname, pub instance_source, ... }`
 //!   及其全部 `pub fn`；
 //! - `pub(crate) struct RoutingOccupancyState` 及其 `pub(crate)` 方
 //!   法；
-//! - `pub(crate) struct EndpointDiscoverySource`；
+//! - `pub(crate) struct PortNameDiscoverySource`；
 //! - `pub(crate) async fn get_or_create_routing_occupancy_state`；
 //! - 测试专用 `#[cfg(test)] pub(crate) fn override_instance_avail`。
 //!
@@ -45,7 +45,7 @@
 //! 1. 路由占用层（`RoutingOccupancyState`）：进程级 per-worker 计数；
 //! 2. 占用注册表入口（`get_or_create_routing_occupancy_state`）：按端
 //!    点共享；
-//! 3. 发现源层（`EndpointDiscoverySource`）：合并 watch / event 双路；
+//! 3. 发现源层（`PortNameDiscoverySource`）：合并 watch / event 双路；
 //! 4. 客户端层（`Client`）：对外接口；
 //! 5. 后台监控（`monitor_instance_source`）：周期对账 + 清理陈旧计数；
 //! 6. 发现源构造（`get_or_create_dynamic_discovery_source`）：跨 client
@@ -63,7 +63,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
 
-use crate::component::{Endpoint, Instance};
+use crate::servicegroup::{PortName, Instance};
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::traits::DistributedRuntimeProvider;
 
@@ -164,29 +164,29 @@ impl RoutingOccupancyState {
 /// ## 实现
 ///
 /// - DRT 持有 `routing_occupancy_states()`：一张
-///   `Map<Endpoint, Weak<RoutingOccupancyState>>`；
+///   `Map<PortName, Weak<RoutingOccupancyState>>`；
 /// - 命中且能 upgrade → 直接返回；
 /// - 否则新建一个 `Arc<...>`，把 Weak 写回注册表，再返回 Arc。
 ///
 /// 用 `Weak` 让没有任何 client 持有的端点状态能被释放，避免内存泄露。
 pub(crate) async fn get_or_create_routing_occupancy_state(
-    endpoint: &Endpoint,
+    portname: &PortName,
 ) -> Arc<RoutingOccupancyState> {
-    let drt = endpoint.drt();
+    let drt = portname.drt();
     let registry = drt.routing_occupancy_states();
     let mut registry = registry.lock().await;
 
     // 命中且未被释放 → 复用
-    if let Some(weak) = registry.get(endpoint) {
+    if let Some(weak) = registry.get(portname) {
         if let Some(state) = weak.upgrade() {
             return state;
         }
         // 已被释放：先擦掉过期 Weak
-        registry.remove(endpoint);
+        registry.remove(portname);
     }
 
     let state = Arc::new(RoutingOccupancyState::default());
-    registry.insert(endpoint.clone(), Arc::downgrade(&state));
+    registry.insert(portname.clone(), Arc::downgrade(&state));
     state
 }
 
@@ -216,12 +216,12 @@ const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 /// - `event_subscribers`：原始事件流广播。响应取消等关键路径必须看
 ///   到每一次 Removed，coalesce 后的 watch 满足不了，所以另开一条。
 #[derive(Debug)]
-pub(crate) struct EndpointDiscoverySource {
+pub(crate) struct PortNameDiscoverySource {
     instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
     event_subscribers: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>>>,
 }
 
-impl EndpointDiscoverySource {
+impl PortNameDiscoverySource {
     /// 构造一个新的发现源。`instance_source` 由调用方传入，通常是
     /// `watch::channel(vec![]).1`。
     fn new(instance_source: tokio::sync::watch::Receiver<Vec<Instance>>) -> Self {
@@ -261,8 +261,8 @@ impl EndpointDiscoverySource {
 ///
 /// ## 字段语义
 ///
-/// - `endpoint`：本 client 所代表的端点身份；
-/// - `endpoint_discovery_source`：共享发现源（多 client 复用）；
+/// - `portname`：本 client 所代表的端点身份；
+/// - `portname_discovery_source`：共享发现源（多 client 复用）；
 /// - `instance_source`：当前实例列表快照（去重 / 合并后）；
 /// - `instance_avail`：当前可用实例 ID（被 `report_instance_down` 临
 ///   时摘掉的实例不在内）；
@@ -274,9 +274,9 @@ impl EndpointDiscoverySource {
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
-    pub endpoint: Endpoint,
-    // Shared endpoint discovery source backing both snapshots and raw events.
-    endpoint_discovery_source: Arc<EndpointDiscoverySource>,
+    pub portname: PortName,
+    // Shared portname discovery source backing both snapshots and raw events.
+    portname_discovery_source: Arc<PortNameDiscoverySource>,
     // These are the remotes I know about from watching key-value store
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
@@ -297,9 +297,9 @@ impl Client {
 
     /// 默认构造路径：使用 [`DEFAULT_RECONCILE_INTERVAL`] 作为对账周期。
     ///
-    /// 由父模块 `Endpoint::client()` 间接调用。
-    pub(crate) async fn new(endpoint: Endpoint) -> Result<Self> {
-        Self::with_reconcile_interval(endpoint, DEFAULT_RECONCILE_INTERVAL).await
+    /// 由父模块 `PortName::client()` 间接调用。
+    pub(crate) async fn new(portname: PortName) -> Result<Self> {
+        Self::with_reconcile_interval(portname, DEFAULT_RECONCILE_INTERVAL).await
     }
 
     /// 自定义对账周期的构造路径，主要供单元测试加速对账。
@@ -313,16 +313,16 @@ impl Client {
     /// 3. 创建 watch channel 用于通知外部 subscriber；
     /// 4. 启动 `monitor_instance_source` 后台 task。
     pub(crate) async fn with_reconcile_interval(
-        endpoint: Endpoint,
+        portname: PortName,
         reconcile_interval: Duration,
     ) -> Result<Self> {
         tracing::trace!(
-            "Client::new_dynamic: Creating dynamic client for endpoint: {}",
-            endpoint.id(),
+            "Client::new_dynamic: Creating dynamic client for portname: {}",
+            portname.id(),
         );
-        let endpoint_discovery_source =
-            Self::get_or_create_dynamic_discovery_source(&endpoint).await?;
-        let instance_source = Arc::new(endpoint_discovery_source.instance_receiver());
+        let portname_discovery_source =
+            Self::get_or_create_dynamic_discovery_source(&portname).await?;
+        let instance_source = Arc::new(portname_discovery_source.instance_receiver());
 
         // 把初始快照同时灌给 avail/free，防止 wait_for_instances 返回
         // 后路由方法（random / round_robin / ...）读到空列表。
@@ -335,8 +335,8 @@ impl Client {
         let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
 
         let client = Client {
-            endpoint: endpoint.clone(),
-            endpoint_discovery_source,
+            portname: portname.clone(),
+            portname_discovery_source,
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
@@ -382,7 +382,7 @@ impl Client {
     pub(crate) fn subscribe_discovery_events(
         &self,
     ) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
-        self.endpoint_discovery_source.subscribe_events()
+        self.portname_discovery_source.subscribe_events()
     }
 
     // ----- 阻塞 / 主动写 -----
@@ -395,17 +395,17 @@ impl Client {
     /// 否则 `await rx.changed()` 等下一次变化。
     pub async fn wait_for_instances(&self) -> Result<Vec<Instance>> {
         tracing::trace!(
-            "wait_for_instances: Starting wait for endpoint: {}",
-            self.endpoint.id(),
+            "wait_for_instances: Starting wait for portname: {}",
+            self.portname.id(),
         );
         let mut rx = self.instance_source.as_ref().clone();
         loop {
             let instances = rx.borrow_and_update().to_vec();
             if !instances.is_empty() {
                 tracing::info!(
-                    "wait_for_instances: Found {} instance(s) for endpoint: {}",
+                    "wait_for_instances: Found {} instance(s) for portname: {}",
                     instances.len(),
-                    self.endpoint.id(),
+                    self.portname.id(),
                 );
                 return Ok(instances);
             }
@@ -468,9 +468,9 @@ impl Client {
     ///    `report_instance_down` 临时屏蔽的实例最终能被恢复。
     fn monitor_instance_source(&self) {
         let reconcile_interval = self.reconcile_interval;
-        let cancel_token = self.endpoint.drt().primary_token();
+        let cancel_token = self.portname.drt().primary_token();
         let client = self.clone();
-        let endpoint_id = self.endpoint.id();
+        let portname_id = self.portname.id();
 
         tokio::task::spawn(async move {
             let mut rx = client.instance_source.as_ref().clone();
@@ -487,9 +487,9 @@ impl Client {
 
                 // 顺便清理陈旧 occupancy 计数。try_lock 拿不到锁就略过，
                 // 下一次循环还会再尝试。
-                let registry = client.endpoint.drt().routing_occupancy_states();
+                let registry = client.portname.drt().routing_occupancy_states();
                 if let Ok(registry) = registry.try_lock()
-                    && let Some(weak) = registry.get(&client.endpoint)
+                    && let Some(weak) = registry.get(&client.portname)
                     && let Some(state) = weak.upgrade()
                 {
                     state.retain(&instance_ids);
@@ -502,14 +502,14 @@ impl Client {
                     result = rx.changed() => {
                         if let Err(err) = result {
                             tracing::error!(
-                                "monitor_instance_source: The Sender is dropped: {err}, endpoint={endpoint_id}",
+                                "monitor_instance_source: The Sender is dropped: {err}, portname={portname_id}",
                             );
                             cancel_token.cancel();
                         }
                     }
                     _ = tokio::time::sleep(reconcile_interval) => {
                         tracing::trace!(
-                            "monitor_instance_source: periodic reconciliation for endpoint={endpoint_id}",
+                            "monitor_instance_source: periodic reconciliation for portname={portname_id}",
                         );
                     }
                 }
@@ -519,54 +519,54 @@ impl Client {
 
     // ----- 发现源构造 -----
 
-    /// 取/造一个跨 client 共享的 `EndpointDiscoverySource`。
+    /// 取/造一个跨 client 共享的 `PortNameDiscoverySource`。
     ///
     /// ## 流程
     ///
-    /// 1. 在 DRT 持有的 `endpoint_discovery_sources` 表上加锁；
+    /// 1. 在 DRT 持有的 `portname_discovery_sources` 表上加锁；
     /// 2. 命中且未被释放 → 直接复用；命中但 upgrade 失败 → 擦除过期
     ///    Weak；
     /// 3. 调 `discovery.list_and_watch(...)` 拿到事件流；
-    /// 4. 创建一个 `watch::channel` 与 `EndpointDiscoverySource`；
+    /// 4. 创建一个 `watch::channel` 与 `PortNameDiscoverySource`；
     /// 5. 起后台 task：把每个 `DiscoveryEvent` 既广播给原始订阅者，
     ///    又合入 `map: HashMap<instance_id, Instance>`，最后把 map 的
     ///    values 推到 watch channel；
     /// 6. 把 Weak 写回注册表，返回 Arc。
     async fn get_or_create_dynamic_discovery_source(
-        endpoint: &Endpoint,
-    ) -> Result<Arc<EndpointDiscoverySource>> {
-        let drt = endpoint.drt();
-        let sources = drt.endpoint_discovery_sources();
+        portname: &PortName,
+    ) -> Result<Arc<PortNameDiscoverySource>> {
+        let drt = portname.drt();
+        let sources = drt.portname_discovery_sources();
         let mut sources = sources.lock().await;
 
         // 命中且未被释放
-        if let Some(source) = sources.get(endpoint) {
+        if let Some(source) = sources.get(portname) {
             if let Some(source) = source.upgrade() {
                 return Ok(source);
             }
-            sources.remove(endpoint);
+            sources.remove(portname);
         }
 
         let discovery = drt.discovery();
-        let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
-            namespace: endpoint.component.namespace.name.clone(),
-            component: endpoint.component.name.clone(),
-            endpoint: endpoint.name.clone(),
+        let discovery_query = crate::discovery::DiscoveryQuery::PortName {
+            namespace: portname.servicegroup.namespace.name.clone(),
+            servicegroup: portname.servicegroup.name.clone(),
+            portname: portname.name.clone(),
         };
 
         let mut discovery_stream = discovery
             .list_and_watch(discovery_query.clone(), None)
             .await?;
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
-        let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
+        let discovery_source = Arc::new(PortNameDiscoverySource::new(watch_rx));
 
         // 后台 task 跑在 secondary runtime 上，避免阻塞主调用栈。
-        let secondary = endpoint.component.drt.runtime().secondary().clone();
+        let secondary = portname.servicegroup.drt.runtime().secondary().clone();
         let source_for_task = discovery_source.clone();
 
         secondary.spawn(async move {
             tracing::trace!(
-                "endpoint_watcher: Starting for discovery query: {:?}",
+                "portname_watcher: Starting for discovery query: {:?}",
                 discovery_query,
             );
             let mut map: HashMap<u64, Instance> = HashMap::new();
@@ -579,7 +579,7 @@ impl Client {
                         Some(Ok(ev)) => ev,
                         Some(Err(e)) => {
                             tracing::error!(
-                                "endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}",
+                                "portname_watcher: discovery stream error: {}; shutting down for discovery query: {:?}",
                                 e, discovery_query,
                             );
                             break;
@@ -594,12 +594,12 @@ impl Client {
 
                 // 再把事件合入 map：Added 覆盖、Removed 删除。
                 match event {
-                    DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
+                    DiscoveryEvent::Added(DiscoveryInstance::PortName(instance)) => {
                         map.insert(instance.instance_id, instance);
                     }
                     DiscoveryEvent::Added(_) => {}
-                    DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(endpoint_id)) => {
-                        map.remove(&endpoint_id.instance_id);
+                    DiscoveryEvent::Removed(DiscoveryInstanceId::PortName(portname_id)) => {
+                        map.remove(&portname_id.instance_id);
                     }
                     DiscoveryEvent::Removed(_) => {}
                 }
@@ -615,7 +615,7 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
+        sources.insert(portname.clone(), Arc::downgrade(&discovery_source));
         Ok(discovery_source)
     }
 }
@@ -765,7 +765,7 @@ mod tests {
     ///
     /// 1. 从当前 tokio 运行时创建 `Runtime`
     /// 2. 以 `DistributedConfig::process_local()` 创建本地 DRT
-    /// 3. 在 DRT 中创建 namespace → component → endpoint → client
+    /// 3. 在 DRT 中创建 namespace → servicegroup → portname → client
     ///
     /// # 参数
     /// - `ns_name`: 测试用命名空间名（每个测试用唯一名避免冲突）
@@ -778,8 +778,8 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace(ns_name.to_string()).unwrap();
-        let comp = ns.component("comp".to_string()).unwrap();
-        let ep = comp.endpoint("ep".to_string());
+        let comp = ns.servicegroup("comp".to_string()).unwrap();
+        let ep = comp.portname("ep".to_string());
         let client = Client::with_reconcile_interval(ep, Duration::from_millis(50))
             .await
             .unwrap();
@@ -911,7 +911,7 @@ mod tests {
     ///
     /// ## 测试过程
     ///
-    /// 1. 创建 DRT 和 Endpoint
+    /// 1. 创建 DRT 和 PortName
     /// 2. 第一次调用 `get_or_create_routing_occupancy_state(&ep)` 得到 state_a
     /// 3. 第二次调用同一端点得到 state_b
     /// 4. 使用 `Arc::ptr_eq` 断言二者指向同一内存地址
@@ -927,8 +927,8 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test-occupancy-shared".to_string()).unwrap();
-        let comp = ns.component("comp".to_string()).unwrap();
-        let ep = comp.endpoint("ep".to_string());
+        let comp = ns.servicegroup("comp".to_string()).unwrap();
+        let ep = comp.portname("ep".to_string());
 
         let state_a = get_or_create_routing_occupancy_state(&ep).await;
         let state_b = get_or_create_routing_occupancy_state(&ep).await;
@@ -943,11 +943,11 @@ mod tests {
     ///
     /// ## 测试过程
     ///
-    /// 1. 创建 DRT、Endpoint 和 Client（对账间隔 50ms）
-    /// 2. 调用 `register_endpoint_instance` 注册实例，使发现平面可见
+    /// 1. 创建 DRT、PortName 和 Client（对账间隔 50ms）
+    /// 2. 调用 `register_portname_instance` 注册实例，使发现平面可见
     /// 3. 等待 `wait_for_instances` 确认实例已被 Client 感知
     /// 4. 获取该 worker 的 ID 并对 `RoutingOccupancyState` 递增计数至 1
-    /// 5. 调用 `unregister_endpoint_instance` 下线实例
+    /// 5. 调用 `unregister_portname_instance` 下线实例
     /// 6. 轮询等待 monitor 任务清理计数（最多 1 秒）
     /// 7. 断言计数已归零
     ///
@@ -962,15 +962,15 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test-occ-cleanup".to_string()).unwrap();
-        let comp = ns.component("comp".to_string()).unwrap();
-        let ep = comp.endpoint("ep".to_string());
+        let comp = ns.servicegroup("comp".to_string()).unwrap();
+        let ep = comp.portname("ep".to_string());
 
         let client = Client::with_reconcile_interval(ep.clone(), Duration::from_millis(50))
             .await
             .unwrap();
 
         // 注册并等待实例出现
-        ep.register_endpoint_instance().await.unwrap();
+        ep.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let worker_id = client.instance_ids_avail()[0];
@@ -979,7 +979,7 @@ mod tests {
         assert_eq!(state.load(worker_id), 1);
 
         // 下线实例，等待 monitor 清理占用计数
-        ep.unregister_endpoint_instance().await.unwrap();
+        ep.unregister_portname_instance().await.unwrap();
 
         for _ in 0..20 {
             if state.load(worker_id) == 0 {
@@ -997,7 +997,7 @@ mod tests {
     ///
     /// ## 测试过程
     ///
-    /// 1. 创建 DRT、Endpoint，分别获取 state1 和 state2（同端点，Arc 相同）
+    /// 1. 创建 DRT、PortName，分别获取 state1 和 state2（同端点，Arc 相同）
     /// 2. 通过 state1 对候选集 [10, 20, 30] 调用 select_exact_min_and_increment，得到 id1
     /// 3. 断言 state1.load(id1) == 1（被选中一次）
     /// 4. 再次调用 select_exact_min_and_increment，得到 id2（应与 id1 不同）
@@ -1016,8 +1016,8 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test-occ-multi-client".to_string()).unwrap();
-        let comp = ns.component("comp".to_string()).unwrap();
-        let ep = comp.endpoint("ep".to_string());
+        let comp = ns.servicegroup("comp".to_string()).unwrap();
+        let ep = comp.portname("ep".to_string());
 
         let state1 = get_or_create_routing_occupancy_state(&ep).await;
         let state2 = get_or_create_routing_occupancy_state(&ep).await;
@@ -1081,11 +1081,11 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test_ll_counts".to_string()).unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
 
-        let state1 = get_or_create_routing_occupancy_state(&endpoint).await;
-        let state2 = get_or_create_routing_occupancy_state(&endpoint).await;
+        let state1 = get_or_create_routing_occupancy_state(&portname).await;
+        let state2 = get_or_create_routing_occupancy_state(&portname).await;
 
         let picked1 = state1
             .select_exact_min_and_increment(&[10, 20, 30])
@@ -1117,10 +1117,10 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test_watcher".to_string()).unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
 
-        let client = endpoint.client().await.unwrap();
+        let client = portname.client().await.unwrap();
         let watcher = client.instance_avail_watcher();
 
         // Set initial instances
@@ -1144,10 +1144,10 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test_reconciliation".to_string()).unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
 
-        let client = Client::with_reconcile_interval(endpoint, TEST_RECONCILE_INTERVAL)
+        let client = Client::with_reconcile_interval(portname, TEST_RECONCILE_INTERVAL)
             .await
             .unwrap();
 
@@ -1198,21 +1198,21 @@ mod tests {
             .await
             .unwrap();
         let ns = drt.namespace("test_occupancy_cleanup".to_string()).unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
 
-        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+        let client = Client::with_reconcile_interval(portname.clone(), TEST_RECONCILE_INTERVAL)
             .await
             .unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
+        portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let worker_id = client.instance_ids_avail()[0];
-        let state = get_or_create_routing_occupancy_state(&endpoint).await;
+        let state = get_or_create_routing_occupancy_state(&portname).await;
         state.increment(worker_id);
         assert_eq!(state.load(worker_id), 1);
 
-        endpoint.unregister_endpoint_instance().await.unwrap();
+        portname.unregister_portname_instance().await.unwrap();
 
         for _ in 0..10 {
             if state.load(worker_id) == 0 {

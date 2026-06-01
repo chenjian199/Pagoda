@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::egress::addressed_router` —— 按显式 address 路由的出站客户端
@@ -9,7 +9,7 @@
 //! 常用于 health check / 控制面消息 / 单元测试。
 //!
 //! ## 外部契约
-//! - 公开类型与 lib-copy 一致；构造器签名、`Drop` 时是否取消 inflight 都是契约。
+//! - 公开类型一致；构造器签名、`Drop` 时是否取消 inflight 都是契约。
 //! - 不引入新的 builder pattern，不重命名公有方法。
 //!
 //! ## 实现要点
@@ -30,11 +30,11 @@ use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
-use crate::component::Instance;
-use crate::discovery::EndpointInstanceId;
-use crate::dynamo_nvtx_range;
+use crate::servicegroup::Instance;
+use crate::discovery::PortNameInstanceId;
+use crate::pagoda_timeline_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
-use crate::error::{DynamoError, ErrorType};
+use crate::error::{PagodaError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -176,8 +176,8 @@ fn build_request_headers(request_id: &str) -> std::collections::HashMap<String, 
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
-    /// Carries endpoint name + instance_id so cancellation is scoped to the
-    /// exact (endpoint, instance) pair, not all endpoints on the same runtime.
+    /// Carries portname name + instance_id so cancellation is scoped to the
+    /// exact (portname, instance) pair, not all portnames on the same runtime.
     instance: Option<Instance>,
 }
 
@@ -227,14 +227,14 @@ impl AddressedPushRouter {
     }
 
     /// Cancel all pending response-stream registrations for an instance.
-    pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
+    pub async fn cancel_instance_streams(&self, instance_id: &PortNameInstanceId) -> usize {
         self.resp_transport
             .cancel_instance_streams(instance_id)
             .await
     }
 
     /// Clear the tombstone after an instance reappears in discovery.
-    pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
+    pub async fn clear_instance_tombstone(&self, instance_id: &PortNameInstanceId) {
         self.resp_transport
             .clear_instance_tombstone(instance_id)
             .await
@@ -304,14 +304,14 @@ where
         // If the instance is already tombstoned, fail fast with a migratable
         // error instead of writing to the request plane.
         if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
-            let endpoint_instance_id = inst.endpoint_instance_id();
+            let portname_instance_id = inst.portname_instance_id();
             if !self
                 .resp_transport
-                .associate_instance(subject, &endpoint_instance_id)
+                .associate_instance(subject, &portname_instance_id)
                 .await
             {
                 return Err(anyhow::anyhow!(
-                    DynamoError::builder()
+                    PagodaError::builder()
                         .error_type(ErrorType::Disconnected)
                         .message(
                             "Worker removed before request could be sent (tombstoned instance)"
@@ -321,7 +321,7 @@ where
             }
         }
 
-        // package up the connection info as part of the "header" component of the two part message
+        // package up the connection info as part of the "header" servicegroup of the two part message
         // used to issue the request on the
         // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
         // calls. all the information here is provided by the [`StreamOptions`] object and/or the dataplane object
@@ -390,7 +390,7 @@ where
         let headers = build_request_headers(&request_id);
 
         // Phase A: Frontend → Backend (network + queue + ack)
-        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
+        let _nvtx_send = pagoda_timeline_range!("transport.tcp.send");
         let send_result = self.req_client.send_request(address, buffer, headers).await;
         drop(_nvtx_send);
 
@@ -400,7 +400,7 @@ where
         }
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
-        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
+        let _nvtx_wait = pagoda_timeline_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
 
         // RecvError → migratable Disconnected (watcher cancelled the subject
@@ -416,7 +416,7 @@ where
                 // structured prologue error type for finer routing.
                 self.cancel_recv_stream_if_present(&recv_subject).await;
                 return Err(anyhow::anyhow!(
-                    DynamoError::builder()
+                    PagodaError::builder()
                         .error_type(ErrorType::CannotConnect)
                         .message(format!(
                             "Worker generate() failed before response stream: {e}"
@@ -429,7 +429,7 @@ where
                 // this subject or the worker died mid-handshake.
                 self.cancel_recv_stream_if_present(&recv_subject).await;
                 return Err(anyhow::anyhow!(
-                    DynamoError::builder()
+                    PagodaError::builder()
                         .error_type(ErrorType::Disconnected)
                         .message("Worker disconnected before response stream was established")
                         .build()
@@ -455,7 +455,7 @@ where
                         .observe(queue_start.elapsed().as_secs_f64());
                 }
                 if is_complete_final {
-                    let err = DynamoError::msg(
+                    let err = PagodaError::msg(
                         "Response received after generation ended - this should never happen",
                     );
                     return Some(U::from_err(err));
@@ -468,7 +468,7 @@ where
                         } else if is_complete_final {
                             None
                         } else {
-                            let err = DynamoError::msg(
+                            let err = PagodaError::msg(
                                 "Empty response received - this should never happen",
                             );
                             Some(U::from_err(err))
@@ -479,7 +479,7 @@ where
                         let json_str = String::from_utf8_lossy(&res_bytes);
                         tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
 
-                        Some(U::from_err(DynamoError::msg(err.to_string())))
+                        Some(U::from_err(PagodaError::msg(err.to_string())))
                     }
                 }
             } else if is_complete_final {
@@ -493,7 +493,7 @@ where
                 None
             } else {
                 // stream ended unexpectedly
-                let err = DynamoError::builder()
+                let err = PagodaError::builder()
                     .error_type(ErrorType::Disconnected)
                     .message("Stream ended before generation completed")
                     .build();
@@ -534,7 +534,7 @@ mod tests {
     //! 由集成测试覆盖；本单元层只锁定可独立验证的契约面：headers 协议、wire 枚举
     //! 序列化、inflight 计数器孪生不变式、构造器透传。
     use super::*;
-    use crate::component::Instance;
+    use crate::servicegroup::Instance;
     use crate::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
     use futures::stream;
     use serde_json::Value;
@@ -542,11 +542,11 @@ mod tests {
     fn dummy_instance() -> Instance {
         // 仅用于 round-trip 测试：字段值不参与任何路由逻辑。
         Instance {
-            component: "comp".into(),
-            endpoint: "ep".into(),
+            servicegroup: "comp".into(),
+            portname: "ep".into(),
             namespace: "ns".into(),
             instance_id: 42,
-            transport: crate::component::TransportType::Nats("nats://127.0.0.1:4222".into()),
+            transport: crate::servicegroup::TransportType::Nats("nats://127.0.0.1:4222".into()),
             device_type: None,
         }
     }
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(a, "addr-b");
         let i = i.expect("instance should be present");
         assert_eq!(i.instance_id, inst_clone.instance_id);
-        assert_eq!(i.endpoint, inst_clone.endpoint);
+        assert_eq!(i.portname, inst_clone.portname);
     }
 
     #[test]

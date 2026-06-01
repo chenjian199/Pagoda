@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Request-Plane 时延拆分（AddressedPushRouter 侧）
@@ -193,24 +193,24 @@ mod tests {
     fn test_supplemental_request_plane_metric_name_and_descriptors() {
         assert_eq!(
             request_plane_metric_name(request_plane::QUEUE_SECONDS),
-            "dynamo_request_plane_queue_seconds"
+            "pagoda_request_plane_queue_seconds"
         );
         assert_eq!(
             request_plane_metric_name(request_plane::SEND_SECONDS),
-            "dynamo_request_plane_send_seconds"
+            "pagoda_request_plane_send_seconds"
         );
         assert_eq!(
             request_plane_metric_name(request_plane::ROUNDTRIP_TTFT_SECONDS),
-            "dynamo_request_plane_roundtrip_ttft_seconds"
+            "pagoda_request_plane_roundtrip_ttft_seconds"
         );
         assert_eq!(
             request_plane_metric_name(request_plane::INFLIGHT_REQUESTS),
-            "dynamo_request_plane_inflight_requests"
+            "pagoda_request_plane_inflight_requests"
         );
         assert_eq!(request_plane_metric_name(""), format!("{}_", name_prefix::REQUEST_PLANE));
         assert_eq!(
             request_plane_metric_name("custom-suffix"),
-            "dynamo_request_plane_custom-suffix"
+            "pagoda_request_plane_custom-suffix"
         );
 
         let q = REQUEST_PLANE_QUEUE_SECONDS.desc();

@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pagoda_config` —— 通用配置解析工具集
 //!
 //! ## 设计意图
-//! 为整个 dynamo 工作区提供"环境变量 / 配置文件中的布尔字符串"统一解析能力，
+//! 为整个 pagoda 工作区提供"环境变量 / 配置文件中的布尔字符串"统一解析能力，
 //! 让上层 crate 不再各自实现 "1/true/yes/on" ↔ "0/false/no/off" 的判定。
 //! - 不引入任何运行时依赖（仅 `anyhow` for 错误传播）；
 //! - 区分"宽松判定"（`is_*` / `env_is_*` 返回 `bool`，对未知值视为 false）
@@ -12,7 +12,7 @@
 //! - 大小写不敏感（全部走 `to_lowercase`）。
 //!
 //! ## 外部契约
-//! - 6 个 `pub fn`，签名与可见性必须与 lib-copy 严格一致：
+//! - 6 个 `pub fn`，签名与可见性必须严格一致：
 //!   - `pub fn is_truthy(val: &str) -> bool`
 //!   - `pub fn is_falsey(val: &str) -> bool`
 //!   - `pub fn parse_bool(val: &str) -> anyhow::Result<bool>`
@@ -30,8 +30,7 @@
 //! - `matches!` 宏配合 `to_lowercase()` 做字面常量匹配，避免分配 `HashSet`。
 //! - 6 个 API 在 2×3 维度上对称（truthy/falsey 一组、宽松/严格一组、
 //!   字符串/环境变量一组），测试矩阵以此遍历。
-//! - 不在 crate 顶层 re-export 任何 `integrations` 类型 —— 该模块的描述仅为
-//!   历史注释，当前实现是**纯工具函数集合**。
+//! - 不在 crate 顶层 re-export 任何 `integrations` 类型。
 
 // === SECTION: 字面集合判定（基础层）===
 
@@ -149,16 +148,14 @@ pub fn env_parse_bool(env: &str) -> anyhow::Result<Option<bool>> {
 mod tests {
     //! ## 测试矩阵
     //!
-    //! lib-copy 测试名 ⊆ 当前文件（6 原始 + 6 新增 = 12 测试）：
-    //!
     //! | 测试名 | 覆盖维度 |
     //! |---|---|
-    //! | `test_is_truthy` | `is_truthy` 全字面 + 大小写 + 反例（lib-copy）|
-    //! | `test_is_falsey` | `is_falsey` 全字面 + 大小写 + 反例（lib-copy）|
-    //! | `test_parse_bool` | `parse_bool` 三类输入：truthy/falsey/Err（lib-copy）|
-    //! | `test_env_is_truthy_not_set` | `env_is_truthy` 变量未设置 → false（lib-copy）|
-    //! | `test_env_is_falsey_not_set` | `env_is_falsey` 变量未设置 → false（lib-copy）|
-    //! | `test_env_parse_bool_not_set` | `env_parse_bool` 未设置 → `Ok(None)`（lib-copy）|
+    //! | `test_is_truthy` | `is_truthy` 全字面 + 大小写 + 反例|
+    //! | `test_is_falsey` | `is_falsey` 全字面 + 大小写 + 反例|
+    //! | `test_parse_bool` | `parse_bool` 三类输入：truthy/falsey/Err|
+    //! | `test_env_is_truthy_not_set` | `env_is_truthy` 变量未设置 → false|
+    //! | `test_env_is_falsey_not_set` | `env_is_falsey` 变量未设置 → false|
+    //! | `test_env_parse_bool_not_set` | `env_parse_bool` 未设置 → `Ok(None)`|
     //! | `test_is_truthy_falsey_disjoint` | 两字面集合互不重叠（自洽性）|
     //! | `test_parse_bool_error_message_contract` | 错误消息文案契约（grep 友好）|
     //! | `test_parse_bool_mixed_case_roundtrip` | 严格 API 也支持大小写混合 |
@@ -172,8 +169,6 @@ mod tests {
     //! 故新增用例显式包裹 `unsafe { ... }`。
 
     use super::*;
-
-    // --- lib-copy 测试集（不可缺失）---
 
     #[test]
     fn test_is_truthy() {
@@ -257,8 +252,6 @@ mod tests {
         );
     }
 
-    // --- 新增覆盖（diversification）---
-
     /// truthy 与 falsey 字面集合必须两两互不重叠：避免 `parse_bool` 出现歧义分支。
     #[test]
     fn test_is_truthy_falsey_disjoint() {
@@ -299,7 +292,7 @@ mod tests {
     /// 设置环境变量后，宽松 / 严格 API 行为应一致。使用本测试专属变量名。
     #[test]
     fn test_env_apis_roundtrip() {
-        let name = "DYNAMO_CFG_TEST_ROUNDTRIP_VAR";
+        let name = "PAGODA_CFG_TEST_ROUNDTRIP_VAR";
         unsafe { std::env::set_var(name, "yes") };
         assert!(env_is_truthy(name));
         assert!(!env_is_falsey(name));
@@ -316,7 +309,7 @@ mod tests {
     /// 已设置但非法 → 宽松 API 静默 false，严格 API 必须 Err。
     #[test]
     fn test_env_parse_bool_invalid_value_errors() {
-        let name = "DYNAMO_CFG_TEST_INVALID_VAR";
+        let name = "PAGODA_CFG_TEST_INVALID_VAR";
         unsafe { std::env::set_var(name, "garbage-not-a-bool") };
         assert!(!env_is_truthy(name));
         assert!(!env_is_falsey(name));
@@ -327,7 +320,7 @@ mod tests {
     /// env_parse_bool 应透传 parse_bool 的错误（保留原始值与提示文案）。
     #[test]
     fn test_env_parse_bool_invalid_passes_through_message() {
-        let name = "DYNAMO_CFG_TEST_PASSTHROUGH_VAR";
+        let name = "PAGODA_CFG_TEST_PASSTHROUGH_VAR";
         unsafe { std::env::set_var(name, "perhaps") };
         let err = env_parse_bool(name).unwrap_err().to_string();
         assert!(err.contains("'perhaps'"), "应透传原始值：{err}");

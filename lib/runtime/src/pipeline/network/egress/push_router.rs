@@ -1,17 +1,17 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::egress::push_router` —— Push 路由器与动态 instance 选择
 //!
 //! ## 设计意图
-//! `PushRouter` 是 egress 面向业务调用方的默认路径：调用方只提供 component/endpoint
+//! `PushRouter` 是 egress 面向业务调用方的默认路径：调用方只提供 servicegroup/portname
 //! 名，在 instance 动态变化下（watch::Receiver<Vec<Instance>>）选一个健康节点 ——
 //! round-robin / random / direct，调用该节点的 transport client。应对错误还能
 //! 透明重试、换节点。
 //!
 //! ## 外部契约
-//! - 公开结构 / 方法与 lib-copy 完全一致；
-//! - 依赖 [`crate::error::BackendError`] / `DynamoError` / `ErrorType` / `match_error_chain`
+//! - 公开结构 / 方法完全一致；
+//! - 依赖 [`crate::error::BackendError`] / `PagodaError` / `ErrorType` / `match_error_chain`
 //!   进行错误分类与重试决策——这些导入路径是契约。
 //!
 //! ## 实现要点
@@ -19,21 +19,21 @@
 //! - 重试参数、退避策略、instance 黑名单都在 lib-copy 里定型，本重写不调整。
 
 use super::{AsyncEngineContextProvider, ResponseStream};
-use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
+use crate::error::{BackendError, PagodaError, ErrorType, match_error_chain};
 use crate::{
-    component::{
-        Client, DeviceType, Endpoint, Instance, RoutingOccupancyState,
+    servicegroup::{
+        Client, DeviceType, PortName, Instance, RoutingOccupancyState,
         get_or_create_routing_occupancy_state,
     },
-    discovery::EndpointInstanceId,
-    dynamo_nvtx_range,
+    discovery::PortNameInstanceId,
+    pagoda_timeline_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
     },
-    protocols::{EndpointId, maybe_error::MaybeError},
+    protocols::{PortNameId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
@@ -67,11 +67,11 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 /// Read the backend response inactivity timeout from the environment.
-/// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
+/// Reuses `PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
 /// as the HTTP-layer safety net in `disconnect.rs`.
 fn response_inactivity_timeout() -> Option<std::time::Duration> {
-    use crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
-    std::env::var(DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
+    use crate::config::environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
+    std::env::var(PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
@@ -135,7 +135,7 @@ where
     U: Data + for<'de> Deserialize<'de>,
 {
     // TODO: This shouldn't be pub, but lib/bindings/python/rust/lib.rs exposes it.
-    /// The Client is how we gather remote endpoint information from etcd.
+    /// The Client is how we gather remote portname information from etcd.
     pub client: Client,
 
     /// How we choose which instance to send traffic to.
@@ -143,7 +143,7 @@ where
     /// Setting this to KV means we never intend to call `generate` on this PushRouter. We are
     /// not using it as an AsyncEngine.
     /// Instead we will decide whether to call random/round_robin/direct ourselves and call them directly.
-    /// dynamo-llm's KV Routing does this.
+    /// pagoda-llm's KV Routing does this.
     router_mode: RouterMode,
 
     /// Number of round robin requests handled. Used to decide which server is next.
@@ -160,7 +160,7 @@ where
     fault_detection_enabled: bool,
 
     /// Cached response inactivity timeout. Read once at construction from
-    /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
+    /// [`environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
@@ -235,7 +235,7 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
 /// `allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
 /// and choose CPU when `total_cpu_inflight < allowed_cpu_inflight`.
 ///
-/// `ratio` is `non_cpu_to_cpu_ratio` (from `DYN_ENCODER_CUDA_TO_CPU_RATIO`,
+/// `ratio` is `non_cpu_to_cpu_ratio` (from `PGD_ENCODER_CUDA_TO_CPU_RATIO`,
 /// default `8` in `device_aware_weighted`).
 fn device_aware_candidate_group(
     state: &RoutingOccupancyState,
@@ -276,18 +276,18 @@ fn device_aware_candidate_group(
     }
 }
 
-/// At most one `list_and_watch` per endpoint, across all `PushRouter`
+/// At most one `list_and_watch` per portname, across all `PushRouter`
 /// instances. Entry removed on watcher exit so a later router can re-arm.
-static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<PortNameId, ()>> =
     std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
 /// registrations on the removed instance, unblocking queued requests with
 /// a migratable `Disconnected` error. Uses raw `list_and_watch` events
 /// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
+/// identity is not silently swallowed. Keyed by full `PortNameInstanceId`.
 fn spawn_instance_removal_watcher(
-    endpoint: Endpoint,
+    portname: PortName,
     addressed: Arc<AddressedPushRouter>,
     cancel_token: tokio_util::sync::CancellationToken,
 ) {
@@ -296,23 +296,23 @@ fn spawn_instance_removal_watcher(
     };
     use tokio_stream::StreamExt as _;
 
-    // One watcher per endpoint: if one is already running, skip.
+    // One watcher per portname: if one is already running, skip.
     let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-    let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
+    let portname_id = portname.id();
+    if guard.insert(portname_id.clone(), ()).is_some() {
         tracing::debug!(
-            ?endpoint_id,
-            "Instance removal watcher already running for this endpoint, skipping"
+            ?portname_id,
+            "Instance removal watcher already running for this portname, skipping"
         );
         return;
     }
 
-    let endpoint_name = endpoint.name().to_string();
+    let portname_name = portname.name().to_string();
 
     tokio::spawn(async move {
         // Release on every exit path (including panic); a leaked entry
         // silently disables removal cancellation until process restart.
-        struct GuardRelease(EndpointId);
+        struct GuardRelease(PortNameId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
                 if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
@@ -320,25 +320,25 @@ fn spawn_instance_removal_watcher(
                 }
             }
         }
-        let _release = GuardRelease(endpoint_id);
+        let _release = GuardRelease(portname_id);
 
-        let namespace = endpoint.component().namespace().name();
-        let component = endpoint.component().name().to_string();
+        let namespace = portname.servicegroup().namespace().name();
+        let servicegroup = portname.servicegroup().name().to_string();
 
         // Reconnect on transient discovery failure; cancel-aware backoff.
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
-            let query = DiscoveryQuery::Endpoint {
+            let query = DiscoveryQuery::PortName {
                 namespace: namespace.clone(),
-                component: component.clone(),
-                endpoint: endpoint_name.clone(),
+                servicegroup: servicegroup.clone(),
+                portname: portname_name.clone(),
             };
 
-            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+            let mut stream = match portname.drt().discovery().list_and_watch(query, None).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
-                        endpoint = %endpoint_name,
+                        portname = %portname_name,
                         "Failed to start instance removal watcher (will retry): {e}"
                     );
                     tokio::select! {
@@ -353,13 +353,13 @@ fn spawn_instance_removal_watcher(
                     event = stream.next() => {
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
-                                if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                if let DiscoveryInstanceId::PortName(eid) = &id {
                                     let n = addressed.cancel_instance_streams(eid).await;
                                     if n > 0 {
                                         tracing::warn!(
                                             namespace = %eid.namespace,
-                                            component = %eid.component,
-                                            endpoint = %eid.endpoint,
+                                            servicegroup = %eid.servicegroup,
+                                            portname = %eid.portname,
                                             instance_id = eid.instance_id,
                                             cancelled = n,
                                             "Cancelled pending response streams for removed \
@@ -368,20 +368,20 @@ fn spawn_instance_removal_watcher(
                                     }
                                 }
                             }
-                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
-                                let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::PortName(inst)))) => {
+                                let eid: PortNameInstanceId = inst.portname_instance_id();
                                 addressed.clear_instance_tombstone(&eid).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
-                                    endpoint = %endpoint_name,
+                                    portname = %portname_name,
                                     "Instance removal watcher stream error: {e}"
                                 );
                             }
                             None => {
                                 tracing::warn!(
-                                    endpoint = %endpoint_name,
+                                    portname = %portname_name,
                                     "Instance removal watcher stream ended; reconnecting"
                                 );
                                 continue 'reconnect;
@@ -395,15 +395,15 @@ fn spawn_instance_removal_watcher(
             }
         }
 
-        tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
+        tracing::debug!(portname = %portname_name, "Instance removal watcher exiting");
     });
 }
 
-async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
+async fn addressed_router(portname: &PortName) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager();
+    let manager = portname.drt().network_manager();
     let req_client = manager.create_client()?;
-    let resp_transport = endpoint.drt().tcp_server().await?;
+    let resp_transport = portname.drt().tcp_server().await?;
 
     tracing::debug!(
         transport = req_client.transport_name(),
@@ -432,7 +432,7 @@ where
         client: Client,
         router_mode: RouterMode,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        let addressed = addressed_router(&client.portname).await?;
 
         let occupancy_state = if matches!(
             router_mode,
@@ -440,16 +440,16 @@ where
                 | RouterMode::LeastLoaded
                 | RouterMode::DeviceAwareWeighted
         ) {
-            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+            Some(get_or_create_routing_occupancy_state(&client.portname).await)
         } else {
             None
         };
 
         // Cancel orphaned pending response streams when workers die.
         spawn_instance_removal_watcher(
-            client.endpoint.clone(),
+            client.portname.clone(),
             addressed.clone(),
-            client.endpoint.drt().primary_token(),
+            client.portname.drt().primary_token(),
         );
 
         Ok(PushRouter {
@@ -475,7 +475,7 @@ where
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        let addressed = addressed_router(&client.endpoint).await?;
+        let addressed = addressed_router(&client.portname).await?;
 
         // Start worker monitor if provided and in dynamic mode
         if let Some(monitor) = worker_monitor.as_ref() {
@@ -488,16 +488,16 @@ where
                 | RouterMode::LeastLoaded
                 | RouterMode::DeviceAwareWeighted
         ) {
-            Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
+            Some(get_or_create_routing_occupancy_state(&client.portname).await)
         } else {
             None
         };
 
         // Cancel orphaned pending response streams when workers die.
         spawn_instance_removal_watcher(
-            client.endpoint.clone(),
+            client.portname.clone(),
             addressed.clone(),
-            client.endpoint.drt().primary_token(),
+            client.portname.drt().primary_token(),
         );
 
         let router = PushRouter {
@@ -532,7 +532,7 @@ where
             .await
     }
 
-    /// Issue a request to a random endpoint
+    /// Issue a request to a random portname
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
             let instance_ids = self.client.instance_ids_avail();
@@ -572,7 +572,7 @@ where
         }
     }
 
-    /// Issue a request to a specific endpoint
+    /// Issue a request to a specific portname
     pub async fn direct(
         &self,
         request: SingleIn<T>,
@@ -589,8 +589,8 @@ where
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {}",
-                self.client.endpoint.id()
+                "instance_id={instance_id} not found for portname {}",
+                self.client.portname.id()
             ));
         }
 
@@ -614,10 +614,10 @@ where
             return Err(self.no_instances_error());
         }
 
-        // Apply a unified policy for all endpoints.
-        let endpoint_id = self.client.endpoint.id();
+        // Apply a unified policy for all portnames.
+        let portname_id = self.client.portname.id();
 
-        // For encoder endpoints, partition by device type
+        // For encoder portnames, partition by device type
         let instances = self.client.instances();
         let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
             .iter()
@@ -625,7 +625,7 @@ where
             .collect();
 
         // Apply budget-based routing to determine which group to send to
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+        let cuda_to_cpu_ratio = std::env::var("PGD_ENCODER_CUDA_TO_CPU_RATIO")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 1)
@@ -643,8 +643,8 @@ where
             .await
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "no instances in selected device group for endpoint {}",
-                    endpoint_id
+                    "no instances in selected device group for portname {}",
+                    portname_id
                 )
             })?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
@@ -653,7 +653,7 @@ where
             Some(Some(DeviceType::Cpu))
         );
         tracing::info!(
-            endpoint = %endpoint_id,
+            portname = %portname_id,
             selected_instance = instance_id,
             is_cpu,
             "DeviceAwareWeighted selected instance"
@@ -761,8 +761,8 @@ where
     fn occupancy_state(&self) -> anyhow::Result<Arc<RoutingOccupancyState>> {
         self.occupancy_state.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "routing occupancy state not initialized for endpoint {}",
-                self.client.endpoint.id()
+                "routing occupancy state not initialized for portname {}",
+                self.client.portname.id()
             )
         })
     }
@@ -771,8 +771,8 @@ where
     #[inline]
     fn no_instances_error(&self) -> anyhow::Error {
         anyhow::anyhow!(
-            "no instances found for endpoint {}",
-            self.client.endpoint.id()
+            "no instances found for portname {}",
+            self.client.portname.id()
         )
     }
 
@@ -785,7 +785,7 @@ where
 
     /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let subject = self.client.endpoint.subject();
+        let subject = self.client.portname.subject();
         tracing::debug!("static got subject: {subject}");
         let request = request.map(|req| AddressedRequest::new(req, subject));
         tracing::debug!("router generate");
@@ -826,7 +826,7 @@ where
                     let cause = PipelineError::ServiceOverloaded(
                         "All workers are busy, please retry later".to_string(),
                     );
-                    return Err(DynamoError::builder()
+                    return Err(PagodaError::builder()
                         .error_type(ErrorType::ResourceExhausted)
                         .message("All workers are busy, please retry later")
                         .cause(cause)
@@ -839,7 +839,7 @@ where
         // Resolve transport address; if the selected instance disappeared
         // between selection and dispatch, fall back to another available one.
         let (address, _transport_kind, instance) = {
-            use crate::component::TransportType;
+            use crate::servicegroup::TransportType;
 
             let resolve_transport = |id: u64| {
                 let instances = self.client.instances();
@@ -894,18 +894,18 @@ where
                         instance_id = id;
                         resolve_transport(id).ok_or_else(|| {
                             anyhow::anyhow!(
-                                "Fallback instance {} also not found for endpoint {}",
+                                "Fallback instance {} also not found for portname {}",
                                 id,
-                                self.client.endpoint.id()
+                                self.client.portname.id()
                             )
                         })?
                     }
                     None => {
                         return Err(anyhow::anyhow!(
                             "Instance {} not found and no other instances available \
-                             for endpoint {}",
+                             for portname {}",
                             instance_id,
-                            self.client.endpoint.id()
+                            self.client.portname.id()
                         ));
                     }
                 }
@@ -918,7 +918,7 @@ where
             .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
-        let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
+        let _nvtx_transport = pagoda_timeline_range!(_transport_kind);
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate(request)
@@ -970,7 +970,7 @@ where
                                     );
                                     client_for_timeout.report_instance_down(instance_id);
                                     yield U::from_err(
-                                        crate::error::DynamoError::builder()
+                                        crate::error::PagodaError::builder()
                                             .error_type(crate::error::ErrorType::ResponseTimeout)
                                             .message("backend response inactivity timeout")
                                             .build()
@@ -1095,26 +1095,26 @@ mod tests {
     use crate::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
-        error::DynamoError,
+        error::PagodaError,
         pipeline::{ResponseStream, context::Controller},
     };
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Deserialize, Serialize)]
     struct TestResponse {
-        error: Option<DynamoError>,
+        error: Option<PagodaError>,
     }
 
     impl MaybeError for TestResponse {
         fn from_err(err: impl std::error::Error + 'static) -> Self {
             Self {
-                error: Some(DynamoError::from(
+                error: Some(PagodaError::from(
                     Box::new(err) as Box<dyn std::error::Error + 'static>
                 )),
             }
         }
 
-        fn err(&self) -> Option<DynamoError> {
+        fn err(&self) -> Option<PagodaError> {
             self.error.clone()
         }
     }
@@ -1258,11 +1258,11 @@ mod tests {
         let ns = drt
             .namespace("test_least_loaded_router".to_string())
             .unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
+        let client = portname.client().await.unwrap();
 
-        endpoint.register_endpoint_instance().await.unwrap();
+        portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
@@ -1368,11 +1368,11 @@ mod tests {
         let ns = drt
             .namespace("test_device_aware_router".to_string())
             .unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
+        let client = portname.client().await.unwrap();
 
-        endpoint.register_endpoint_instance().await.unwrap();
+        portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let router =
@@ -1398,12 +1398,12 @@ mod tests {
         let ns = drt
             .namespace("test_transport_fallback".to_string())
             .unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
+        let client = portname.client().await.unwrap();
 
         // Register one real instance so it appears in instance_source.
-        endpoint.register_endpoint_instance().await.unwrap();
+        portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let real_id = client.instance_ids()[0];
@@ -1455,12 +1455,12 @@ mod tests {
         let ns = drt
             .namespace("test_transport_no_fallback".to_string())
             .unwrap();
-        let component = ns.component("test_component".to_string()).unwrap();
-        let endpoint = component.endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
+        let servicegroup = ns.servicegroup("test_servicegroup".to_string()).unwrap();
+        let portname = servicegroup.portname("test_portname".to_string());
+        let client = portname.client().await.unwrap();
 
         // Register an instance so we can create the router (needs transport setup).
-        endpoint.register_endpoint_instance().await.unwrap();
+        portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let router =
@@ -1489,7 +1489,7 @@ mod tests {
     /// The watcher dedup guard must be released even if the spawned task panics.
     /// Without this, a panic anywhere in the watcher body would leave a stale
     /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
-    /// request cancellation for that endpoint until process restart.
+    /// request cancellation for that portname until process restart.
     ///
     /// We exercise the Drop-guard pattern directly against the same static
     /// rather than driving `spawn_instance_removal_watcher` end-to-end (which
@@ -1499,20 +1499,20 @@ mod tests {
     /// orphan-cancellation tests would fail.
     #[tokio::test]
     async fn watcher_dedup_guard_released_on_panic() {
-        let endpoint_id = EndpointId {
+        let portname_id = PortNameId {
             namespace: "panic-test-ns".to_string(),
-            component: "panic-test-comp".to_string(),
-            name: "panic-test-endpoint".to_string(),
+            servicegroup: "panic-test-comp".to_string(),
+            name: "panic-test-portname".to_string(),
         };
 
         // Mimic the production code's pre-spawn dedup insert.
         let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        map.insert(portname_id.clone(), ());
 
-        let endpoint_id_clone = endpoint_id.clone();
+        let portname_id_clone = portname_id.clone();
         let join = tokio::spawn(async move {
             // Same shape as in spawn_instance_removal_watcher.
-            struct GuardRelease(EndpointId);
+            struct GuardRelease(PortNameId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
                     if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
@@ -1520,14 +1520,14 @@ mod tests {
                     }
                 }
             }
-            let _release = GuardRelease(endpoint_id_clone);
+            let _release = GuardRelease(portname_id_clone);
             panic!("simulated watcher-task panic");
         });
 
         let result = join.await;
         assert!(result.is_err() && result.unwrap_err().is_panic());
         assert!(
-            !map.contains_key(&endpoint_id),
+            !map.contains_key(&portname_id),
             "Drop guard must release the dedup entry even on panic"
         );
     }
@@ -1537,18 +1537,18 @@ mod tests {
     /// fires or discovery stream closes).
     #[tokio::test]
     async fn watcher_dedup_guard_released_on_normal_exit() {
-        let endpoint_id = EndpointId {
+        let portname_id = PortNameId {
             namespace: "normal-test-ns".to_string(),
-            component: "normal-test-comp".to_string(),
-            name: "normal-test-endpoint".to_string(),
+            servicegroup: "normal-test-comp".to_string(),
+            name: "normal-test-portname".to_string(),
         };
 
         let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        map.insert(portname_id.clone(), ());
 
-        let endpoint_id_clone = endpoint_id.clone();
+        let portname_id_clone = portname_id.clone();
         tokio::spawn(async move {
-            struct GuardRelease(EndpointId);
+            struct GuardRelease(PortNameId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
                     if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
@@ -1556,13 +1556,13 @@ mod tests {
                     }
                 }
             }
-            let _release = GuardRelease(endpoint_id_clone);
+            let _release = GuardRelease(portname_id_clone);
             // task body returns normally
         })
         .await
         .unwrap();
 
-        assert!(!map.contains_key(&endpoint_id));
+        assert!(!map.contains_key(&portname_id));
     }
 
     // ── 新增：RouterMode 契约面与小工具语义 ─────────────────────────────────

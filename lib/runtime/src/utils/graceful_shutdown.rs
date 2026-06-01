@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -9,7 +9,7 @@
 //! - `GracefulShutdownTracker`：活跃端点计数器，暴露
 //!   `register` / `notify_one` / `wait_for_completion` 等核心方法；
 //! - `GracefulTaskGuard`：登记句柄，Drop 时自动注销，方便配合 `?` 控制流；
-//! - 关停语义：`active_endpoints == 0` 时唤醒所有等待者，且重复唤醒幂等。
+//! - 关停语义：`active_portnames == 0` 时唤醒所有等待者，且重复唤醒幂等。
 //!
 //! # 实现要点
 //! - 计数使用 `AtomicUsize` + `Ordering::AcqRel`，避免显式锁；
@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 
 /// 跟踪优雅关闭阶段仍在运行的端点数量。
 pub struct GracefulShutdownTracker {
-    active_endpoints: AtomicUsize,
+    active_portnames: AtomicUsize,
     shutdown_complete: Notify,
 }
 
@@ -41,16 +41,16 @@ impl Drop for GracefulTaskGuard {
     /// 在句柄销毁时自动注销一个活跃端点计数。
     fn drop(&mut self) {
         let tracker = Arc::clone(&self.tracker);
-        tracker.unregister_endpoint();
+        tracker.unregister_portname();
     }
 }
 
 impl std::fmt::Debug for GracefulShutdownTracker {
     /// 输出当前活跃端点数量，便于排查关闭等待状态。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let active_endpoints = self.active_endpoints.load(Ordering::SeqCst);
+        let active_portnames = self.active_portnames.load(Ordering::SeqCst);
         let mut debug = f.debug_struct("GracefulShutdownTracker");
-        debug.field("active_endpoints", &active_endpoints);
+        debug.field("active_portnames", &active_portnames);
         debug.finish()
     }
 }
@@ -60,11 +60,11 @@ impl GracefulShutdownTracker {
     ///
     /// 处理流程是初始化活跃计数为 0，并创建一个用于通知等待方的 `Notify`。
     pub(crate) fn new() -> Self {
-        let active_endpoints = AtomicUsize::new(0);
+        let active_portnames = AtomicUsize::new(0);
         let shutdown_complete = Notify::new();
 
         Self {
-            active_endpoints,
+            active_portnames,
             shutdown_complete,
         }
     }
@@ -73,40 +73,40 @@ impl GracefulShutdownTracker {
     ///
     /// 处理流程是先增加活跃计数，再返回 `GracefulTaskGuard`，后续通过 guard 的 drop 自动回收。
     pub fn register_task(self: &Arc<Self>) -> GracefulTaskGuard {
-        self.register_endpoint();
+        self.register_portname();
         let tracker = Arc::clone(self);
 
         GracefulTaskGuard { tracker }
     }
 
     /// 手动登记一个活跃端点。
-    pub(crate) fn register_endpoint(&self) {
-        let previous = self.active_endpoints.fetch_add(1, Ordering::SeqCst);
+    pub(crate) fn register_portname(&self) {
+        let previous = self.active_portnames.fetch_add(1, Ordering::SeqCst);
         tracing::debug!(
-            "Endpoint registered, total active: {} -> {}",
+            "PortName registered, total active: {} -> {}",
             previous,
             previous + 1
         );
     }
 
     /// 手动注销一个活跃端点，并在最后一个端点退出时唤醒等待者。
-    pub(crate) fn unregister_endpoint(&self) {
-        let previous = self.active_endpoints.fetch_sub(1, Ordering::SeqCst);
+    pub(crate) fn unregister_portname(&self) {
+        let previous = self.active_portnames.fetch_sub(1, Ordering::SeqCst);
         tracing::debug!(
-            "Endpoint unregistered, remaining active: {} -> {}",
+            "PortName unregistered, remaining active: {} -> {}",
             previous,
             previous - 1
         );
 
         if previous == 1 {
-            tracing::info!("Last endpoint completed, notifying all waiters");
+            tracing::info!("Last portname completed, notifying all waiters");
             self.shutdown_complete.notify_waiters();
         }
     }
 
     /// 读取当前活跃端点数量。
     pub(crate) fn get_count(&self) -> usize {
-        let active = self.active_endpoints.load(Ordering::Acquire);
+        let active = self.active_portnames.load(Ordering::Acquire);
         active
     }
 
@@ -117,14 +117,14 @@ impl GracefulShutdownTracker {
         loop {
             let notified = self.shutdown_complete.notified();
             let active = self.get_count();
-            tracing::trace!("Checking completion status, active endpoints: {active}");
+            tracing::trace!("Checking completion status, active portnames: {active}");
 
             if active == 0 {
-                tracing::debug!("All endpoints completed");
+                tracing::debug!("All portnames completed");
                 return;
             }
 
-            tracing::debug!("Waiting for {active} endpoints to complete");
+            tracing::debug!("Waiting for {active} portnames to complete");
             notified.await;
             tracing::trace!("Received notification, rechecking...");
         }
@@ -147,25 +147,25 @@ mod tests {
 
         let guard = tracker.register_task();
         assert_eq!(tracker.get_count(), 1);
-        assert_eq!(format!("{:?}", tracker), "GracefulShutdownTracker { active_endpoints: 1 }");
+        assert_eq!(format!("{:?}", tracker), "GracefulShutdownTracker { active_portnames: 1 }");
 
         drop(guard);
         assert_eq!(tracker.get_count(), 0);
     }
 
     #[test]
-    fn test_manual_register_and_unregister_endpoint() {
+    fn test_manual_register_and_unregister_portname() {
         // 测试手动注册与注销端点的计数变化。
         let tracker = GracefulShutdownTracker::new();
 
-        tracker.register_endpoint();
-        tracker.register_endpoint();
+        tracker.register_portname();
+        tracker.register_portname();
         assert_eq!(tracker.get_count(), 2);
 
-        tracker.unregister_endpoint();
+        tracker.unregister_portname();
         assert_eq!(tracker.get_count(), 1);
 
-        tracker.unregister_endpoint();
+        tracker.unregister_portname();
         assert_eq!(tracker.get_count(), 0);
     }
 
@@ -176,7 +176,7 @@ mod tests {
 
         timeout(Duration::from_millis(50), tracker.wait_for_completion())
             .await
-            .expect("wait_for_completion should not block when there are no active endpoints");
+            .expect("wait_for_completion should not block when there are no active portnames");
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 用于测试的 In-Memory Discovery 实现
@@ -87,7 +87,7 @@ fn allocate_mock_instance_id() -> u64 {
 
 /// 把 `(实例, 查询)` 的匹配判定收敛到一个结构，避免在主路径里重复 match。
 ///
-/// 通过分别为三种 `DiscoveryInstance` 变体提供专用方法（`matches_endpoint`、
+/// 通过分别为三种 `DiscoveryInstance` 变体提供专用方法（`matches_portname`、
 /// `matches_model`、`matches_event_channel`），让顶层 `match` 只起“分派”作用，
 /// 实际过滤条件下沉到方法体，可读性更好。
 struct QueryMatcher<'q> {
@@ -102,32 +102,32 @@ impl<'q> QueryMatcher<'q> {
     /// 入口：根据 instance 变体调用对应的匹配方法。
     fn matches(&self, inst: &DiscoveryInstance) -> bool {
         match inst {
-            DiscoveryInstance::Endpoint(_) => self.matches_endpoint(inst),
+            DiscoveryInstance::PortName(_) => self.matches_portname(inst),
             DiscoveryInstance::Model { .. } => self.matches_model(inst),
             DiscoveryInstance::EventChannel { .. } => self.matches_event_channel(inst),
         }
     }
 
-    fn matches_endpoint(&self, inst: &DiscoveryInstance) -> bool {
-        let DiscoveryInstance::Endpoint(e) = inst else {
+    fn matches_portname(&self, inst: &DiscoveryInstance) -> bool {
+        let DiscoveryInstance::PortName(e) = inst else {
             return false;
         };
         match self.query {
-            DiscoveryQuery::AllEndpoints => true,
-            DiscoveryQuery::NamespacedEndpoints { namespace } => &e.namespace == namespace,
-            DiscoveryQuery::ComponentEndpoints { namespace, component } => {
-                &e.namespace == namespace && &e.component == component
+            DiscoveryQuery::AllPortNames => true,
+            DiscoveryQuery::NamespacedPortNames { namespace } => &e.namespace == namespace,
+            DiscoveryQuery::ServiceGroupPortNames { namespace, servicegroup } => {
+                &e.namespace == namespace && &e.servicegroup == servicegroup
             }
-            DiscoveryQuery::Endpoint {
+            DiscoveryQuery::PortName {
                 namespace,
-                component,
-                endpoint,
+                servicegroup,
+                portname,
             } => {
                 &e.namespace == namespace
-                    && &e.component == component
-                    && &e.endpoint == endpoint
+                    && &e.servicegroup == servicegroup
+                    && &e.portname == portname
             }
-            // 任何针对 Model / EventChannel 的查询都不应命中 Endpoint
+            // 任何针对 Model / EventChannel 的查询都不应命中 PortName
             _ => false,
         }
     }
@@ -135,8 +135,8 @@ impl<'q> QueryMatcher<'q> {
     fn matches_model(&self, inst: &DiscoveryInstance) -> bool {
         let DiscoveryInstance::Model {
             namespace: ns,
-            component: comp,
-            endpoint: ep,
+            servicegroup: comp,
+            portname: ep,
             ..
         } = inst
         else {
@@ -145,14 +145,14 @@ impl<'q> QueryMatcher<'q> {
         match self.query {
             DiscoveryQuery::AllModels => true,
             DiscoveryQuery::NamespacedModels { namespace } => ns == namespace,
-            DiscoveryQuery::ComponentModels { namespace, component } => {
-                ns == namespace && comp == component
+            DiscoveryQuery::ServiceGroupModels { namespace, servicegroup } => {
+                ns == namespace && comp == servicegroup
             }
-            DiscoveryQuery::EndpointModels {
+            DiscoveryQuery::PortNameModels {
                 namespace,
-                component,
-                endpoint,
-            } => ns == namespace && comp == component && ep == endpoint,
+                servicegroup,
+                portname,
+            } => ns == namespace && comp == servicegroup && ep == portname,
             _ => false,
         }
     }
@@ -160,7 +160,7 @@ impl<'q> QueryMatcher<'q> {
     fn matches_event_channel(&self, inst: &DiscoveryInstance) -> bool {
         let DiscoveryInstance::EventChannel {
             namespace: ns,
-            component: comp,
+            servicegroup: comp,
             topic: t,
             ..
         } = inst
@@ -170,7 +170,7 @@ impl<'q> QueryMatcher<'q> {
         match self.query {
             DiscoveryQuery::EventChannels(q) => {
                 q.namespace.as_ref().is_none_or(|x| x == ns)
-                    && q.component.as_ref().is_none_or(|x| x == comp)
+                    && q.servicegroup.as_ref().is_none_or(|x| x == comp)
                     && q.topic.as_ref().is_none_or(|x| x == t)
             }
             _ => false,
@@ -282,16 +282,16 @@ impl Discovery for MockDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Instance, TransportType};
+    use crate::servicegroup::{Instance, TransportType};
     use crate::discovery::{DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport};
     use futures::StreamExt as _;
     use std::collections::HashSet;
 
-    fn endpoint_spec(ns: &str, comp: &str, ep: &str) -> DiscoverySpec {
-        DiscoverySpec::Endpoint {
+    fn portname_spec(ns: &str, comp: &str, ep: &str) -> DiscoverySpec {
+        DiscoverySpec::PortName {
             namespace: ns.into(),
-            component: comp.into(),
-            endpoint: ep.into(),
+            servicegroup: comp.into(),
+            portname: ep.into(),
             transport: TransportType::Tcp(format!("localhost:5550/1/{ep}")),
             device_type: None,
         }
@@ -300,18 +300,18 @@ mod tests {
     fn model_spec(ns: &str, comp: &str, ep: &str, name: &str) -> DiscoverySpec {
         DiscoverySpec::Model {
             namespace: ns.into(),
-            component: comp.into(),
-            endpoint: ep.into(),
+            servicegroup: comp.into(),
+            portname: ep.into(),
             card_json: serde_json::json!({ "display_name": name }),
             model_suffix: None,
         }
     }
 
-    fn endpoint_instance(ns: &str, comp: &str, ep: &str, id: u64) -> DiscoveryInstance {
-        DiscoveryInstance::Endpoint(Instance {
+    fn portname_instance(ns: &str, comp: &str, ep: &str, id: u64) -> DiscoveryInstance {
+        DiscoveryInstance::PortName(Instance {
             namespace: ns.into(),
-            component: comp.into(),
-            endpoint: ep.into(),
+            servicegroup: comp.into(),
+            portname: ep.into(),
             instance_id: id,
             transport: TransportType::Nats(format!("nats://{ep}/{id}")),
             device_type: None,
@@ -321,7 +321,7 @@ mod tests {
     fn event_channel_instance(ns: &str, comp: &str, topic: &str, id: u64) -> DiscoveryInstance {
         DiscoveryInstance::EventChannel {
             namespace: ns.into(),
-            component: comp.into(),
+            servicegroup: comp.into(),
             topic: topic.into(),
             instance_id: id,
             transport: EventTransport::zmq(format!("tcp://localhost:{}", 6000 + id)),
@@ -331,12 +331,12 @@ mod tests {
     // ── QueryMatcher ─────────────────────────────────────────────────────────
 
     /// ## 测试过程
-    /// 用 Endpoint 实例 + 不匹配的 Model 查询，断言不命中。
+    /// 用 PortName 实例 + 不匹配的 Model 查询，断言不命中。
     /// ## 意义
     /// 跨类型查询绝不能误命中，否则 list 会泄露其他类型的实例。
     #[test]
     fn matcher_rejects_cross_type() {
-        let inst = endpoint_instance("ns", "c", "e", 1);
+        let inst = portname_instance("ns", "c", "e", 1);
         let m = QueryMatcher::new(&DiscoveryQuery::AllModels);
         assert!(!m.matches(&inst));
     }
@@ -344,7 +344,7 @@ mod tests {
     /// ## 测试过程
     /// 用 EventChannel 查询的 topic 不匹配 / 匹配两种情况调用 matches。
     /// ## 意义
-    /// 验证 EventChannel 的多级可选过滤（namespace/component/topic）逻辑。
+    /// 验证 EventChannel 的多级可选过滤（namespace/servicegroup/topic）逻辑。
     #[test]
     fn matcher_event_channel_optional_filters() {
         let inst = event_channel_instance("ns", "c", "kv-events", 1);
@@ -371,8 +371,8 @@ mod tests {
     #[test]
     fn diff_added_only_when_known_empty() {
         let current = vec![
-            endpoint_instance("n", "c", "e1", 1),
-            endpoint_instance("n", "c", "e2", 2),
+            portname_instance("n", "c", "e1", 1),
+            portname_instance("n", "c", "e2", 2),
         ];
         let (added, removed) = diff_snapshots(&current, &HashSet::new());
         assert_eq!(added.len(), 2);
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn diff_removed_only_when_current_empty() {
         let mut known = HashSet::new();
-        known.insert(endpoint_instance("n", "c", "e", 7).id());
+        known.insert(portname_instance("n", "c", "e", 7).id());
         let (added, removed) = diff_snapshots(&[], &known);
         assert!(added.is_empty());
         assert_eq!(removed.len(), 1);
@@ -395,17 +395,17 @@ mod tests {
     // ── register / unregister / list ─────────────────────────────────────────
 
     /// ## 测试过程
-    /// 注册一个 Endpoint，list 应返回 1 条且类型正确。
+    /// 注册一个 PortName，list 应返回 1 条且类型正确。
     /// ## 意义
     /// 验证最基础的 register→list 链路。
     #[tokio::test]
     async fn register_then_list() {
         let reg = SharedMockRegistry::new();
         let d = MockDiscovery::new(Some(1), reg);
-        d.register(endpoint_spec("n", "c", "e")).await.unwrap();
-        let all = d.list(DiscoveryQuery::AllEndpoints).await.unwrap();
+        d.register(portname_spec("n", "c", "e")).await.unwrap();
+        let all = d.list(DiscoveryQuery::AllPortNames).await.unwrap();
         assert_eq!(all.len(), 1);
-        assert!(matches!(all[0], DiscoveryInstance::Endpoint(_)));
+        assert!(matches!(all[0], DiscoveryInstance::PortName(_)));
     }
 
     /// ## 测试过程
@@ -415,9 +415,9 @@ mod tests {
     #[tokio::test]
     async fn unregister_removes_instance() {
         let d = MockDiscovery::new(Some(1), SharedMockRegistry::new());
-        let inst = d.register(endpoint_spec("n", "c", "e")).await.unwrap();
+        let inst = d.register(portname_spec("n", "c", "e")).await.unwrap();
         d.unregister(inst).await.unwrap();
-        assert!(d.list(DiscoveryQuery::AllEndpoints).await.unwrap().is_empty());
+        assert!(d.list(DiscoveryQuery::AllPortNames).await.unwrap().is_empty());
     }
 
     /// ## 测试过程
@@ -427,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn unregister_idempotent() {
         let d = MockDiscovery::new(Some(1), SharedMockRegistry::new());
-        let inst = d.register(endpoint_spec("n", "c", "e")).await.unwrap();
+        let inst = d.register(portname_spec("n", "c", "e")).await.unwrap();
         d.unregister(inst.clone()).await.unwrap();
         d.unregister(inst).await.unwrap();
     }
@@ -439,29 +439,29 @@ mod tests {
     #[tokio::test]
     async fn list_namespaced_filter() {
         let d = MockDiscovery::new(Some(42), SharedMockRegistry::new());
-        d.register(endpoint_spec("prod", "c", "e")).await.unwrap();
-        d.register(endpoint_spec("dev", "c", "e")).await.unwrap();
+        d.register(portname_spec("prod", "c", "e")).await.unwrap();
+        d.register(portname_spec("dev", "c", "e")).await.unwrap();
         let prod = d
-            .list(DiscoveryQuery::NamespacedEndpoints { namespace: "prod".into() })
+            .list(DiscoveryQuery::NamespacedPortNames { namespace: "prod".into() })
             .await
             .unwrap();
         assert_eq!(prod.len(), 1);
     }
 
     /// ## 测试过程
-    /// 注册一个 Model，用 Endpoint 查询；list 应为空。
+    /// 注册一个 Model，用 PortName 查询；list 应为空。
     /// ## 意义
     /// 跨类型查询零泄漏，回归保护 [QueryMatcher::matches] 的分派分支。
     #[tokio::test]
-    async fn list_endpoint_query_does_not_match_model() {
+    async fn list_portname_query_does_not_match_model() {
         let d = MockDiscovery::new(Some(1), SharedMockRegistry::new());
         d.register(model_spec("n", "c", "e", "m")).await.unwrap();
-        let all = d.list(DiscoveryQuery::AllEndpoints).await.unwrap();
+        let all = d.list(DiscoveryQuery::AllPortNames).await.unwrap();
         assert!(all.is_empty());
     }
 
     /// ## 测试过程
-    /// 两个 MockDiscovery 共享 registry，分别注册不同 endpoint；
+    /// 两个 MockDiscovery 共享 registry，分别注册不同 portname；
     /// 任一一方都能在 list 中看到对方写入的实例。
     /// ## 意义
     /// 共享 registry 的语义验证（用于模拟跨 worker 可见性）。
@@ -470,9 +470,9 @@ mod tests {
         let reg = SharedMockRegistry::new();
         let a = MockDiscovery::new(Some(1), reg.clone());
         let b = MockDiscovery::new(Some(2), reg.clone());
-        a.register(endpoint_spec("n", "c", "e1")).await.unwrap();
-        b.register(endpoint_spec("n", "c", "e2")).await.unwrap();
-        let seen = a.list(DiscoveryQuery::AllEndpoints).await.unwrap();
+        a.register(portname_spec("n", "c", "e1")).await.unwrap();
+        b.register(portname_spec("n", "c", "e2")).await.unwrap();
+        let seen = a.list(DiscoveryQuery::AllPortNames).await.unwrap();
         assert_eq!(seen.len(), 2);
     }
 
@@ -488,11 +488,11 @@ mod tests {
         let d = MockDiscovery::new(Some(1), reg);
         let cancel = CancellationToken::new();
         let mut stream = d
-            .list_and_watch(DiscoveryQuery::AllEndpoints, Some(cancel.clone()))
+            .list_and_watch(DiscoveryQuery::AllPortNames, Some(cancel.clone()))
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-        d.register(endpoint_spec("n", "c", "e")).await.unwrap();
+        d.register(portname_spec("n", "c", "e")).await.unwrap();
         let ev = tokio::time::timeout(std::time::Duration::from_millis(150), stream.next()).await;
         cancel.cancel();
         assert!(matches!(ev, Ok(Some(Ok(DiscoveryEvent::Added(_))))));

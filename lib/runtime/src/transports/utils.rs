@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # transports 内部小工具
@@ -16,7 +16,7 @@
 //! 的 client 立刻不可用。
 //!
 //! ## 实现要点
-//! - 与 lib-copy 相比，本实现：
+//! - 本实现：
 //!   1. 把"长寿的 driver 任务"从 `std::future::pending::<()>().await` 改成
 //!      监听一个 oneshot shutdown 信号 —— 语义等价（永远不发就永远不退），
 //!      但读起来更直白，调试时也能加 trace log。

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 文件系统 KV 后端
@@ -7,14 +7,14 @@
 //! 将"桶"映射为目录，"key"映射为文件。提供本地、跨进程可见的 KV 存储，
 //! 主要用于单机多进程的 dev/test 与离线调试。
 //!
-//! 本实现与 lib-copy 标准版**契约完全等价**，但内部走了与之不同的实现路径：
+//! 本实现契约完全等价，但内部走了与之不同的实现路径：
 //! - 用 `DashMap` / `DashSet` 替代 `parking_lot::Mutex<HashMap/HashSet>`
 //!   作为活动目录与 owned-files 集合，避免在 keep-alive / 过期清理时持有
 //!   粗粒度互斥锁；
 //! - keep-alive / 过期清理改用 tokio 异步任务 + `select!` 监听 cancel_token，
-//!   响应停机更迅速（lib-copy 用 `std::thread` + `is_cancelled` 轮询）；
+//!   响应停机更迅速；
 //! - watcher 的回调用 `try_send`，慢消费者下宁可丢事件也不阻塞 notify 后端线程；
-//! - 临时文件命名换前缀 `.dyn-tmp-` 并附加 nanos+rand，与 lib-copy 不冲突；
+//! - 临时文件命名换前缀 `.dyn-tmp-` 并附加 nanos+rand；
 //! - 错误路径上更细颗粒地区分 `MissingKey` 与 `FilesystemError`。
 //!
 //! ## 外部契约

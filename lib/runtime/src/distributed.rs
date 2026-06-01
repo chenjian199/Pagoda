@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
-//! `DistributedRuntime` 是 Dynamo 分布式层的根节点:在本地 [`Runtime`] 之上叠加
+//! `DistributedRuntime` 是 Pagoda 分布式层的根节点:在本地 [`Runtime`] 之上叠加
 //! 「服务发现(etcd) + 事件面(NATS) + 请求面(TCP/HTTP/NATS) + 系统状态服务」等
 //! 交叉关关心,并以单一句柄统一生命周期。设计重点:
 //! 1. 「能力分层」:仅需本地运行时的场景可用 `process_local()` 跳过远程依赖;
@@ -23,12 +23,12 @@
 //! - 后端接入全部点起后才初始化:`etcd_client` / `nats_client` / `tcp_server`
 //!   均为 `OnceCell`,被动延迟并只实例化一次;
 //! - 「代理同货」模式:大量访问器方法转发到内部状态,使调用者无需调 `Arc<...>`;
-//! - `RequestPlaneMode::from_env` 使用 `DYN_REQUEST_PLANE`,未设或非法值默认 `Tcp`;
-//! - `register_graceful_task` 使 `GracefulShutdownTracker` 为后台任务、`Endpoint` 实例、
+//! - `RequestPlaneMode::from_env` 使用 `PGD_REQUEST_PLANE`,未设或非法值默认 `Tcp`;
+//! - `register_graceful_task` 使 `GracefulShutdownTracker` 为后台任务、`PortName` 实例、
 //!   服务器任务提供统一的优雅终止信号。
 
-use crate::component::{
-    self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
+use crate::servicegroup::{
+    self, ServiceGroup, ServiceGroupBuilder, PortName, PortNameDiscoverySource, Instance, Namespace,
     RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
@@ -63,8 +63,8 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
-type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
+type PortNameDiscoverySourceMap = HashMap<PortName, Weak<PortNameDiscoverySource>>;
+type RoutingOccupancyMap = HashMap<PortName, Weak<RoutingOccupancyState>>;
 
 // === SECTION: DistributedRuntime ===
 
@@ -85,24 +85,24 @@ pub struct DistributedRuntime {
     discovery_client: Arc<dyn discovery::Discovery>,
 
     // Discovery metadata (only used for Kubernetes backend)
-    // Shared with system status server to expose via /metadata endpoint
+    // Shared with system status server to expose via /metadata portname
     discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
 
-    // local registry for components
-    // the registry allows us to use share runtime resources across instances of the same component object.
-    // take for example two instances of a client to the same remote component. The registry allows us to use
-    // a single endpoint watcher for both clients, this keeps the number background tasking watching specific
+    // local registry for servicegroups
+    // the registry allows us to use share runtime resources across instances of the same servicegroup object.
+    // take for example two instances of a client to the same remote servicegroup. The registry allows us to use
+    // a single portname watcher for both clients, this keeps the number background tasking watching specific
     // paths in etcd to a minimum.
-    component_registry: component::Registry,
+    servicegroup_registry: servicegroup::Registry,
 
-    endpoint_discovery_sources: Arc<tokio::sync::Mutex<EndpointDiscoverySourceMap>>,
+    portname_discovery_sources: Arc<tokio::sync::Mutex<PortNameDiscoverySourceMap>>,
     routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
 
-    // Local endpoint registry for in-process calls
-    local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry,
+    // Local portname registry for in-process calls
+    local_portname_registry: crate::local_portname_registry::LocalPortNameRegistry,
 
     // This hierarchy's own metrics registry
     metrics_registry: MetricsRegistry,
@@ -114,7 +114,7 @@ pub struct DistributedRuntime {
     metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
 
     // Resolved event transport kind — set once at construction time from
-    // DYN_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
+    // PGD_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
     event_transport_kind: crate::discovery::EventTransportKind,
 }
 
@@ -193,13 +193,13 @@ impl DistributedRuntime {
             .then(|| runtime.clone().child_token());
         let system_health = {
             let starting_health_status = runtime_config.starting_health_status.clone();
-            let use_endpoint_health_status = runtime_config.use_endpoint_health_status.clone();
+            let use_portname_health_status = runtime_config.use_portname_health_status.clone();
             let health_endpoint_path = runtime_config.system_health_path.clone();
             let live_endpoint_path = runtime_config.system_live_path.clone();
 
             Arc::new(parking_lot::Mutex::new(SystemHealth::new(
                 starting_health_status,
-                use_endpoint_health_status,
+                use_portname_health_status,
                 runtime_config.health_check_enabled,
                 health_endpoint_path,
                 live_endpoint_path,
@@ -249,7 +249,7 @@ impl DistributedRuntime {
         };
         let (discovery_client, discovery_metadata) = discovery_setup;
 
-        let component_registry = component::Registry::new();
+        let servicegroup_registry = servicegroup::Registry::new();
 
         // NetworkManager for request plane
         let network_manager = {
@@ -257,7 +257,7 @@ impl DistributedRuntime {
             Arc::new(NetworkManager::new(
                 child_token,
                 request_plane_client,
-                component_registry.clone(),
+                servicegroup_registry.clone(),
                 request_plane,
             ))
         };
@@ -270,13 +270,13 @@ impl DistributedRuntime {
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             discovery_metadata,
-            component_registry,
-            endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
+            servicegroup_registry,
+            portname_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
-            local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
+            local_portname_registry: crate::local_portname_registry::LocalPortNameRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
@@ -338,7 +338,7 @@ impl DistributedRuntime {
             }
             None => {
                 tracing::debug!(
-                    "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
+                    "System status server HTTP portnames disabled, but uptime metrics are being tracked"
                 );
             }
         }
@@ -352,7 +352,7 @@ impl DistributedRuntime {
                 ),
             };
 
-            // Start the health check manager (spawns per-endpoint monitoring tasks)
+            // Start the health check manager (spawns per-portname monitoring tasks)
             match crate::health_check::start_health_check_manager(
                 distributed_runtime.clone(),
                 Some(health_check_config),
@@ -404,10 +404,10 @@ impl DistributedRuntime {
     // (without being aware of async locks and so on)
     // 中文说明：
     // 1. 这个函数把组件注册表的引用暴露出去，供其它模块读取或操作已注册组件。
-    // 2. 这里使用 match 只是为了把返回对象写得更显式，强调返回值就是当前结构里的 component_registry 字段。
+    // 2. 这里使用 match 只是为了把返回对象写得更显式，强调返回值就是当前结构里的 servicegroup_registry 字段。
     // 3. 返回的是共享借用，因此不会移动注册表，也不会改变内部存储内容。
-    pub fn component_registry(&self) -> &component::Registry {
-        match &self.component_registry {
+    pub fn servicegroup_registry(&self) -> &servicegroup::Registry {
+        match &self.servicegroup_registry {
             registry => registry,
         }
     }
@@ -423,13 +423,13 @@ impl DistributedRuntime {
 
     // 中文说明：
     // 1. 这个函数返回本地端点注册表，供进程内直连调用场景使用。
-    // 2. 代码通过 match 显式取出 local_endpoint_registry 字段，表达“这里只是转交现有注册表”。
+    // 2. 代码通过 match 显式取出 local_portname_registry 字段，表达“这里只是转交现有注册表”。
     // 3. 返回引用而不是复制对象，保证所有调用方看到的是同一个本地端点注册中心。
-    /// Get the local endpoint registry for in-process endpoint calls
-    pub fn local_endpoint_registry(
+    /// Get the local portname registry for in-process portname calls
+    pub fn local_portname_registry(
         &self,
-    ) -> &crate::local_endpoint_registry::LocalEndpointRegistry {
-        match &self.local_endpoint_registry {
+    ) -> &crate::local_portname_registry::LocalPortNameRegistry {
+        match &self.local_portname_registry {
             registry => registry,
         }
     }
@@ -503,12 +503,12 @@ impl DistributedRuntime {
             .tcp_server
             .get_or_try_init(async {
                 let port = if let Ok(raw_port) =
-                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT)
+                    std::env::var(tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT)
                 {
                     raw_port.parse::<u16>().map_err(|_| {
                         PipelineError::Generic(format!(
                             "invalid {}: '{}' is not a valid port number",
-                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+                            tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT,
                             raw_port
                         ))
                     })?
@@ -516,7 +516,7 @@ impl DistributedRuntime {
                     0
                 };
 
-                let interface = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
+                let interface = match std::env::var(tcp_response_stream::PGD_TCP_RESPONSE_STREAM_HOST)
                 {
                     Ok(host) if !host.is_empty() => Some(host),
                     _ => None,
@@ -609,12 +609,12 @@ impl DistributedRuntime {
     /// Returns the event transport kind this runtime was configured with.
     ///
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
-    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the discovery
+    /// if `PGD_EVENT_PLANE` is set explicitly that value wins; otherwise the discovery
     /// backend drives the default (ZMQ for `file`/`mem`, NATS for `etcd`/`kubernetes`).
     ///
     /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
     /// access to a `DistributedRuntime`, so that local-only workflows work without
-    /// setting `DYN_EVENT_PLANE` explicitly.
+    /// setting `PGD_EVENT_PLANE` explicitly.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         let event_transport_kind = self.event_transport_kind;
         event_transport_kind
@@ -639,9 +639,9 @@ impl DistributedRuntime {
     // 中文说明：
     // 1. 这个函数返回端点发现来源映射表的共享句柄。
     // 2. 内部字段本身是 Arc<Mutex<...>>，所以这里通过 Arc::clone 保持共享语义。
-    // 3. 调用方随后可以锁住这张表，追踪每个 Endpoint 对应的发现来源对象。
-    pub(crate) fn endpoint_discovery_sources(&self) -> Arc<Mutex<EndpointDiscoverySourceMap>> {
-        Arc::clone(&self.endpoint_discovery_sources)
+    // 3. 调用方随后可以锁住这张表，追踪每个 PortName 对应的发现来源对象。
+    pub(crate) fn portname_discovery_sources(&self) -> Arc<Mutex<PortNameDiscoverySourceMap>> {
+        Arc::clone(&self.portname_discovery_sources)
     }
 
     // 中文说明：
@@ -661,7 +661,7 @@ impl DistributedRuntime {
     // 中文说明：
     // 1. 这个函数返回路由占用状态映射表的共享句柄。
     // 2. 这里通过 Arc::clone 把内部共享状态安全地暴露给其它模块。
-    // 3. 调用方可以在之后加锁读取或更新每个 Endpoint 对应的 RoutingOccupancyState。
+    // 3. 调用方可以在之后加锁读取或更新每个 PortName 对应的 RoutingOccupancyState。
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
         Arc::clone(&self.routing_occupancy_states)
     }
@@ -670,8 +670,8 @@ impl DistributedRuntime {
     // 1. 这个函数负责把 KV Router 产生的事件消息发布到 NATS 指定主题。
     // 2. 代码先检查当前运行时是否已经配置 NATS 客户端；如果有，就真正执行 publish 并等待异步发送完成。
     // 3. 如果没有 NATS，则把这次发布视为可选行为，只记录一条 trace 日志后返回 Ok(())，避免近似模式下报错。
-    /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
-    /// Component, to allow it to publish to NATS. KV Router is the only user.
+    /// TODO: This is a temporary KV router measure for servicegroup/servicegroup.rs EventPublisher impl for
+    /// ServiceGroup, to allow it to publish to NATS. KV Router is the only user.
     ///
     /// When NATS is not available (e.g., running in approximate mode with --no-kv-events),
     /// this function returns Ok(()) silently since publishing is optional in that mode.
@@ -696,8 +696,8 @@ impl DistributedRuntime {
     // 1. 这个函数为 KV Router 建立一个 NATS 订阅者，用来接收指定主题上的消息。
     // 2. 它先判断当前运行时里是否存在 NATS 客户端；有客户端时就向 NATS 发起 subscribe 请求并返回订阅者。
     // 3. 如果运行时根本没有启用 NATS，则立即返回错误，明确告诉上层这个能力依赖 NATS 支持。
-    /// TODO: This is a temporary KV router measure for component/component.rs EventSubscriber impl for
-    /// Component, to allow it to subscribe to NATS. KV Router is the only user.
+    /// TODO: This is a temporary KV router measure for servicegroup/servicegroup.rs EventSubscriber impl for
+    /// ServiceGroup, to allow it to subscribe to NATS. KV Router is the only user.
     pub(crate) async fn kv_router_nats_subscribe(
         &self,
         subject: String,
@@ -716,7 +716,7 @@ impl DistributedRuntime {
     // 4. 最后把 timeout 结果和内部 request 结果两层错误都展开，成功时返回收到的 async_nats::Message。
     /// TODO (karenc): This is a temporary KV router measure for worker query requests.
     /// Allows KV Router to perform request/reply with workers. (versus the pub/sub pattern above)
-    /// KV Router is the only user, made public for use in dynamo-llm crate
+    /// KV Router is the only user, made public for use in pagoda-llm crate
     pub async fn kv_router_nats_request(
         &self,
         subject: String,
@@ -754,18 +754,18 @@ impl DistributedRuntime {
     /// The caller should use `blocking_recv()` to wait for completion.
     pub fn register_nats_service(
         &self,
-        component: Component,
+        servicegroup: ServiceGroup,
     ) -> tokio::sync::mpsc::Receiver<Result<(), String>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<(), String>>(1);
 
         let drt = self.clone();
         let secondary_runtime = self.runtime().secondary();
         secondary_runtime.spawn(async move {
-            let service_name = component.service_name();
+            let service_name = servicegroup.service_name();
             let missing_nats_error = "Cannot create NATS service without NATS";
 
             let service_exists = {
-                let guard = drt.component_registry().inner.lock().await;
+                let guard = drt.servicegroup_registry().inner.lock().await;
                 guard.services.contains_key(&service_name)
             };
 
@@ -783,22 +783,22 @@ impl DistributedRuntime {
                 return;
             };
 
-            let nats_service = match crate::component::service::build_nats_service(
+            let nats_service = match crate::servicegroup::service::build_nats_service(
                 nats_client,
-                &component,
+                &servicegroup,
                 None,
             )
             .await
             {
                 Ok(service) => service,
                 Err(err) => {
-                    tracing::error!(error = %err, component = service_name, "Failed to build NATS service");
+                    tracing::error!(error = %err, servicegroup = service_name, "Failed to build NATS service");
                     let _ = tx.send(Err(format!("Failed to build NATS service: {err}"))).await;
                     return;
                 }
             };
 
-            let mut guard = drt.component_registry().inner.lock().await;
+            let mut guard = drt.servicegroup_registry().inner.lock().await;
             match guard.services.entry(service_name.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(nats_service);
@@ -838,7 +838,7 @@ impl DiscoveryBackend {
     ///
     /// Local backends do not need etcd, NATS, or any other infrastructure daemon.
     /// This is used to drive smart defaults: for example, the event plane defaults to
-    /// ZMQ (not NATS) when a local backend is in use and `DYN_EVENT_PLANE` is not set.
+    /// ZMQ (not NATS) when a local backend is in use and `PGD_EVENT_PLANE` is not set.
     pub fn is_local(&self) -> bool {
         match self {
             DiscoveryBackend::KvStore(kv::Selector::File(_))
@@ -848,21 +848,21 @@ impl DiscoveryBackend {
     }
 
     // 中文说明：
-    // 1. 这个函数根据 discovery backend 和环境变量 DYN_EVENT_PLANE 共同决定最终采用哪种事件传输层。
+    // 1. 这个函数根据 discovery backend 和环境变量 PGD_EVENT_PLANE 共同决定最终采用哪种事件传输层。
     // 2. 它先定义一个默认策略闭包：本地后端默认用 ZMQ，分布式后端默认用 NATS。
     // 3. 然后读取环境变量；如果显式写了 nats 或 zmq，就直接采用该值。
     // 4. 如果环境变量为空或根本未设置，就回退到前面定义的默认策略。
     // 5. 如果环境变量是非法值，则记录 warning 日志，并返回根据后端推导出的兜底默认值。
     /// Resolve the event transport kind for this backend.
     ///
-    /// This is the single authoritative mapping of `(DYN_EVENT_PLANE, backend)` →
-    /// `EventTransportKind`. When `DYN_EVENT_PLANE` is unset or empty the backend
+    /// This is the single authoritative mapping of `(PGD_EVENT_PLANE, backend)` →
+    /// `EventTransportKind`. When `PGD_EVENT_PLANE` is unset or empty the backend
     /// drives the default: local backends (`file`/`mem`) → ZMQ, distributed backends
     /// (`etcd`/`kubernetes`) → NATS.
     ///
     /// Call this once at startup and store the result; do not call it repeatedly.
     pub fn resolve_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
-        use crate::config::environment_names::event_plane::DYN_EVENT_PLANE;
+        use crate::config::environment_names::event_plane::PGD_EVENT_PLANE;
         use crate::discovery::EventTransportKind;
         let default_kind = || {
             if self.is_local() {
@@ -872,7 +872,7 @@ impl DiscoveryBackend {
             }
         };
 
-        match std::env::var(DYN_EVENT_PLANE) {
+        match std::env::var(PGD_EVENT_PLANE) {
             Ok(value) if value == "nats" => EventTransportKind::Nats,
             Ok(value) if value == "zmq" => EventTransportKind::Zmq,
             Ok(value) if value.is_empty() => default_kind(),
@@ -880,7 +880,7 @@ impl DiscoveryBackend {
             Ok(other) => {
                 let fallback_kind = default_kind();
                 tracing::warn!(
-                    "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
+                    "Invalid PGD_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
                      Defaulting to {:?}.",
                     other,
                     fallback_kind
@@ -899,7 +899,7 @@ pub struct DistributedConfig {
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
     /// Resolved event transport kind — computed once at config time from
-    /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
+    /// `PGD_EVENT_PLANE` and the discovery backend, then stored on the runtime
     /// so callers always get the same answer regardless of which other services
     /// happen to be reachable.
     pub event_transport_kind: crate::discovery::EventTransportKind,
@@ -908,7 +908,7 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     // 中文说明：
     // 1. 这个函数从环境变量读取分布式运行时所需配置，并组装出一份完整的 DistributedConfig。
-    // 2. 它先解析 request plane 模式，再读取 DYN_DISCOVERY_BACKEND 来确定 discovery backend 使用哪一类实现。
+    // 2. 它先解析 request plane 模式，再读取 PGD_DISCOVERY_BACKEND 来确定 discovery backend 使用哪一类实现。
     // 3. backend 确定后，函数立即解析 event transport kind，保证事件平面选择与 discovery 逻辑保持一致。
     // 4. 随后代码检查用户是否显式配置了 NATS_SERVER，并结合 request plane 和 event transport 共同判断是否需要启用 NATS 客户端。
     // 5. 最后把解析出的 discovery_backend、nats_config、request_plane 和 event_transport_kind 一起打包返回。
@@ -916,9 +916,9 @@ impl DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
-        // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
+        // Valid values for PGD_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
         let backend_value =
-            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| String::from("etcd"));
+            std::env::var("PGD_DISCOVERY_BACKEND").unwrap_or_else(|_| String::from("etcd"));
 
         let discovery_backend = if backend_value == "kubernetes" {
             tracing::info!("Using Kubernetes discovery backend");
@@ -926,7 +926,7 @@ impl DistributedConfig {
         } else {
             let selector: kv::Selector = backend_value.parse().unwrap_or_else(|_| {
                 panic!(
-                    "Unknown DYN_DISCOVERY_BACKEND value: '{backend_value}'. \
+                    "Unknown PGD_DISCOVERY_BACKEND value: '{backend_value}'. \
                      Valid options: kubernetes, etcd, file, mem"
                 )
             });
@@ -1085,13 +1085,13 @@ impl std::str::FromStr for RequestPlaneMode {
 
 impl RequestPlaneMode {
     // 中文说明：
-    // 1. 这个函数从环境变量 DYN_REQUEST_PLANE 中读取请求平面模式。
+    // 1. 这个函数从环境变量 PGD_REQUEST_PLANE 中读取请求平面模式。
     // 2. 如果环境变量存在，就尝试把它解析成 RequestPlaneMode；解析失败时退回默认值，避免非法配置导致启动崩溃。
     // 3. 如果环境变量根本不存在，也同样直接返回默认模式，保证系统总能得到一个可用配置。
     /// Get the request plane mode from environment variable (uncached)
-    /// Reads from `DYN_REQUEST_PLANE` environment variable.
+    /// Reads from `PGD_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        match std::env::var("DYN_REQUEST_PLANE") {
+        match std::env::var("PGD_REQUEST_PLANE") {
             Ok(value) => value.parse().unwrap_or_default(),
             Err(_) => Self::default(),
         }
@@ -1182,7 +1182,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::{DiscoveryBackend, DistributedConfig, DistributedRuntime, RequestPlaneMode};
-    use crate::component::get_or_create_routing_occupancy_state;
+    use crate::servicegroup::get_or_create_routing_occupancy_state;
     use crate::config::environment_names::{
         event_plane as env_event_plane, nats as env_nats, runtime::system as env_system,
         tcp_response_stream as env_tcp_response_stream,
@@ -1222,9 +1222,9 @@ mod tests {
     async fn test_distributed_runtime_accessors_metadata_and_shutdown() {
         temp_env::async_with_vars(
             vec![
-                (env_system::DYN_SYSTEM_PORT, Some("-1")),
-                (env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT, None::<&str>),
-                (env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST, None::<&str>),
+                (env_system::PGD_SYSTEM_PORT, Some("-1")),
+                (env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT, None::<&str>),
+                (env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_HOST, None::<&str>),
             ],
             async {
                 let drt = create_process_local_drt().await;
@@ -1237,11 +1237,11 @@ mod tests {
                     Some(drt.connection_id())
                 );
                 assert!(std::ptr::eq(drt.runtime(), &drt.runtime));
-                assert!(std::ptr::eq(drt.component_registry(), &drt.component_registry));
+                assert!(std::ptr::eq(drt.servicegroup_registry(), &drt.servicegroup_registry));
                 assert!(Arc::ptr_eq(&drt.system_health(), &drt.system_health));
                 assert!(std::ptr::eq(
-                    drt.local_endpoint_registry(),
-                    &drt.local_endpoint_registry,
+                    drt.local_portname_registry(),
+                    &drt.local_portname_registry,
                 ));
                 assert!(std::ptr::eq(drt.engine_routes(), &drt.engine_routes));
                 assert!(std::ptr::eq(drt.metadata_artifacts(), &drt.metadata_artifacts));
@@ -1297,7 +1297,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_system_status_server_info_present_when_enabled() {
-        temp_env::async_with_vars(vec![(env_system::DYN_SYSTEM_PORT, Some("0"))], async {
+        temp_env::async_with_vars(vec![(env_system::PGD_SYSTEM_PORT, Some("0"))], async {
             let drt = create_process_local_drt().await;
 
             let info1 = drt
@@ -1319,14 +1319,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_namespace_nats_helpers_and_shared_state_without_nats() {
-        temp_env::async_with_vars(vec![(env_system::DYN_SYSTEM_PORT, Some("-1"))], async {
+        temp_env::async_with_vars(vec![(env_system::PGD_SYSTEM_PORT, Some("-1"))], async {
             let drt = create_process_local_drt().await;
 
             let namespace = drt.namespace("valid-name_123").unwrap();
             assert_eq!(namespace.name(), "valid-name_123");
 
-            let component = namespace.component("component").unwrap();
-            let endpoint = component.endpoint("endpoint");
+            let servicegroup = namespace.servicegroup("servicegroup").unwrap();
+            let portname = servicegroup.portname("portname");
 
             drt.kv_router_nats_publish("subject".to_string(), Bytes::from_static(b"payload"))
                 .await
@@ -1342,7 +1342,7 @@ mod tests {
                 .unwrap_err();
             assert!(request_err.to_string().contains("requires NATS"));
 
-            let mut registration_rx = drt.register_nats_service(component.clone());
+            let mut registration_rx = drt.register_nats_service(servicegroup.clone());
             let result = tokio::time::timeout(Duration::from_secs(1), registration_rx.recv())
                 .await
                 .unwrap();
@@ -1350,30 +1350,30 @@ mod tests {
                 result.unwrap(),
                 Err("Cannot create NATS service without NATS".to_string())
             );
-            assert!(drt.component_registry().inner.lock().await.services.is_empty());
+            assert!(drt.servicegroup_registry().inner.lock().await.services.is_empty());
 
-            let _client1 = endpoint.client().await.unwrap();
-            let sources = drt.endpoint_discovery_sources();
+            let _client1 = portname.client().await.unwrap();
+            let sources = drt.portname_discovery_sources();
             let guard = sources.lock().await;
             assert_eq!(guard.len(), 1);
-            let source1 = guard.get(&endpoint).unwrap().upgrade().unwrap();
+            let source1 = guard.get(&portname).unwrap().upgrade().unwrap();
             drop(guard);
 
-            let _client2 = endpoint.client().await.unwrap();
-            let sources = drt.endpoint_discovery_sources();
+            let _client2 = portname.client().await.unwrap();
+            let sources = drt.portname_discovery_sources();
             let guard = sources.lock().await;
-            let source2 = guard.get(&endpoint).unwrap().upgrade().unwrap();
+            let source2 = guard.get(&portname).unwrap().upgrade().unwrap();
             assert!(Arc::ptr_eq(&source1, &source2));
             drop(guard);
 
-            let state1 = get_or_create_routing_occupancy_state(&endpoint).await;
-            let state2 = get_or_create_routing_occupancy_state(&endpoint).await;
+            let state1 = get_or_create_routing_occupancy_state(&portname).await;
+            let state2 = get_or_create_routing_occupancy_state(&portname).await;
             assert!(Arc::ptr_eq(&state1, &state2));
 
             let states = drt.routing_occupancy_states();
             let guard = states.lock().await;
             assert_eq!(guard.len(), 1);
-            let state_from_map = guard.get(&endpoint).unwrap().upgrade().unwrap();
+            let state_from_map = guard.get(&portname).unwrap().upgrade().unwrap();
             assert!(Arc::ptr_eq(&state1, &state_from_map));
 
             drt.shutdown();
@@ -1383,7 +1383,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_graceful_task_updates_tracker() {
-        temp_env::async_with_vars(vec![(env_system::DYN_SYSTEM_PORT, Some("-1"))], async {
+        temp_env::async_with_vars(vec![(env_system::PGD_SYSTEM_PORT, Some("-1"))], async {
             let drt = create_process_local_drt().await;
             let tracker = drt.graceful_shutdown_tracker();
 
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_plane_server_delegates_and_is_cached() {
-        temp_env::async_with_vars(vec![(env_system::DYN_SYSTEM_PORT, Some("-1"))], async {
+        temp_env::async_with_vars(vec![(env_system::PGD_SYSTEM_PORT, Some("-1"))], async {
             let drt = create_process_local_drt().await;
 
             let server1 = drt.request_plane_server().await.unwrap();
@@ -1419,9 +1419,9 @@ mod tests {
     async fn test_tcp_server_is_cached() {
         temp_env::async_with_vars(
             vec![
-                (env_system::DYN_SYSTEM_PORT, Some("-1")),
-                (env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT, Some("0")),
-                (env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST, None::<&str>),
+                (env_system::PGD_SYSTEM_PORT, Some("-1")),
+                (env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT, Some("0")),
+                (env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_HOST, None::<&str>),
             ],
             async {
                 let drt = create_process_local_drt().await;
@@ -1441,9 +1441,9 @@ mod tests {
     async fn test_tcp_server_rejects_invalid_port_env() {
         temp_env::async_with_vars(
             vec![
-                (env_system::DYN_SYSTEM_PORT, Some("-1")),
-                (env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT, Some("invalid")),
-                (env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST, None::<&str>),
+                (env_system::PGD_SYSTEM_PORT, Some("-1")),
+                (env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT, Some("invalid")),
+                (env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_HOST, None::<&str>),
             ],
             async {
                 let drt = create_process_local_drt().await;
@@ -1451,7 +1451,7 @@ mod tests {
                     Ok(_) => panic!("tcp_server should reject an invalid port env"),
                     Err(err) => err,
                 };
-                assert!(err.to_string().contains(env_tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT));
+                assert!(err.to_string().contains(env_tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT));
                 drt.shutdown();
             },
         )
@@ -1464,7 +1464,7 @@ mod tests {
             metrics
                 .lines()
                 .find(|line| {
-                    line.starts_with("dynamo_component_uptime_seconds") && !line.starts_with('#')
+                    line.starts_with("pagoda_servicegroup_uptime_seconds") && !line.starts_with('#')
                 })
                 .and_then(|line| line.split_whitespace().last())
                 .unwrap()
@@ -1472,12 +1472,12 @@ mod tests {
                 .unwrap()
         }
 
-        temp_env::async_with_vars(vec![(env_system::DYN_SYSTEM_PORT, Some("-1"))], async {
+        temp_env::async_with_vars(vec![(env_system::PGD_SYSTEM_PORT, Some("-1"))], async {
             let drt = create_process_local_drt().await;
 
             let metrics1 = drt.metrics().prometheus_expfmt().unwrap();
-            assert!(metrics1.contains("# HELP dynamo_component_uptime_seconds"));
-            assert!(metrics1.contains("# TYPE dynamo_component_uptime_seconds gauge"));
+            assert!(metrics1.contains("# HELP pagoda_servicegroup_uptime_seconds"));
+            assert!(metrics1.contains("# TYPE pagoda_servicegroup_uptime_seconds gauge"));
 
             tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -1497,11 +1497,11 @@ mod tests {
     async fn test_distributed_runtime_from_settings_uses_environment() {
         temp_env::async_with_vars(
             vec![
-                ("DYN_DISCOVERY_BACKEND", Some("mem")),
-                ("DYN_REQUEST_PLANE", Some("http")),
-                (env_event_plane::DYN_EVENT_PLANE, None::<&str>),
+                ("PGD_DISCOVERY_BACKEND", Some("mem")),
+                ("PGD_REQUEST_PLANE", Some("http")),
+                (env_event_plane::PGD_EVENT_PLANE, None::<&str>),
                 (env_nats::NATS_SERVER, None::<&str>),
-                (env_system::DYN_SYSTEM_PORT, Some("-1")),
+                (env_system::PGD_SYSTEM_PORT, Some("-1")),
             ],
             async {
                 let runtime = Runtime::from_current().unwrap();
@@ -1520,7 +1520,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_preserves_explicit_event_transport_kind() {
-        temp_env::async_with_vars(vec![(env_system::DYN_SYSTEM_PORT, Some("-1"))], async {
+        temp_env::async_with_vars(vec![(env_system::PGD_SYSTEM_PORT, Some("-1"))], async {
             let drt = create_local_drt_with_event_transport(EventTransportKind::Nats).await;
             assert_eq!(drt.default_event_transport_kind(), EventTransportKind::Nats);
             drt.shutdown();
@@ -1544,7 +1544,7 @@ mod tests {
         assert!(!etcd_backend.is_local());
         assert!(!DiscoveryBackend::Kubernetes.is_local());
 
-        temp_env::with_vars(vec![(env_event_plane::DYN_EVENT_PLANE, None::<&str>)], || {
+        temp_env::with_vars(vec![(env_event_plane::PGD_EVENT_PLANE, None::<&str>)], || {
             assert_eq!(file_backend.resolve_event_transport_kind(), EventTransportKind::Zmq);
             assert_eq!(memory_backend.resolve_event_transport_kind(), EventTransportKind::Zmq);
             assert_eq!(etcd_backend.resolve_event_transport_kind(), EventTransportKind::Nats);
@@ -1554,20 +1554,20 @@ mod tests {
             );
         });
 
-        temp_env::with_vars(vec![(env_event_plane::DYN_EVENT_PLANE, Some("nats"))], || {
+        temp_env::with_vars(vec![(env_event_plane::PGD_EVENT_PLANE, Some("nats"))], || {
             assert_eq!(memory_backend.resolve_event_transport_kind(), EventTransportKind::Nats);
         });
 
-        temp_env::with_vars(vec![(env_event_plane::DYN_EVENT_PLANE, Some("zmq"))], || {
+        temp_env::with_vars(vec![(env_event_plane::PGD_EVENT_PLANE, Some("zmq"))], || {
             assert_eq!(etcd_backend.resolve_event_transport_kind(), EventTransportKind::Zmq);
         });
 
-        temp_env::with_vars(vec![(env_event_plane::DYN_EVENT_PLANE, Some(""))], || {
+        temp_env::with_vars(vec![(env_event_plane::PGD_EVENT_PLANE, Some(""))], || {
             assert_eq!(memory_backend.resolve_event_transport_kind(), EventTransportKind::Zmq);
             assert_eq!(etcd_backend.resolve_event_transport_kind(), EventTransportKind::Nats);
         });
 
-        temp_env::with_vars(vec![(env_event_plane::DYN_EVENT_PLANE, Some("invalid"))], || {
+        temp_env::with_vars(vec![(env_event_plane::PGD_EVENT_PLANE, Some("invalid"))], || {
             assert_eq!(memory_backend.resolve_event_transport_kind(), EventTransportKind::Zmq);
             assert_eq!(etcd_backend.resolve_event_transport_kind(), EventTransportKind::Nats);
         });
@@ -1577,9 +1577,9 @@ mod tests {
     fn test_distributed_config_from_settings_processes_env() {
         temp_env::with_vars(
             vec![
-                ("DYN_DISCOVERY_BACKEND", Some("mem")),
-                ("DYN_REQUEST_PLANE", Some("tcp")),
-                (env_event_plane::DYN_EVENT_PLANE, None::<&str>),
+                ("PGD_DISCOVERY_BACKEND", Some("mem")),
+                ("PGD_REQUEST_PLANE", Some("tcp")),
+                (env_event_plane::PGD_EVENT_PLANE, None::<&str>),
                 (env_nats::NATS_SERVER, None::<&str>),
             ],
             || {
@@ -1596,9 +1596,9 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                ("DYN_DISCOVERY_BACKEND", Some("kubernetes")),
-                ("DYN_REQUEST_PLANE", Some("http")),
-                (env_event_plane::DYN_EVENT_PLANE, None::<&str>),
+                ("PGD_DISCOVERY_BACKEND", Some("kubernetes")),
+                ("PGD_REQUEST_PLANE", Some("http")),
+                (env_event_plane::PGD_EVENT_PLANE, None::<&str>),
                 (env_nats::NATS_SERVER, Some("nats://example:4222")),
             ],
             || {
@@ -1612,9 +1612,9 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                ("DYN_DISCOVERY_BACKEND", Some("mem")),
-                ("DYN_REQUEST_PLANE", Some("tcp")),
-                (env_event_plane::DYN_EVENT_PLANE, Some("nats")),
+                ("PGD_DISCOVERY_BACKEND", Some("mem")),
+                ("PGD_REQUEST_PLANE", Some("tcp")),
+                (env_event_plane::PGD_EVENT_PLANE, Some("nats")),
                 (env_nats::NATS_SERVER, None::<&str>),
             ],
             || {
@@ -1631,9 +1631,9 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                ("DYN_DISCOVERY_BACKEND", Some("mem")),
-                ("DYN_REQUEST_PLANE", Some("tcp")),
-                (env_event_plane::DYN_EVENT_PLANE, Some("invalid")),
+                ("PGD_DISCOVERY_BACKEND", Some("mem")),
+                ("PGD_REQUEST_PLANE", Some("tcp")),
+                (env_event_plane::PGD_EVENT_PLANE, Some("invalid")),
                 (env_nats::NATS_SERVER, None::<&str>),
             ],
             || {
@@ -1657,8 +1657,8 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                ("DYN_REQUEST_PLANE", Some("tcp")),
-                (env_event_plane::DYN_EVENT_PLANE, None::<&str>),
+                ("PGD_REQUEST_PLANE", Some("tcp")),
+                (env_event_plane::PGD_EVENT_PLANE, None::<&str>),
                 (env_nats::NATS_SERVER, None::<&str>),
             ],
             || {
@@ -1677,8 +1677,8 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                ("DYN_REQUEST_PLANE", Some("tcp")),
-                (env_event_plane::DYN_EVENT_PLANE, Some("zmq")),
+                ("PGD_REQUEST_PLANE", Some("tcp")),
+                (env_event_plane::PGD_EVENT_PLANE, Some("zmq")),
                 (env_nats::NATS_SERVER, None::<&str>),
             ],
             || {
@@ -1694,9 +1694,9 @@ mod tests {
     fn test_distributed_config_from_settings_rejects_unknown_backend() {
         temp_env::with_vars(
             vec![
-                ("DYN_DISCOVERY_BACKEND", Some("unknown")),
-                ("DYN_REQUEST_PLANE", Some("tcp")),
-                (env_event_plane::DYN_EVENT_PLANE, None::<&str>),
+                ("PGD_DISCOVERY_BACKEND", Some("unknown")),
+                ("PGD_REQUEST_PLANE", Some("tcp")),
+                (env_event_plane::PGD_EVENT_PLANE, None::<&str>),
                 (env_nats::NATS_SERVER, None::<&str>),
             ],
             || {
@@ -1724,15 +1724,15 @@ mod tests {
         assert!(!RequestPlaneMode::Http.is_nats());
         assert!(!RequestPlaneMode::Tcp.is_nats());
 
-        temp_env::with_vars(vec![("DYN_REQUEST_PLANE", None::<&str>)], || {
+        temp_env::with_vars(vec![("PGD_REQUEST_PLANE", None::<&str>)], || {
             assert_eq!(RequestPlaneMode::from_env(), RequestPlaneMode::Tcp);
         });
 
-        temp_env::with_vars(vec![("DYN_REQUEST_PLANE", Some("NATS"))], || {
+        temp_env::with_vars(vec![("PGD_REQUEST_PLANE", Some("NATS"))], || {
             assert_eq!(RequestPlaneMode::from_env(), RequestPlaneMode::Nats);
         });
 
-        temp_env::with_vars(vec![("DYN_REQUEST_PLANE", Some("invalid"))], || {
+        temp_env::with_vars(vec![("PGD_REQUEST_PLANE", Some("invalid"))], || {
             assert_eq!(RequestPlaneMode::from_env(), RequestPlaneMode::Tcp);
         });
     }
@@ -1746,7 +1746,7 @@ mod tests {
         #[tokio::test]
         // 中文说明：
         // 1. 这个测试验证在系统状态 HTTP 服务关闭时，DistributedRuntime 的 uptime 统计仍然会正常增长。
-        // 2. 测试先把 DYN_SYSTEM_PORT 临时清空，确保系统状态服务不会启动。
+        // 2. 测试先把 PGD_SYSTEM_PORT 临时清空，确保系统状态服务不会启动。
         // 3. 然后创建一个测试用 DRT，等待 50 毫秒，让 uptime 有足够时间累积。
         // 4. 接着从 system_health 中读取当前 uptime，并断言它至少不小于等待时长。
         // 5. 如果断言通过，再打印一条成功日志，帮助定位测试运行时的实际 uptime 数值。
@@ -1754,7 +1754,7 @@ mod tests {
             use crate::config::environment_names::runtime::system as env_system;
             let wait_duration = tokio::time::Duration::from_millis(50);
 
-            temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, None::<&str>)], async {
+            temp_env::async_with_vars([(env_system::PGD_SYSTEM_PORT, None::<&str>)], async {
                 let drt = create_test_drt_async().await;
 
                 tokio::time::sleep(wait_duration).await;
@@ -1777,7 +1777,7 @@ mod tests {
         #[tokio::test]
         // 中文说明：
         // 1. 这个测试验证在系统状态 HTTP 服务开启时，DistributedRuntime 的 uptime 统计也会正常增长。
-        // 2. 测试先把 DYN_SYSTEM_PORT 临时设置成 8081，让系统状态服务进入启用路径。
+        // 2. 测试先把 PGD_SYSTEM_PORT 临时设置成 8081，让系统状态服务进入启用路径。
         // 3. 随后创建测试 DRT，等待 50 毫秒，使 uptime 累积出可观测值。
         // 4. 然后读取 system_health 中的 uptime，并断言它至少达到等待时间，证明启动额外服务没有破坏 uptime 统计。
         // 5. 最后打印成功信息，方便在测试日志里区分“启用系统服务”这一分支的执行结果。
@@ -1785,7 +1785,7 @@ mod tests {
             use crate::config::environment_names::runtime::system as env_system;
             let wait_duration = tokio::time::Duration::from_millis(50);
 
-            temp_env::async_with_vars([(env_system::DYN_SYSTEM_PORT, Some("8081"))], async {
+            temp_env::async_with_vars([(env_system::PGD_SYSTEM_PORT, Some("8081"))], async {
                 let drt = create_test_drt_async().await;
 
                 tokio::time::sleep(wait_duration).await;
@@ -1849,4 +1849,4 @@ mod tests {
 }
 
 
-// cargo test -p dynamo-runtime distributed --lib --features integration
+// cargo test -p pagoda-runtime distributed --lib --features integration

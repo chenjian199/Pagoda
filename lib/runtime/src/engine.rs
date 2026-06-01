@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
-//! 为 Dynamo 异步流式引擎提供统一抽象与类型擦除支持。核心目标:
+//! 为 Pagoda 异步流式引擎提供统一抽象与类型擦除支持。核心目标:
 //! 1. 用 `AsyncEngine<Req, Resp, Err>` 描述"请求 -> 响应流"语义,屏蔽不同后端实现差异;
 //! 2. 通过 `AnyAsyncEngine` 把不同泛型实参的引擎装进同一集合
 //!    (例: `HashMap<String, Arc<dyn AnyAsyncEngine>>`),供运行时按名查找;

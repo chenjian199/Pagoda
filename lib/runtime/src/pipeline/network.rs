@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network` —— 网络层模块聚合 / 公共类型与协议
@@ -53,7 +53,7 @@ use crate::metrics::MetricsHierarchy;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
-/// Shared default maximum TCP message size across request-plane components.
+/// Shared default maximum TCP message size across request-plane servicegroups.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
@@ -62,7 +62,7 @@ static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 /// server, and zero-copy decoder code paths.
 pub(crate) fn get_tcp_max_message_size() -> usize {
     *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
-        std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
+        std::env::var("PGD_TCP_MAX_MESSAGE_SIZE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE)
@@ -190,76 +190,6 @@ impl PendingConnections {
 #[async_trait::async_trait]
 pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
-}
-
-// === SECTION: Tests — RegisteredStream cleanup semantics ===
-#[cfg(test)]
-mod registered_stream_tests {
-    //! ## 测试矩阵
-    //!
-    //! | 测试名 | 覆盖维度 |
-    //! |---|---|
-    //! | `drop_runs_cleanup` | RAII：未 `into_parts` 直接 drop 必触发清理闭包 |
-    //! | `into_parts_disarms_cleanup` | `into_parts()` 必须解除 RAII，调用方接管清理 |
-    //! | `drop_without_cleanup_is_a_noop` | 未配置 cleanup 时 drop 必须安全无副作用 |
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    fn dummy_conn_info() -> ConnectionInfo {
-        ConnectionInfo {
-            transport: "test".to_string(),
-            info: "{}".to_string(),
-        }
-    }
-
-    /// Drop without `into_parts()` must run the cleanup closure.
-    #[test]
-    fn drop_runs_cleanup() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
-            flag_clone.store(true, Ordering::SeqCst);
-        });
-
-        drop(stream);
-        assert!(
-            flag.load(Ordering::SeqCst),
-            "cleanup must fire when RegisteredStream is dropped"
-        );
-    }
-
-    /// `into_parts()` must disarm the cleanup. After the call, dropping the
-    /// returned halves must NOT trigger the closure -- the caller has taken
-    /// ownership of cleanup responsibility.
-    #[test]
-    fn into_parts_disarms_cleanup() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = flag.clone();
-
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
-            flag_clone.store(true, Ordering::SeqCst);
-        });
-
-        let (conn, provider) = stream.into_parts();
-        drop(conn);
-        drop(provider);
-
-        assert!(
-            !flag.load(Ordering::SeqCst),
-            "into_parts() must disarm the cleanup closure"
-        );
-    }
-
-    /// `RegisteredStream` with no cleanup configured must drop cleanly.
-    #[test]
-    fn drop_without_cleanup_is_a_noop() {
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        let stream: RegisteredStream<()> = RegisteredStream::new(dummy_conn_info(), rx);
-        drop(stream); // must not panic; nothing observable to assert beyond that
-    }
 }
 
 // #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -434,8 +364,8 @@ struct RequestControlMessage {
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
-    /// Endpoint-specific notifier for health check timer resets
-    endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    /// PortName-specific notifier for health check timer resets
+    portname_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -443,7 +373,7 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
-            endpoint_health_check_notifier: OnceLock::new(),
+            portname_health_check_notifier: OnceLock::new(),
         })
     }
 
@@ -455,22 +385,22 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
 
     pub fn add_metrics(
         &self,
-        endpoint: &crate::component::Endpoint,
+        portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
+        let metrics = WorkHandlerMetrics::from_portname(portname, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
         // Register global transport breakdown metrics (idempotent)
         crate::metrics::work_handler_perf::ensure_work_handler_perf_metrics_registered(
-            endpoint.get_metrics_registry(),
+            portname.get_metrics_registry(),
         );
 
         // Register worker-pool saturation metrics (idempotent). These are
-        // process-global and shared across all endpoints attached to the
+        // process-global and shared across all portnames attached to the
         // same shared TCP server.
         crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
-            endpoint.get_metrics_registry(),
+            portname.get_metrics_registry(),
         );
 
         self.metrics
@@ -520,12 +450,12 @@ pub trait PushWorkHandler: Send + Sync {
     /// Add metrics to the handler
     fn add_metrics(
         &self,
-        endpoint: &crate::component::Endpoint,
+        portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
 
-    /// Set the endpoint-specific notifier for health check timer resets
-    fn set_endpoint_health_check_notifier(
+    /// Set the portname-specific notifier for health check timer resets
+    fn set_portname_health_check_notifier(
         &self,
         _notifier: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
@@ -536,7 +466,7 @@ pub trait PushWorkHandler: Send + Sync {
 
 /*
 /// `NetworkStreamWrapper` is a simple wrapper used to detect proper stream termination
-/// in network communication between ingress and egress components.
+/// in network communication between ingress and egress servicegroups.
 ///
 /// **Purpose**: This wrapper solves the problem of detecting whether a stream ended
 /// gracefully or was cut off prematurely (e.g., due to network issues).
@@ -575,7 +505,7 @@ pub trait PushWorkHandler: Send + Sync {
 /// ```
 ///
 /// The detection must be done at egress level because premature stream termination
-/// can be due to network issues that only the egress component can detect.
+/// can be due to network issues that only the egress servicegroup can detect.
 */
 // === SECTION: Stream termination wrapper ===
 /// TODO: Detect end-of-stream using Server-Sent Events (SSE). This will be removed.
@@ -584,4 +514,74 @@ pub struct NetworkStreamWrapper<U> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<U>,
     pub complete_final: bool,
+}
+
+// === SECTION: Tests — RegisteredStream cleanup semantics ===
+#[cfg(test)]
+mod registered_stream_tests {
+    //! ## 测试矩阵
+    //!
+    //! | 测试名 | 覆盖维度 |
+    //! |---|---|
+    //! | `drop_runs_cleanup` | RAII：未 `into_parts` 直接 drop 必触发清理闭包 |
+    //! | `into_parts_disarms_cleanup` | `into_parts()` 必须解除 RAII，调用方接管清理 |
+    //! | `drop_without_cleanup_is_a_noop` | 未配置 cleanup 时 drop 必须安全无副作用 |
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn dummy_conn_info() -> ConnectionInfo {
+        ConnectionInfo {
+            transport: "test".to_string(),
+            info: "{}".to_string(),
+        }
+    }
+
+    /// Drop without `into_parts()` must run the cleanup closure.
+    #[test]
+    fn drop_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        drop(stream);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "cleanup must fire when RegisteredStream is dropped"
+        );
+    }
+
+    /// `into_parts()` must disarm the cleanup. After the call, dropping the
+    /// returned halves must NOT trigger the closure -- the caller has taken
+    /// ownership of cleanup responsibility.
+    #[test]
+    fn into_parts_disarms_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        let (conn, provider) = stream.into_parts();
+        drop(conn);
+        drop(provider);
+
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "into_parts() must disarm the cleanup closure"
+        );
+    }
+
+    /// `RegisteredStream` with no cleanup configured must drop cleanly.
+    #[test]
+    fn drop_without_cleanup_is_a_noop() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream: RegisteredStream<()> = RegisteredStream::new(dummy_conn_info(), rx);
+        drop(stream); // must not panic; nothing observable to assert beyond that
+    }
 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 基于通用 KV 存储的 Discovery 实现
@@ -6,14 +6,14 @@
 //! ## 设计意图
 //!
 //! `KVStoreDiscovery` 是 `Discovery` trait 在 etcd / 内存 KV 后端上的具体实现，
-//! 它把 Dynamo 的三类发现对象分桶序列化为 JSON 字节串：
+//! 它把 Pagoda 的三类发现对象分桶序列化为 JSON 字节串：
 //!
 //! | 类别              | 桶名              | key 模式                                    |
 //! |------------------|------------------|--------------------------------------------|
-//! | `Endpoint`       | `v1/instances`   | `{ns}/{comp}/{ep}/{instance_id:x}`         |
-//! | `Model` (基础)    | `v1/mdc`         | `{ns}/{comp}/{ep}/{instance_id:x}`         |
-//! | `Model` (LoRA)    | `v1/mdc`         | `{ns}/{comp}/{ep}/{instance_id:x}/{suffix}`|
-//! | `EventChannel`   | `v1/event_channels` | `{ns}/{comp}/{topic}/{instance_id:x}`   |
+//! | `PortName`       | `v1/instances`   | `{ns}/{sg}/{pn}/{instance_id:x}`           |
+//! | `Model` (基础)    | `v1/mdc`         | `{ns}/{sg}/{pn}/{instance_id:x}`           |
+//! | `Model` (LoRA)    | `v1/mdc`         | `{ns}/{sg}/{pn}/{instance_id:x}/{suffix}`  |
+//! | `EventChannel`   | `v1/event_channels` | `{ns}/{sg}/{topic}/{instance_id:x}`     |
 //!
 //! ## 外部契约
 //!
@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
+    DiscoverySpec, DiscoveryStream, PortNameInstanceId, EventChannelInstanceId,
     ModelCardInstanceId,
 };
 use crate::storage::kv;
@@ -62,7 +62,7 @@ const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 /// 的判断；提炼出 enum 后只需一个静态方法即可在三处复用。
 #[derive(Clone, Copy)]
 enum BucketRoute {
-    Endpoints,
+    PortNames,
     Models,
     EventChannels,
 }
@@ -71,7 +71,7 @@ impl BucketRoute {
     /// 桶在底层 KV store 中的名称。
     fn name(self) -> &'static str {
         match self {
-            Self::Endpoints => INSTANCES_BUCKET,
+            Self::PortNames => INSTANCES_BUCKET,
             Self::Models => MODELS_BUCKET,
             Self::EventChannels => EVENT_CHANNELS_BUCKET,
         }
@@ -80,15 +80,15 @@ impl BucketRoute {
     /// 由 `DiscoveryQuery` 选择对应桶。
     fn from_query(query: &DiscoveryQuery) -> Self {
         match query {
-            DiscoveryQuery::AllEndpoints
-            | DiscoveryQuery::NamespacedEndpoints { .. }
-            | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. } => Self::Endpoints,
+            DiscoveryQuery::AllPortNames
+            | DiscoveryQuery::NamespacedPortNames { .. }
+            | DiscoveryQuery::ServiceGroupPortNames { .. }
+            | DiscoveryQuery::PortName { .. } => Self::PortNames,
 
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
-            | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. } => Self::Models,
+            | DiscoveryQuery::ServiceGroupModels { .. }
+            | DiscoveryQuery::PortNameModels { .. } => Self::Models,
 
             DiscoveryQuery::EventChannels(_) => Self::EventChannels,
         }
@@ -97,7 +97,7 @@ impl BucketRoute {
     /// 由 `DiscoveryInstance` 选择对应桶。
     fn from_instance(inst: &DiscoveryInstance) -> Self {
         match inst {
-            DiscoveryInstance::Endpoint(_) => Self::Endpoints,
+            DiscoveryInstance::PortName(_) => Self::PortNames,
             DiscoveryInstance::Model { .. } => Self::Models,
             DiscoveryInstance::EventChannel { .. } => Self::EventChannels,
         }
@@ -113,14 +113,14 @@ impl BucketRoute {
 struct KeySchema;
 
 impl KeySchema {
-    /// `{ns}/{comp}/{ep}/{id:x}` — Endpoint / 基础 Model 通用前 4 段。
+    /// `{ns}/{sg}/{pn}/{id:x}` — PortName / 基础 Model 通用前 4 段。
     fn quad(a: &str, b: &str, c: &str, id: u64) -> String {
         format!("{a}/{b}/{c}/{id:x}")
     }
 
     /// 为 Model 实例追加 LoRA suffix（若有且非空）。
-    fn model_key(ns: &str, comp: &str, ep: &str, id: u64, suffix: Option<&str>) -> String {
-        let base = Self::quad(ns, comp, ep, id);
+    fn model_key(ns: &str, sg: &str, pn: &str, id: u64, suffix: Option<&str>) -> String {
+        let base = Self::quad(ns, sg, pn, id);
         match suffix {
             Some(s) if !s.is_empty() => format!("{base}/{s}"),
             _ => base,
@@ -131,19 +131,19 @@ impl KeySchema {
     fn query_prefix(query: &DiscoveryQuery) -> String {
         let bucket = BucketRoute::from_query(query).name();
         match query {
-            DiscoveryQuery::AllEndpoints | DiscoveryQuery::AllModels => bucket.to_owned(),
+            DiscoveryQuery::AllPortNames | DiscoveryQuery::AllModels => bucket.to_owned(),
 
-            DiscoveryQuery::NamespacedEndpoints { namespace }
+            DiscoveryQuery::NamespacedPortNames { namespace }
             | DiscoveryQuery::NamespacedModels { namespace } => format!("{bucket}/{namespace}"),
 
-            DiscoveryQuery::ComponentEndpoints { namespace, component }
-            | DiscoveryQuery::ComponentModels { namespace, component } => {
-                format!("{bucket}/{namespace}/{component}")
+            DiscoveryQuery::ServiceGroupPortNames { namespace, servicegroup }
+            | DiscoveryQuery::ServiceGroupModels { namespace, servicegroup } => {
+                format!("{bucket}/{namespace}/{servicegroup}")
             }
 
-            DiscoveryQuery::Endpoint { namespace, component, endpoint }
-            | DiscoveryQuery::EndpointModels { namespace, component, endpoint } => {
-                format!("{bucket}/{namespace}/{component}/{endpoint}")
+            DiscoveryQuery::PortName { namespace, servicegroup, portname }
+            | DiscoveryQuery::PortNameModels { namespace, servicegroup, portname } => {
+                format!("{bucket}/{namespace}/{servicegroup}/{portname}")
             }
 
             DiscoveryQuery::EventChannels(q) => {
@@ -151,7 +151,7 @@ impl KeySchema {
                 if let Some(ns) = &q.namespace {
                     path.push('/');
                     path.push_str(ns);
-                    if let Some(c) = &q.component {
+                    if let Some(c) = &q.servicegroup {
                         path.push('/');
                         path.push_str(c);
                         if let Some(t) = &q.topic {
@@ -189,9 +189,9 @@ impl KeySchema {
 ///
 /// | 桶            | 段数                           | ID 类型             |
 /// |---------------|-------------------------------|--------------------|
-/// | `instances`   | 4 (`ns/comp/ep/id`)            | `EndpointInstanceId`|
+/// | `instances`   | 4 (`ns/sg/pn/id`)             | `PortNameInstanceId`|
 /// | `mdc`         | 4 或 5 (`.../id[/suffix]`)     | `ModelCardInstanceId`|
-/// | `event_channels` | 4 (`ns/comp/topic/id`)      | `EventChannelInstanceId`|
+/// | `event_channels` | 4 (`ns/sg/topic/id`)       | `EventChannelInstanceId`|
 fn parse_deleted_key(key: &str, bucket: BucketRoute) -> Option<DiscoveryInstanceId> {
     let rel = KeySchema::strip_bucket(key, bucket.name());
     let parts: Vec<&str> = rel.split('/').collect();
@@ -200,26 +200,26 @@ fn parse_deleted_key(key: &str, bucket: BucketRoute) -> Option<DiscoveryInstance
     }
     let id = u64::from_str_radix(parts[3], 16).ok()?;
     let ns = parts[0].to_owned();
-    let comp = parts[1].to_owned();
+    let sg = parts[1].to_owned();
     let third = parts[2].to_owned();
 
     Some(match bucket {
-        BucketRoute::Endpoints => DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+        BucketRoute::PortNames => DiscoveryInstanceId::PortName(PortNameInstanceId {
             namespace: ns,
-            component: comp,
-            endpoint: third,
+            servicegroup: sg,
+            portname: third,
             instance_id: id,
         }),
         BucketRoute::Models => DiscoveryInstanceId::Model(ModelCardInstanceId {
             namespace: ns,
-            component: comp,
-            endpoint: third,
+            servicegroup: sg,
+            portname: third,
             instance_id: id,
             model_suffix: parts.get(4).map(|s| (*s).to_owned()),
         }),
         BucketRoute::EventChannels => DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
             namespace: ns,
-            component: comp,
+            servicegroup: sg,
             topic: third,
             instance_id: id,
         }),
@@ -246,33 +246,33 @@ impl KVStoreDiscovery {
     fn instance_to_route(instance: &DiscoveryInstance) -> (BucketRoute, String) {
         let bucket = BucketRoute::from_instance(instance);
         let key = match instance {
-            DiscoveryInstance::Endpoint(inst) => KeySchema::quad(
+            DiscoveryInstance::PortName(inst) => KeySchema::quad(
                 &inst.namespace,
-                &inst.component,
-                &inst.endpoint,
+                &inst.servicegroup,
+                &inst.portname,
                 inst.instance_id,
             ),
             DiscoveryInstance::Model {
                 namespace,
-                component,
-                endpoint,
+                servicegroup,
+                portname,
                 instance_id,
                 model_suffix,
                 ..
             } => KeySchema::model_key(
                 namespace,
-                component,
-                endpoint,
+                servicegroup,
+                portname,
                 *instance_id,
                 model_suffix.as_deref(),
             ),
             DiscoveryInstance::EventChannel {
                 namespace,
-                component,
+                servicegroup,
                 topic,
                 instance_id,
                 ..
-            } => KeySchema::quad(namespace, component, topic, *instance_id),
+            } => KeySchema::quad(namespace, servicegroup, topic, *instance_id),
         };
         (bucket, key)
     }
@@ -399,15 +399,15 @@ impl Discovery for KVStoreDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::TransportType;
+    use crate::servicegroup::TransportType;
     use crate::discovery::EventChannelQuery;
     use futures::StreamExt as _;
 
-    fn endpoint_spec(ns: &str, comp: &str, ep: &str) -> DiscoverySpec {
-        DiscoverySpec::Endpoint {
+    fn portname_spec(ns: &str, sg: &str, pn: &str) -> DiscoverySpec {
+        DiscoverySpec::PortName {
             namespace: ns.into(),
-            component: comp.into(),
-            endpoint: ep.into(),
+            servicegroup: sg.into(),
+            portname: pn.into(),
             transport: TransportType::Nats("nats://localhost:4222".into()),
             device_type: None,
         }
@@ -451,7 +451,7 @@ mod tests {
             EventChannelQuery::namespace("ns"),
         ));
         let p_comp = KeySchema::query_prefix(&DiscoveryQuery::EventChannels(
-            EventChannelQuery::component("ns", "comp"),
+            EventChannelQuery::servicegroup("ns", "comp"),
         ));
         assert_eq!(p_all, EVENT_CHANNELS_BUCKET);
         assert!(p_ns.ends_with("/ns"));
@@ -477,20 +477,20 @@ mod tests {
     // ── parse_deleted_key ────────────────────────────────────────────────────
 
     /// ## 测试过程
-    /// 用合法的 Endpoint key 调用 `parse_deleted_key`，匹配返回的枚举类型与字段。
+    /// 用合法的 PortName key 调用 `parse_deleted_key`，匹配返回的枚举类型与字段。
     /// ## 意义
     /// 删除事件没有 value，只能从 key 还原 ID；此路径必须严格正确。
     #[test]
-    fn parse_deleted_key_endpoint() {
-        let id = parse_deleted_key("ns/c/e/2a", BucketRoute::Endpoints).unwrap();
+    fn parse_deleted_key_portname() {
+        let id = parse_deleted_key("ns/c/e/2a", BucketRoute::PortNames).unwrap();
         match id {
-            DiscoveryInstanceId::Endpoint(e) => {
+            DiscoveryInstanceId::PortName(e) => {
                 assert_eq!(e.namespace, "ns");
-                assert_eq!(e.component, "c");
-                assert_eq!(e.endpoint, "e");
+                assert_eq!(e.servicegroup, "c");
+                assert_eq!(e.portname, "e");
                 assert_eq!(e.instance_id, 0x2a);
             }
-            _ => panic!("期望 Endpoint 变体"),
+            _ => panic!("期望 PortName 变体"),
         }
     }
 
@@ -515,44 +515,44 @@ mod tests {
     /// 边缘失败必须返回 `None`，避免 watch 流向上层抛出错乱事件。
     #[test]
     fn parse_deleted_key_invalid_returns_none() {
-        assert!(parse_deleted_key("too/short", BucketRoute::Endpoints).is_none());
-        assert!(parse_deleted_key("ns/c/e/zz", BucketRoute::Endpoints).is_none());
+        assert!(parse_deleted_key("too/short", BucketRoute::PortNames).is_none());
+        assert!(parse_deleted_key("ns/c/e/zz", BucketRoute::PortNames).is_none());
     }
 
     // ── 集成：内存后端端到端 ───────────────────────────────────────────────────
 
     /// ## 测试过程
-    /// 用内存后端注册一个 Endpoint，然后 list 查询。
+    /// 用内存后端注册一个 PortName，然后 list 查询。
     /// ## 意义
     /// 验证 register/list 完整链路，确保桶选择与 key 计算一致。
     #[tokio::test]
-    async fn register_then_list_endpoint() {
+    async fn register_then_list_portname() {
         let store = kv::Manager::memory();
         let client = KVStoreDiscovery::new(store, CancellationToken::new());
-        let inst = client.register(endpoint_spec("t", "c", "e")).await.unwrap();
+        let inst = client.register(portname_spec("t", "c", "e")).await.unwrap();
         match inst {
-            DiscoveryInstance::Endpoint(_) => {}
-            _ => panic!("期望 Endpoint"),
+            DiscoveryInstance::PortName(_) => {}
+            _ => panic!("期望 PortName"),
         }
-        let all = client.list(DiscoveryQuery::AllEndpoints).await.unwrap();
+        let all = client.list(DiscoveryQuery::AllPortNames).await.unwrap();
         assert_eq!(all.len(), 1);
     }
 
     /// ## 测试过程
     /// 注册 ns1/c1/e1、ns1/c1/e2、ns2/c2/e1，然后分别按 All / Namespaced /
-    /// Component 三种粒度 list，断言数量。
+    /// ServiceGroup 三种粒度 list，断言数量。
     /// ## 意义
     /// 验证 prefix 匹配在多种粒度下都正确。
     #[tokio::test]
     async fn list_filters_by_query_granularity() {
         let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
-        for (ns, comp, ep) in [("ns1", "c1", "e1"), ("ns1", "c1", "e2"), ("ns2", "c2", "e1")] {
-            client.register(endpoint_spec(ns, comp, ep)).await.unwrap();
+        for (ns, sg, pn) in [("ns1", "c1", "e1"), ("ns1", "c1", "e2"), ("ns2", "c2", "e1")] {
+            client.register(portname_spec(ns, sg, pn)).await.unwrap();
         }
-        assert_eq!(client.list(DiscoveryQuery::AllEndpoints).await.unwrap().len(), 3);
+        assert_eq!(client.list(DiscoveryQuery::AllPortNames).await.unwrap().len(), 3);
         assert_eq!(
             client
-                .list(DiscoveryQuery::NamespacedEndpoints { namespace: "ns1".into() })
+                .list(DiscoveryQuery::NamespacedPortNames { namespace: "ns1".into() })
                 .await
                 .unwrap()
                 .len(),
@@ -560,9 +560,9 @@ mod tests {
         );
         assert_eq!(
             client
-                .list(DiscoveryQuery::ComponentEndpoints {
+                .list(DiscoveryQuery::ServiceGroupPortNames {
                     namespace: "ns1".into(),
-                    component: "c1".into(),
+                    servicegroup: "c1".into(),
                 })
                 .await
                 .unwrap()
@@ -580,20 +580,20 @@ mod tests {
         let cancel = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(kv::Manager::memory(), cancel.clone()));
         let mut stream = client
-            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .list_and_watch(DiscoveryQuery::AllPortNames, None)
             .await
             .unwrap();
 
         let cli = client.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            cli.register(endpoint_spec("t", "c", "e")).await.unwrap();
+            cli.register(portname_spec("t", "c", "e")).await.unwrap();
         });
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
-            DiscoveryEvent::Added(DiscoveryInstance::Endpoint(_)) => {}
-            other => panic!("期望 Added(Endpoint)，得到 {other:?}"),
+            DiscoveryEvent::Added(DiscoveryInstance::PortName(_)) => {}
+            other => panic!("期望 Added(PortName)，得到 {other:?}"),
         }
         cancel.cancel();
     }

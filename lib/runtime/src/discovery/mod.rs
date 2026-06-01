@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Discovery 平面 —— 公共契约与 trait
@@ -17,7 +17,7 @@
 //!
 //! - 所有公开类型的 `derive` / `#[serde(...)]` 必须与历史版本保持兼容
 //!   （否则跨后端反序列化会破坏存量数据）；
-//! - `EndpointInstanceId / ModelCardInstanceId / EventChannelInstanceId` 的
+//! - `PortNameInstanceId / ModelCardInstanceId / EventChannelInstanceId` 的
 //!   `to_path` / `from_path` 是 KV / annotation key 的契约，不得改格式；
 //! - `Discovery::register` 的默认实现负责跨 backend **model 名称冲突检测**：
 //!   先 list → 冲突拒绝；写入后再 list → 仍冲突时回滚（unregister 失败也要冒泡）。
@@ -52,7 +52,7 @@ pub use kube::{KubeDiscoveryClient, hash_pod_name};
 pub mod utils;
 pub use utils::watch_and_extract_field;
 
-use crate::component::{DeviceType, TransportType};
+use crate::servicegroup::{DeviceType, TransportType};
 
 // === 事件平面 transport 类型 =================================================
 
@@ -68,18 +68,18 @@ pub enum EventTransportKind {
 }
 
 impl EventTransportKind {
-    /// 从环境变量 `DYN_EVENT_PLANE` 解析。
+    /// 从环境变量 `PGD_EVENT_PLANE` 解析。
     ///
     /// 未设置 / 空 → `Nats`（分布式部署的合理默认）；
     /// 本地 file/mem 后端请优先使用 `DistributedRuntime::default_event_transport_kind`。
     pub fn from_env() -> Result<Self> {
-        match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
+        match std::env::var(crate::config::environment_names::event_plane::PGD_EVENT_PLANE)
             .as_deref()
         {
             Ok("nats") | Ok("") | Err(_) => Ok(Self::Nats),
             Ok("zmq") => Ok(Self::Zmq),
             Ok(other) => anyhow::bail!(
-                "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'",
+                "Invalid PGD_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'",
                 other
             ),
         }
@@ -113,16 +113,16 @@ pub enum EventCodecKind {
 }
 
 impl EventCodecKind {
-    /// 从环境变量 `DYN_EVENT_PLANE_CODEC` 解析；未设置返回 None 让 transport 决定。
+    /// 从环境变量 `PGD_EVENT_PLANE_CODEC` 解析；未设置返回 None 让 transport 决定。
     pub fn from_env() -> Result<Option<Self>> {
-        match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE_CODEC)
+        match std::env::var(crate::config::environment_names::event_plane::PGD_EVENT_PLANE_CODEC)
             .as_deref()
         {
             Err(_) | Ok("") => Ok(None),
             Ok("json") => Ok(Some(Self::Json)),
             Ok("msgpack") => Ok(Some(Self::Msgpack)),
             Ok(other) => anyhow::bail!(
-                "Invalid DYN_EVENT_PLANE_CODEC value '{}'. Valid values: 'json', 'msgpack'",
+                "Invalid PGD_EVENT_PLANE_CODEC value '{}'. Valid values: 'json', 'msgpack'",
                 other
             ),
         }
@@ -152,13 +152,13 @@ impl EventCodecKind {
 pub enum EventTransport {
     /// NATS Core：subject 前缀
     Nats {
-        /// 例如 "namespace.dynamo.component.backend"
+        /// 例如 "namespace.pagoda.servicegroup.backend"
         subject_prefix: String,
     },
     /// ZMQ pub/sub 直连
     Zmq {
         /// 例如 "tcp://host:port"
-        endpoint: String,
+        portname: String,
     },
     /// ZMQ broker 模式（用于 broker 发现）
     ZmqBroker {
@@ -184,15 +184,15 @@ impl EventTransport {
     }
 
     /// 便捷构造 ZMQ direct transport。
-    pub fn zmq(endpoint: impl Into<String>) -> Self {
-        Self::Zmq { endpoint: endpoint.into() }
+    pub fn zmq(portname: impl Into<String>) -> Self {
+        Self::Zmq { portname: portname.into() }
     }
 
-    /// NATS 返回 subject 前缀；ZMQ 返回 endpoint；ZmqBroker 返回首个 XSUB。
+    /// NATS 返回 subject 前缀；ZMQ 返回 portname；ZmqBroker 返回首个 XSUB。
     pub fn address(&self) -> &str {
         match self {
             Self::Nats { subject_prefix } => subject_prefix,
-            Self::Zmq { endpoint } => endpoint,
+            Self::Zmq { portname } => portname,
             Self::ZmqBroker { xsub_endpoints, .. } => {
                 xsub_endpoints.first().map(|s| s.as_str()).unwrap_or("")
             }
@@ -205,31 +205,31 @@ impl EventTransport {
 /// 前缀分层的发现查询。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DiscoveryQuery {
-    AllEndpoints,
-    NamespacedEndpoints {
+    AllPortNames,
+    NamespacedPortNames {
         namespace: String,
     },
-    ComponentEndpoints {
+    ServiceGroupPortNames {
         namespace: String,
-        component: String,
+        servicegroup: String,
     },
-    Endpoint {
+    PortName {
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
     },
     AllModels,
     NamespacedModels {
         namespace: String,
     },
-    ComponentModels {
+    ServiceGroupModels {
         namespace: String,
-        component: String,
+        servicegroup: String,
     },
-    EndpointModels {
+    PortNameModels {
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
     },
     /// EventChannel 的统一查询（三个可选作用域字段）
     EventChannels(EventChannelQuery),
@@ -239,39 +239,39 @@ pub enum DiscoveryQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventChannelQuery {
     pub namespace: Option<String>,
-    pub component: Option<String>,
+    pub servicegroup: Option<String>,
     pub topic: Option<String>,
 }
 
 impl EventChannelQuery {
     pub fn all() -> Self {
-        Self { namespace: None, component: None, topic: None }
+        Self { namespace: None, servicegroup: None, topic: None }
     }
     pub fn namespace(namespace: impl Into<String>) -> Self {
-        Self { namespace: Some(namespace.into()), component: None, topic: None }
+        Self { namespace: Some(namespace.into()), servicegroup: None, topic: None }
     }
-    pub fn component(namespace: impl Into<String>, component: impl Into<String>) -> Self {
+    pub fn servicegroup(namespace: impl Into<String>, servicegroup: impl Into<String>) -> Self {
         Self {
             namespace: Some(namespace.into()),
-            component: Some(component.into()),
+            servicegroup: Some(servicegroup.into()),
             topic: None,
         }
     }
     pub fn topic(
         namespace: impl Into<String>,
-        component: impl Into<String>,
+        servicegroup: impl Into<String>,
         topic: impl Into<String>,
     ) -> Self {
         Self {
             namespace: Some(namespace.into()),
-            component: Some(component.into()),
+            servicegroup: Some(servicegroup.into()),
             topic: Some(topic.into()),
         }
     }
 
-    /// 返回当前作用域层级（0=all, 1=namespace, 2=component, 3=topic）。
+    /// 返回当前作用域层级（0=all, 1=namespace, 2=servicegroup, 3=topic）。
     pub fn scope_level(&self) -> u8 {
-        match (self.namespace.as_ref(), self.component.as_ref(), self.topic.as_ref()) {
+        match (self.namespace.as_ref(), self.servicegroup.as_ref(), self.topic.as_ref()) {
             (_, _, Some(_)) => 3,
             (_, Some(_), _) => 2,
             (Some(_), _, _) => 1,
@@ -285,18 +285,18 @@ impl EventChannelQuery {
 /// 注册请求：尚未分配 instance_id。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoverySpec {
-    Endpoint {
+    PortName {
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
         transport: TransportType,
         /// 异构路由用以区分 CPU / CUDA worker
         device_type: Option<DeviceType>,
     },
     Model {
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
         /// ModelDeploymentCard 序列化为 JSON（避免 runtime 直接依赖 llm 类型）
         card_json: serde_json::Value,
         /// LoRA 等场景下追加在 instance_id 之后的可选 path 后缀
@@ -304,10 +304,10 @@ pub enum DiscoverySpec {
     },
     EventChannel {
         namespace: String,
-        component: String,
+        servicegroup: String,
         /// 频道 topic（如 "kv-events"）
         topic: String,
-        /// 事件 transport（NATS subject 前缀 / ZMQ endpoint）
+        /// 事件 transport（NATS subject 前缀 / ZMQ portname）
         transport: EventTransport,
     },
 }
@@ -316,21 +316,21 @@ impl DiscoverySpec {
     /// 由可序列化的 model 类型构造 Model spec。
     pub fn from_model<T>(
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
         card: &T,
     ) -> Result<Self>
     where
         T: Serialize,
     {
-        Self::from_model_with_suffix(namespace, component, endpoint, card, None)
+        Self::from_model_with_suffix(namespace, servicegroup, portname, card, None)
     }
 
     /// 同上但额外指定 model_suffix（LoRA 等场景）。
     pub fn from_model_with_suffix<T>(
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
         card: &T,
         model_suffix: Option<String>,
     ) -> Result<Self>
@@ -339,8 +339,8 @@ impl DiscoverySpec {
     {
         Ok(Self::Model {
             namespace,
-            component,
-            endpoint,
+            servicegroup,
+            portname,
             card_json: serde_json::to_value(card)?,
             model_suffix,
         })
@@ -349,30 +349,30 @@ impl DiscoverySpec {
     /// 绑定 instance_id 转为 [`DiscoveryInstance`]。
     pub fn with_instance_id(self, instance_id: u64) -> DiscoveryInstance {
         match self {
-            Self::Endpoint { namespace, component, endpoint, transport, device_type } => {
-                DiscoveryInstance::Endpoint(crate::component::Instance {
+            Self::PortName { namespace, servicegroup, portname, transport, device_type } => {
+                DiscoveryInstance::PortName(crate::servicegroup::Instance {
                     namespace,
-                    component,
-                    endpoint,
+                    servicegroup,
+                    portname,
                     instance_id,
                     transport,
                     device_type,
                 })
             }
-            Self::Model { namespace, component, endpoint, card_json, model_suffix } => {
+            Self::Model { namespace, servicegroup, portname, card_json, model_suffix } => {
                 DiscoveryInstance::Model {
                     namespace,
-                    component,
-                    endpoint,
+                    servicegroup,
+                    portname,
                     instance_id,
                     card_json,
                     model_suffix,
                 }
             }
-            Self::EventChannel { namespace, component, topic, transport } => {
+            Self::EventChannel { namespace, servicegroup, topic, transport } => {
                 DiscoveryInstance::EventChannel {
                     namespace,
-                    component,
+                    servicegroup,
                     topic,
                     instance_id,
                     transport,
@@ -386,11 +386,11 @@ impl DiscoverySpec {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum DiscoveryInstance {
-    Endpoint(crate::component::Instance),
+    PortName(crate::servicegroup::Instance),
     Model {
         namespace: String,
-        component: String,
-        endpoint: String,
+        servicegroup: String,
+        portname: String,
         instance_id: u64,
         card_json: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,7 +398,7 @@ pub enum DiscoveryInstance {
     },
     EventChannel {
         namespace: String,
-        component: String,
+        servicegroup: String,
         topic: String,
         instance_id: u64,
         transport: EventTransport,
@@ -409,7 +409,7 @@ impl DiscoveryInstance {
     /// 实例 ID（任意变体）。
     pub fn instance_id(&self) -> u64 {
         match self {
-            Self::Endpoint(i) => i.instance_id,
+            Self::PortName(i) => i.instance_id,
             Self::Model { instance_id, .. } | Self::EventChannel { instance_id, .. } => {
                 *instance_id
             }
@@ -423,8 +423,8 @@ impl DiscoveryInstance {
     {
         match self {
             Self::Model { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
-            Self::Endpoint(_) => {
-                anyhow::bail!("Cannot deserialize model from Endpoint instance")
+            Self::PortName(_) => {
+                anyhow::bail!("Cannot deserialize model from PortName instance")
             }
             Self::EventChannel { .. } => {
                 anyhow::bail!("Cannot deserialize model from EventChannel instance")
@@ -435,35 +435,35 @@ impl DiscoveryInstance {
     /// 提取唯一标识，用于 diff / removal。
     pub fn id(&self) -> DiscoveryInstanceId {
         match self {
-            Self::Endpoint(i) => DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+            Self::PortName(i) => DiscoveryInstanceId::PortName(PortNameInstanceId {
                 namespace: i.namespace.clone(),
-                component: i.component.clone(),
-                endpoint: i.endpoint.clone(),
+                servicegroup: i.servicegroup.clone(),
+                portname: i.portname.clone(),
                 instance_id: i.instance_id,
             }),
             Self::Model {
                 namespace,
-                component,
-                endpoint,
+                servicegroup,
+                portname,
                 instance_id,
                 model_suffix,
                 ..
             } => DiscoveryInstanceId::Model(ModelCardInstanceId {
                 namespace: namespace.clone(),
-                component: component.clone(),
-                endpoint: endpoint.clone(),
+                servicegroup: servicegroup.clone(),
+                portname: portname.clone(),
                 instance_id: *instance_id,
                 model_suffix: model_suffix.clone(),
             }),
             Self::EventChannel {
                 namespace,
-                component,
+                servicegroup,
                 topic,
                 instance_id,
                 ..
             } => DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
                 namespace: namespace.clone(),
-                component: component.clone(),
+                servicegroup: servicegroup.clone(),
                 topic: topic.clone(),
                 instance_id: *instance_id,
             }),
@@ -474,19 +474,19 @@ impl DiscoveryInstance {
 // === InstanceId 三件套 =======================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EndpointInstanceId {
+pub struct PortNameInstanceId {
     pub namespace: String,
-    pub component: String,
-    pub endpoint: String,
+    pub servicegroup: String,
+    pub portname: String,
     pub instance_id: u64,
 }
 
-impl EndpointInstanceId {
-    /// `{namespace}/{component}/{endpoint}/{instance_id:x}`
+impl PortNameInstanceId {
+    /// `{namespace}/{servicegroup}/{portname}/{instance_id:x}`
     pub fn to_path(&self) -> String {
         format!(
             "{}/{}/{}/{:x}",
-            self.namespace, self.component, self.endpoint, self.instance_id
+            self.namespace, self.servicegroup, self.portname, self.instance_id
         )
     }
 
@@ -495,13 +495,13 @@ impl EndpointInstanceId {
         let parts: Vec<&str> = path.split('/').collect();
         anyhow::ensure!(
             parts.len() == 4,
-            "Invalid EndpointInstanceId path: expected 4 parts, got {}",
+            "Invalid PortNameInstanceId path: expected 4 parts, got {}",
             parts.len()
         );
         Ok(Self {
             namespace: parts[0].to_string(),
-            component: parts[1].to_string(),
-            endpoint: parts[2].to_string(),
+            servicegroup: parts[1].to_string(),
+            portname: parts[2].to_string(),
             instance_id: u64::from_str_radix(parts[3], 16)
                 .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
         })
@@ -511,8 +511,8 @@ impl EndpointInstanceId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelCardInstanceId {
     pub namespace: String,
-    pub component: String,
-    pub endpoint: String,
+    pub servicegroup: String,
+    pub portname: String,
     pub instance_id: u64,
     /// None=基础模型；Some(slug)=LoRA 适配器
     pub model_suffix: Option<String>,
@@ -524,11 +524,11 @@ impl ModelCardInstanceId {
         match &self.model_suffix {
             Some(s) => format!(
                 "{}/{}/{}/{:x}/{}",
-                self.namespace, self.component, self.endpoint, self.instance_id, s
+                self.namespace, self.servicegroup, self.portname, self.instance_id, s
             ),
             None => format!(
                 "{}/{}/{}/{:x}",
-                self.namespace, self.component, self.endpoint, self.instance_id
+                self.namespace, self.servicegroup, self.portname, self.instance_id
             ),
         }
     }
@@ -542,8 +542,8 @@ impl ModelCardInstanceId {
         );
         Ok(Self {
             namespace: parts[0].to_string(),
-            component: parts[1].to_string(),
-            endpoint: parts[2].to_string(),
+            servicegroup: parts[1].to_string(),
+            portname: parts[2].to_string(),
             instance_id: u64::from_str_radix(parts[3], 16)
                 .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
             model_suffix: parts.get(4).map(|s| s.to_string()),
@@ -554,7 +554,7 @@ impl ModelCardInstanceId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventChannelInstanceId {
     pub namespace: String,
-    pub component: String,
+    pub servicegroup: String,
     pub topic: String,
     pub instance_id: u64,
 }
@@ -564,7 +564,7 @@ impl EventChannelInstanceId {
     pub fn to_path(&self) -> String {
         format!(
             "{}/{}/{}/{:x}",
-            self.namespace, self.component, self.topic, self.instance_id
+            self.namespace, self.servicegroup, self.topic, self.instance_id
         )
     }
 
@@ -577,7 +577,7 @@ impl EventChannelInstanceId {
         );
         Ok(Self {
             namespace: parts[0].to_string(),
-            component: parts[1].to_string(),
+            servicegroup: parts[1].to_string(),
             topic: parts[2].to_string(),
             instance_id: u64::from_str_radix(parts[3], 16)
                 .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
@@ -588,7 +588,7 @@ impl EventChannelInstanceId {
 /// 三类 InstanceId 的并集类型。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiscoveryInstanceId {
-    Endpoint(EndpointInstanceId),
+    PortName(PortNameInstanceId),
     Model(ModelCardInstanceId),
     EventChannel(EventChannelInstanceId),
 }
@@ -597,18 +597,18 @@ impl DiscoveryInstanceId {
     /// 透明获取底层 instance_id。
     pub fn instance_id(&self) -> u64 {
         match self {
-            Self::Endpoint(e) => e.instance_id,
+            Self::PortName(e) => e.instance_id,
             Self::Model(m) => m.instance_id,
             Self::EventChannel(c) => c.instance_id,
         }
     }
 
-    pub fn extract_endpoint_id(&self) -> Result<&EndpointInstanceId> {
+    pub fn extract_portname_id(&self) -> Result<&PortNameInstanceId> {
         match self {
-            Self::Endpoint(e) => Ok(e),
-            Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
+            Self::PortName(e) => Ok(e),
+            Self::Model(_) => anyhow::bail!("Expected PortName variant, got Model"),
             Self::EventChannel(_) => {
-                anyhow::bail!("Expected Endpoint variant, got EventChannel")
+                anyhow::bail!("Expected PortName variant, got EventChannel")
             }
         }
     }
@@ -616,7 +616,7 @@ impl DiscoveryInstanceId {
     pub fn extract_model_id(&self) -> Result<&ModelCardInstanceId> {
         match self {
             Self::Model(m) => Ok(m),
-            Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
+            Self::PortName(_) => anyhow::bail!("Expected Model variant, got PortName"),
             Self::EventChannel(_) => anyhow::bail!("Expected Model variant, got EventChannel"),
         }
     }
@@ -624,7 +624,7 @@ impl DiscoveryInstanceId {
     pub fn extract_event_channel_id(&self) -> Result<&EventChannelInstanceId> {
         match self {
             Self::EventChannel(c) => Ok(c),
-            Self::Endpoint(_) => anyhow::bail!("Expected EventChannel variant, got Endpoint"),
+            Self::PortName(_) => anyhow::bail!("Expected EventChannel variant, got PortName"),
             Self::Model(_) => anyhow::bail!("Expected EventChannel variant, got Model"),
         }
     }
@@ -644,7 +644,7 @@ pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + S
 
 // === 私有：Model 名称冲突判定 =================================================
 
-/// 模型注册身份：判定“同一 endpoint 上是否已注册了不兼容的模型”所需的最小信息。
+/// 模型注册身份：判定“同一 portname 上是否已注册了不兼容的模型”所需的最小信息。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ModelRegistrationIdentity {
     display_name: String,
@@ -712,11 +712,11 @@ fn conflict_error(
     requested: &str,
     conflicting: &str,
     namespace: &str,
-    component: &str,
-    endpoint: &str,
+    servicegroup: &str,
+    portname: &str,
 ) -> anyhow::Error {
     anyhow::anyhow!(
-        "Cannot register model '{requested}' on endpoint '{namespace}/{component}/{endpoint}': \
+        "Cannot register model '{requested}' on portname '{namespace}/{servicegroup}/{portname}': \
          a different model '{conflicting}' is already registered there"
     )
 }
@@ -732,32 +732,32 @@ pub trait Discovery: Send + Sync {
     /// 注册一个对象。默认实现内置 Model 名称冲突防护：
     ///
     /// 1. 提取 ModelRegistrationIdentity；
-    /// 2. 写入前 list endpoint 已有模型 → 冲突拒绝；
+    /// 2. 写入前 list portname 已有模型 → 冲突拒绝；
     /// 3. 写入后再 list → 仍冲突时回滚（unregister 失败也通过 `.context()` 冒泡）。
     ///
     /// 非 Model spec 直接走 [`register_internal`]。
     async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let (namespace, component, endpoint, requested) = match &spec {
+        let (namespace, servicegroup, portname, requested) = match &spec {
             DiscoverySpec::Model {
                 namespace,
-                component,
-                endpoint,
+                servicegroup,
+                portname,
                 card_json,
                 model_suffix,
                 ..
             } => (
                 namespace.clone(),
-                component.clone(),
-                endpoint.clone(),
+                servicegroup.clone(),
+                portname.clone(),
                 extract_model_registration_identity(card_json, model_suffix.as_deref())?,
             ),
             _ => return self.register_internal(spec).await,
         };
 
-        let query = DiscoveryQuery::EndpointModels {
+        let query = DiscoveryQuery::PortNameModels {
             namespace: namespace.clone(),
-            component: component.clone(),
-            endpoint: endpoint.clone(),
+            servicegroup: servicegroup.clone(),
+            portname: portname.clone(),
         };
 
         // pre-check
@@ -768,8 +768,8 @@ pub trait Discovery: Send + Sync {
                 &requested.display_name,
                 &conflicting,
                 &namespace,
-                &component,
-                &endpoint,
+                &servicegroup,
+                &portname,
             ));
         }
 
@@ -784,8 +784,8 @@ pub trait Discovery: Send + Sync {
                     &requested.display_name,
                     &conflicting,
                     &namespace,
-                    &component,
-                    &endpoint,
+                    &servicegroup,
+                    &portname,
                 ))
                 .context(format!(
                     "failed to roll back conflicting model registration for instance {instance_id}: {unregister_err}",
@@ -796,8 +796,8 @@ pub trait Discovery: Send + Sync {
                 &requested.display_name,
                 &conflicting,
                 &namespace,
-                &component,
-                &endpoint,
+                &servicegroup,
+                &portname,
             ));
         }
 
@@ -833,19 +833,19 @@ mod tests {
     // ── path roundtrip ────────────────────────────────────────────────────────
 
     /// ## 测试过程
-    /// 用 EndpointInstanceId → to_path → from_path 还原，断言相等。
+    /// 用 PortNameInstanceId → to_path → from_path 还原，断言相等。
     /// ## 意义
     /// 保证 KV / annotation key 在跨进程通信中可逆。
     #[test]
-    fn endpoint_id_path_roundtrip() {
-        let id = EndpointInstanceId {
+    fn portname_id_path_roundtrip() {
+        let id = PortNameInstanceId {
             namespace: "ns".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: 0xabcd,
         };
         let path = id.to_path();
-        assert_eq!(EndpointInstanceId::from_path(&path).unwrap(), id);
+        assert_eq!(PortNameInstanceId::from_path(&path).unwrap(), id);
     }
 
     /// ## 测试过程
@@ -857,8 +857,8 @@ mod tests {
         for suffix in [None, Some("lora-x".to_string())] {
             let id = ModelCardInstanceId {
                 namespace: "ns".into(),
-                component: "c".into(),
-                endpoint: "e".into(),
+                servicegroup: "c".into(),
+                portname: "e".into(),
                 instance_id: 0x10,
                 model_suffix: suffix.clone(),
             };
@@ -870,12 +870,12 @@ mod tests {
     /// ## 测试过程
     /// EventChannelInstanceId 做 path 往返。
     /// ## 意义
-    /// 与 Endpoint 走同一编码格式，但 topic 替代 endpoint，保证字段顺序不串。
+    /// 与 PortName 走同一编码格式，但 topic 替代 portname，保证字段顺序不串。
     #[test]
     fn event_channel_id_path_roundtrip() {
         let id = EventChannelInstanceId {
             namespace: "ns".into(),
-            component: "c".into(),
+            servicegroup: "c".into(),
             topic: "kv-events".into(),
             instance_id: 7,
         };
@@ -888,8 +888,8 @@ mod tests {
     /// 解析必须返回错误而不是 panic 或返回错值。
     #[test]
     fn from_path_rejects_invalid_input() {
-        assert!(EndpointInstanceId::from_path("a/b/c").is_err());
-        assert!(EndpointInstanceId::from_path("a/b/c/zz").is_err());
+        assert!(PortNameInstanceId::from_path("a/b/c").is_err());
+        assert!(PortNameInstanceId::from_path("a/b/c/zz").is_err());
         assert!(ModelCardInstanceId::from_path("a/b/c/1/x/extra").is_err());
         assert!(EventChannelInstanceId::from_path("a/b/c").is_err());
     }
@@ -941,14 +941,14 @@ mod tests {
     // ── EventChannelQuery scope_level ─────────────────────────────────────────
 
     /// ## 测试过程
-    /// 构造 all / namespace / component / topic 四种 query，断言 scope_level 0..3。
+    /// 构造 all / namespace / servicegroup / topic 四种 query，断言 scope_level 0..3。
     /// ## 意义
     /// 上层据此决定从哪个层级开始扫描，错配将直接导致结果不全或全表扫描。
     #[test]
     fn event_channel_query_scope_level() {
         assert_eq!(EventChannelQuery::all().scope_level(), 0);
         assert_eq!(EventChannelQuery::namespace("n").scope_level(), 1);
-        assert_eq!(EventChannelQuery::component("n", "c").scope_level(), 2);
+        assert_eq!(EventChannelQuery::servicegroup("n", "c").scope_level(), 2);
         assert_eq!(EventChannelQuery::topic("n", "c", "t").scope_level(), 3);
     }
 
@@ -1015,8 +1015,8 @@ mod tests {
     fn find_conflict_returns_existing_name() {
         let existing = DiscoveryInstance::Model {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: 1,
             card_json: serde_json::json!({ "display_name": "a" }),
             model_suffix: None,
@@ -1029,24 +1029,24 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 集合含一个 Endpoint + 一个同名 Model；请求与该 Model 兼容。
+    /// 集合含一个 PortName + 一个同名 Model；请求与该 Model 兼容。
     /// ## 意义
-    /// Endpoint 不应被纳入冲突判定，且兼容时返回 None。
+    /// PortName 不应被纳入冲突判定，且兼容时返回 None。
     #[test]
-    fn find_conflict_ignores_endpoints_and_returns_none_when_compatible() {
-        use crate::component::{Instance, TransportType};
-        let ep = DiscoveryInstance::Endpoint(Instance {
+    fn find_conflict_ignores_portnames_and_returns_none_when_compatible() {
+        use crate::servicegroup::{Instance, TransportType};
+        let ep = DiscoveryInstance::PortName(Instance {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: 2,
             transport: TransportType::Nats("nats://x".into()),
             device_type: None,
         });
         let same_model = DiscoveryInstance::Model {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: 1,
             card_json: serde_json::json!({ "display_name": "a" }),
             model_suffix: None,
@@ -1088,12 +1088,12 @@ mod tests {
     /// ## 测试过程
     /// 用 EventChannel spec→instance；id() 应返回 EventChannel 变体并保留字段。
     /// ## 意义
-    /// 验证 EventChannel 路径的 id 提取不串到 Endpoint/Model。
+    /// 验证 EventChannel 路径的 id 提取不串到 PortName/Model。
     #[test]
     fn event_channel_instance_id_extraction() {
         let inst = DiscoverySpec::EventChannel {
             namespace: "n".into(),
-            component: "c".into(),
+            servicegroup: "c".into(),
             topic: "kv".into(),
             transport: EventTransport::zmq("tcp://x:1"),
         }
@@ -1108,16 +1108,16 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 对 Endpoint instance 调用 deserialize_model::<serde_json::Value>。
+    /// 对 PortName instance 调用 deserialize_model::<serde_json::Value>。
     /// ## 意义
     /// 错类型反序列化必须返回 Err，避免静默把 transport 误解为 model。
     #[test]
-    fn deserialize_model_rejects_endpoint() {
-        use crate::component::{Instance, TransportType};
-        let inst = DiscoveryInstance::Endpoint(Instance {
+    fn deserialize_model_rejects_portname() {
+        use crate::servicegroup::{Instance, TransportType};
+        let inst = DiscoveryInstance::PortName(Instance {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             instance_id: 1,
             transport: TransportType::Nats("nats://x".into()),
             device_type: None,
@@ -1128,7 +1128,7 @@ mod tests {
     // ── trait default register 行为 ───────────────────────────────────────────
 
     /// ## 测试过程
-    /// 用 MockDiscovery 注册两个**不同 display_name** 模型到同一 endpoint，
+    /// 用 MockDiscovery 注册两个**不同 display_name** 模型到同一 portname，
     /// 第二次 register 应返回错误，且 list 仍只有 1 条。
     /// ## 意义
     /// 端到端验证 Discovery::register 默认实现的 model 冲突防护链路。
@@ -1140,15 +1140,15 @@ mod tests {
 
         let spec_a = DiscoverySpec::Model {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             card_json: serde_json::json!({ "display_name": "m1" }),
             model_suffix: None,
         };
         let spec_b = DiscoverySpec::Model {
             namespace: "n".into(),
-            component: "c".into(),
-            endpoint: "e".into(),
+            servicegroup: "c".into(),
+            portname: "e".into(),
             card_json: serde_json::json!({ "display_name": "m2" }),
             model_suffix: None,
         };

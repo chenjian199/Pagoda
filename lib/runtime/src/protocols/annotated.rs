@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `Annotated<R>`：带元信息的流式增量
@@ -29,7 +29,7 @@
 //!   方法都通过 [`Annotated::is_error_event`] 内部方法查询，避免散落的
 //!   字面量。
 //! - **错误文本抽取共享**：[`Annotated::error_message`] 把
-//!   “优先 `DynamoError` → 回退 `comment.join(", ")` → 兜底 `unknown error`”
+//!   “优先 `PagodaError` → 回退 `comment.join(", ")` → 兜底 `unknown error`”
 //!   这套逻辑抽成一个私有方法，被 `ok` / `into_result` 共用。
 //! - **元数据保留**：`transfer` 与 `map_data` 都通过解构 + 命名字段重组的
 //!   方式显式列出 5 个字段，保证未来新增字段时编译器立刻报错（结构性提醒）。
@@ -37,7 +37,7 @@
 //!   错误注解返回，保持“流式错误传播”语义。
 
 use super::maybe_error::MaybeError;
-use crate::error::DynamoError;
+use crate::error::PagodaError;
 use anyhow::{Result, anyhow as error};
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +75,7 @@ pub trait AnnotationsProvider {
 /// - `id`：SSE id，用来串联同一逻辑事件的多次推送；
 /// - `event`：SSE event 名，特殊值 [`ERROR_EVENT`] 触发错误分支；
 /// - `comment`：SSE comment 行；错误场景下作为人类可读消息的回退；
-/// - `error`：结构化 [`DynamoError`]，与 `event = "error"` 同时使用。
+/// - `error`：结构化 [`PagodaError`]，与 `event = "error"` 同时使用。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Annotated<R> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,7 +87,7 @@ pub struct Annotated<R> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<DynamoError>,
+    pub error: Option<PagodaError>,
 }
 
 // === IMPL: 构造器 ===========================================================
@@ -95,7 +95,7 @@ pub struct Annotated<R> {
 impl<R> Annotated<R> {
     /// 构造一条仅承载错误信息的注解。
     ///
-    /// `event` 固定为 [`ERROR_EVENT`]，`error` 由 `DynamoError::msg(message)`
+    /// `event` 固定为 [`ERROR_EVENT`]，`error` 由 `PagodaError::msg(message)`
     /// 包装；其余字段留空。
     pub fn from_error(error: String) -> Self {
         Self {
@@ -103,7 +103,7 @@ impl<R> Annotated<R> {
             id: None,
             event: Some(ERROR_EVENT.to_string()),
             comment: None,
-            error: Some(DynamoError::msg(error)),
+            error: Some(PagodaError::msg(error)),
         }
     }
 
@@ -144,7 +144,7 @@ impl<R> Annotated<R> {
         self.event.as_deref() == Some(ERROR_EVENT)
     }
 
-    /// 内部：抽取错误的可读文本，遵循“`DynamoError` 优先 → `comment` 拼接
+    /// 内部：抽取错误的可读文本，遵循“`PagodaError` 优先 → `comment` 拼接
     /// → 兜底 `unknown error`”三段优先级，被 `ok` / `into_result` 共用。
     fn error_message(&self, sep: &str) -> String {
         if let Some(err) = self.error.as_ref() {
@@ -283,20 +283,20 @@ where
             id: None,
             event: Some(ERROR_EVENT.to_string()),
             comment: None,
-            error: Some(DynamoError::from(boxed)),
+            error: Some(PagodaError::from(boxed)),
         }
     }
 
     /// 注意：当 `event == "error"` 但 `error` 字段缺失时，回退到
-    /// `comment.join("; ")` 文本并用 `DynamoError::msg` 包装。
-    fn err(&self) -> Option<DynamoError> {
+    /// `comment.join("; ")` 文本并用 `PagodaError::msg` 包装。
+    fn err(&self) -> Option<PagodaError> {
         if !self.is_error_event() {
             return None;
         }
         if let Some(err) = self.error.clone() {
             return Some(err);
         }
-        Some(DynamoError::msg(self.error_message("; ")))
+        Some(PagodaError::msg(self.error_message("; ")))
     }
 }
 
@@ -329,18 +329,18 @@ mod tests {
         assert!(annotated.err().is_some());
         assert!(annotated.is_err());
 
-        let dynamo_err = DynamoError::msg("Test error 3");
-        let annotated = Annotated::<String>::from_err(dynamo_err);
+        let pagoda_err = PagodaError::msg("Test error 3");
+        let annotated = Annotated::<String>::from_err(pagoda_err);
         assert!(annotated.is_err());
     }
 
     /// ## 测试过程
-    /// 用 `DynamoError` 走 `from_err`，验证错误文本可被读回。
+    /// 用 `PagodaError` 走 `from_err`，验证错误文本可被读回。
     /// ## 意义
     /// 防止 `from_err` 在装箱过程中把信息抹掉。
     #[test]
     fn test_from_err() {
-        let err = DynamoError::msg("connection lost");
+        let err = PagodaError::msg("connection lost");
         let annotated = Annotated::<String>::from_err(err);
 
         assert!(annotated.is_err());
@@ -354,7 +354,7 @@ mod tests {
     /// 保证 `serde` 序列化路径不丢错误内容。
     #[test]
     fn test_error_serialization() {
-        let err = DynamoError::msg("test error");
+        let err = PagodaError::msg("test error");
         let annotated = Annotated::<String>::from_err(err);
 
         let json = serde_json::to_string(&annotated).unwrap();
@@ -370,7 +370,7 @@ mod tests {
     /// `transfer` 在流式中转节点频繁使用，必须保留错误元数据。
     #[test]
     fn test_transfer_preserves_error() {
-        let err = DynamoError::msg("request timed out");
+        let err = PagodaError::msg("request timed out");
         let annotated = Annotated::<String>::from_err(err);
 
         let transferred: Annotated<i32> = annotated.transfer(None);
@@ -383,7 +383,7 @@ mod tests {
     /// 验证 `Result` 投影对错误事件的处理符合“向调用方暴露原始消息”的约定。
     #[test]
     fn test_ok_method() {
-        let err = DynamoError::msg("connection lost");
+        let err = PagodaError::msg("connection lost");
         let annotated = Annotated::<String>::from_err(err);
 
         let result = annotated.ok();
@@ -553,13 +553,13 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 通过 `from_err` 注入结构化 `DynamoError` 后调 `into_result`，
+    /// 通过 `from_err` 注入结构化 `PagodaError` 后调 `into_result`，
     /// 验证 `anyhow::Error` 文本仍包含原始消息。
     /// ## 意义
     /// 守护结构化错误路径在 `into_result` 中的可观察性。
     #[test]
     fn test_into_result() {
-        let err = DynamoError::msg("connection lost");
+        let err = PagodaError::msg("connection lost");
         let annotated = Annotated::<String>::from_err(err);
 
         let result = annotated.into_result();

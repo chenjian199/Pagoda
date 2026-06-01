@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 传统键值存储统一接口
@@ -9,7 +9,7 @@
 //! 在不感知存储介质的前提下工作。模块名特意拼为 `key_value_store` 而非 KV ——
 //! 在 AI 语境下 "KV" 容易与注意力缓存混淆。
 //!
-//! 本实现与 lib-copy 标准版**契约完全等价**，但内部走了与之不同的实现路径：
+//! 本实现标准版**契约完全等价**，但内部走了与之不同的实现路径：
 //!
 //! - 把 lib-copy 的 `enum KeyValueStoreEnum { Memory, Nats, Etcd, File }` 改成
 //!   `Arc<dyn DynStore>` 的对象安全适配层 `BoxedStoreImpl<S>`。新增一种后端
@@ -75,8 +75,8 @@ impl Key {
     }
 
     /// 接受 percent-encoded 字符串，解码后构造 Key。
-    /// e.g. `dynamo%2Fbackend%2Fgenerate%2F17216e63492ef21f` →
-    ///      `dynamo/backend/generate/17216e63492ef21f`
+    /// e.g. `pagoda%2Fbackend%2Fgenerate%2F17216e63492ef21f` →
+    ///      `pagoda/backend/generate/17216e63492ef21f`
     pub fn from_url_safe(s: &str) -> Key {
         Key(percent_decode_str(s).decode_utf8_lossy().to_string())
     }
@@ -239,9 +239,9 @@ impl FromStr for Selector {
         match s.to_ascii_lowercase().as_str() {
             "etcd" | "etcd3" => Ok(Self::Etcd(Box::default())),
             "file" | "fs" => {
-                let root = env::var("DYN_FILE_KV")
+                let root = env::var("PGD_FILE_KV")
                     .map(PathBuf::from)
-                    .unwrap_or_else(|_| env::temp_dir().join("dynamo_store_kv"));
+                    .unwrap_or_else(|_| env::temp_dir().join("pagoda_store_kv"));
                 Ok(Self::File(root))
             }
             "mem" | "memory" | "inmem" => Ok(Self::Memory),
@@ -693,7 +693,7 @@ mod tests {
     /// 锁定 Key 编解码的对称性契约。
     #[test]
     fn key_url_safe_roundtrip() {
-        let original = Key::new("dynamo/backend/generate/17216e63492ef21f".to_string());
+        let original = Key::new("pagoda/backend/generate/17216e63492ef21f".to_string());
         let encoded = original.url_safe();
         assert!(encoded.contains("%2F"));
         let decoded = Key::from_url_safe(&encoded);

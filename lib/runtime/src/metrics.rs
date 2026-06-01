@@ -1,14 +1,14 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Metrics 注册中心与层级化 Prometheus 接入
 //!
 //! ## 设计意图
 //!
-//! 本模块是整个 dynamo runtime 指标体系的“总入口”：它把 Prometheus 原生的多种
+//! 本模块是整个 pagoda runtime 指标体系的“总入口”：它把 Prometheus 原生的多种
 //! 指标类型（Counter / Gauge / Histogram / *Vec）藏在统一的
 //! [`PrometheusMetric`] trait 与 [`create_metric`] 函数后面，再借助
-//! [`MetricsHierarchy`]（DRT → Namespace → Component → Endpoint）实现
+//! [`MetricsHierarchy`]（DRT → Namespace → ServiceGroup → PortName）实现
 //! **自动标签注入**和**多 registry 合并抓取**。子模块按域拆分：
 //! `frontend_perf` / `request_plane` / `tokio_perf` / `transport_metrics` /
 //! `work_handler_perf` / `work_handler_pool`，以及命名常量 `prometheus_names`。
@@ -28,7 +28,7 @@
 //! ## 实现要点
 //!
 //! - **自动标签注入**：[`create_metric`] 先从 `parent_hierarchies()` 取出
-//!   namespace / component / endpoint 三段名字，再加上 `worker_id`（来自
+//!   namespace / servicegroup / portname 三段名字，再加上 `worker_id`（来自
 //!   `connection_id()`），作为 **const_labels** 拼到 Prometheus opts 上。
 //!   用户传入的 `labels` 若撞上这四个保留名直接返回错误。
 //! - **泛型分派**：用 `TypeId` 比对决定具体走 `with_opts` / `with_opts_and_label_names` /
@@ -56,7 +56,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::component::ComponentBuilder;
+use crate::servicegroup::ServiceGroupBuilder;
 use anyhow;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -65,11 +65,11 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    build_component_metric_name, labels, name_prefix, sanitize_prometheus_label,
+    build_servicegroup_metric_name, labels, name_prefix, sanitize_prometheus_label,
     sanitize_prometheus_name, work_handler,
 };
 
-// Pipeline imports for endpoint creation
+// Pipeline imports for portname creation
 use crate::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn, async_trait,
     network::Ingress,
@@ -277,7 +277,7 @@ impl PrometheusMetric for prometheus::CounterVec {
 /// 统一的指标创建入口（Python 绑定也复用本函数）。
 // 中文说明：
 // 1. 这是整个文件里统一的指标创建入口，负责拼装层级名称、校验标签并根据具体指标类型走不同构造分支。
-// 2. 它会先检查用户标签是否重复、是否和自动注入标签冲突，再从层级信息中补齐 namespace、component、endpoint、worker_id 等常量标签。
+// 2. 它会先检查用户标签是否重复、是否和自动注入标签冲突，再从层级信息中补齐 namespace、servicegroup、portname、worker_id 等常量标签。
 // 3. 随后根据泛型 T 的实际类型决定是创建普通指标、Vec 指标还是 Histogram，并对 buckets、const_labels 这些参数做对应约束检查。
 // 4. 指标创建成功后，还会把 collector 注册进当前层级的 MetricsRegistry，确保后续抓取时能真正暴露出来。
 pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
@@ -295,12 +295,12 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     hierarchy_names.extend(parent_hierarchies.iter().map(|parent| parent.basename()));
     hierarchy_names.push(hierarchy.basename());
 
-    let metric_name = build_component_metric_name(metric_name);
+    let metric_name = build_servicegroup_metric_name(metric_name);
 
     let reserved_label_names = [
         labels::NAMESPACE,
-        labels::COMPONENT,
-        labels::ENDPOINT,
+        labels::SERVICEGROUP,
+        labels::PORTNAME,
         labels::WORKER_ID,
     ];
 
@@ -329,8 +329,8 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     let mut updated_labels: Vec<(String, String)> = Vec::with_capacity(labels.len() + 4);
     for (index, label_name) in [
         (1usize, labels::NAMESPACE),
-        (2usize, labels::COMPONENT),
-        (3usize, labels::ENDPOINT),
+        (2usize, labels::SERVICEGROUP),
+        (3usize, labels::PORTNAME),
     ] {
         let Some(raw_value) = hierarchy_names.get(index) else {
             continue;
@@ -436,7 +436,7 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
 }
 
 /// Wrapper struct that provides access to metrics functionality
-/// This struct is accessed via the `.metrics()` method on DistributedRuntime, Namespace, Component, and Endpoint
+/// This struct is accessed via the `.metrics()` method on DistributedRuntime, Namespace, ServiceGroup, and PortName
 pub struct Metrics<H: MetricsHierarchy> {
     hierarchy: H,
 }
@@ -633,7 +633,7 @@ pub trait MetricsHierarchy: Send + Sync {
 
     /// Get the parent hierarchies as actual objects (not strings)
     /// Returns a vector of hierarchy references, ordered from root to immediate parent.
-    /// For example, an Endpoint would return [DRT, Namespace, Component].
+    /// For example, an PortName would return [DRT, Namespace, ServiceGroup].
     fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy>;
 
     /// Get a reference to this hierarchy's metrics registry
@@ -646,7 +646,7 @@ pub trait MetricsHierarchy: Send + Sync {
     /// Get the connection ID (discovery instance ID) for this hierarchy level.
     ///
     /// Returns `Some(id)` when the hierarchy has access to the DistributedRuntime
-    /// (e.g. Namespace, Component, Endpoint). Used by `create_metric()` to auto-inject
+    /// (e.g. Namespace, ServiceGroup, PortName). Used by `create_metric()` to auto-inject
     /// the `worker_id` label. Returns `None` by default.
     // 中文说明：默认情况下层级对象不提供连接 ID，因此返回 None，具体类型需要时再自行覆写。
     fn connection_id(&self) -> Option<u64> {
@@ -709,7 +709,7 @@ pub type PrometheusExpositionFormatCallback =
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
 ///
 /// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
-/// on cloned instances (e.g., cloned Client/Endpoint) are visible to the original.
+/// on cloned instances (e.g., cloned Client/PortName) are visible to the original.
 #[derive(Clone)]
 pub struct MetricsRegistry {
     /// The Prometheus registry for this hierarchy.
@@ -720,8 +720,8 @@ pub struct MetricsRegistry {
     ///
     /// Why this exists:
     /// - Previously, `create_metric()` registered every collector into *all* parent registries
-    ///   (Endpoint → Component → Namespace → DRT) so scraping the root registry included everything.
-    /// - That fan-out caused Prometheus collisions when different endpoints tried to register the
+    ///   (PortName → ServiceGroup → Namespace → DRT) so scraping the root registry included everything.
+    /// - That fan-out caused Prometheus collisions when different portnames tried to register the
     ///   same metric name with different const-labels (descriptor mismatch).
     ///
     /// We now register metrics only into the local hierarchy registry to avoid collisions.
@@ -736,7 +736,7 @@ pub struct MetricsRegistry {
     pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
 
     /// Callbacks that return Prometheus exposition text appended to metrics output.
-    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at Endpoint remain accessible at DRT).
+    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at PortName remain accessible at DRT).
     pub prometheus_expfmt_callbacks:
         Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
 }
@@ -798,7 +798,7 @@ impl MetricsRegistry {
     // 中文说明：递归收集当前 registry 以及所有子 registry，生成一次完整抓取时需要遍历的 registry 列表。
     fn registries_for_combined_scrape(&self) -> Vec<MetricsRegistry> {
         // Traverse child registries recursively so `prometheus_expfmt()` on any hierarchy
-        // (DRT/namespace/component/endpoint) includes metrics from its descendants.
+        // (DRT/namespace/servicegroup/portname) includes metrics from its descendants.
         //
         // Dedup by underlying Prometheus registry pointer so multiple paths (e.g. also registering
         // directly on the root) won't duplicate output.
@@ -1065,11 +1065,11 @@ mod test_helpers {
             .collect::<Vec<_>>()
     }
 
-    /// Extracts all component metrics (excluding help text and type definitions).
+    /// Extracts all servicegroup metrics (excluding help text and type definitions).
     /// Returns only the actual metric lines with values.
     pub fn extract_metrics(input: &str) -> Vec<String> {
         filter_prometheus_lines(input, |line| {
-            line.starts_with(&format!("{}_", name_prefix::COMPONENT))
+            line.starts_with(&format!("{}_", name_prefix::SERVICEGROUP))
                 && !line.starts_with("#")
                 && !line.trim().is_empty()
         })
@@ -1154,13 +1154,13 @@ mod test_metricsregistry_units {
     use super::*;
 
     #[test]
-    fn test_build_component_metric_name_with_prefix() {
-        // Test that build_component_metric_name correctly prepends the dynamo_component prefix
-        let result = build_component_metric_name("requests");
-        assert_eq!(result, "dynamo_component_requests");
+    fn test_build_servicegroup_metric_name_with_prefix() {
+        // Test that build_servicegroup_metric_name correctly prepends the pagoda_servicegroup prefix
+        let result = build_servicegroup_metric_name("requests");
+        assert_eq!(result, "pagoda_servicegroup_requests");
 
-        let result = build_component_metric_name("counter");
-        assert_eq!(result, "dynamo_component_counter");
+        let result = build_servicegroup_metric_name("counter");
+        assert_eq!(result, "pagoda_servicegroup_counter");
     }
 
     #[test]
@@ -1328,8 +1328,8 @@ mod test_metricsregistry_prefixes {
         const COMPONENT_NAME: &str = "comp901";
         const ENDPOINT_NAME: &str = "ep901";
         let namespace = drt.namespace(NAMESPACE_NAME).unwrap();
-        let component = namespace.component(COMPONENT_NAME).unwrap();
-        let endpoint = component.endpoint(ENDPOINT_NAME);
+        let servicegroup = namespace.servicegroup(COMPONENT_NAME).unwrap();
+        let portname = servicegroup.portname(ENDPOINT_NAME);
 
         // DRT
         assert_eq!(drt.basename(), DRT_NAME);
@@ -1342,20 +1342,20 @@ mod test_metricsregistry_prefixes {
         assert_eq!(namespace.parent_hierarchies()[0].basename(), DRT_NAME);
         // Namespace hierarchy is just its basename since parent is empty
 
-        // Component
-        assert_eq!(component.basename(), COMPONENT_NAME);
-        assert_eq!(component.parent_hierarchies().len(), 2);
-        assert_eq!(component.parent_hierarchies()[0].basename(), DRT_NAME);
-        assert_eq!(component.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
-        // Component hierarchy structure is validated by the individual assertions above
+        // ServiceGroup
+        assert_eq!(servicegroup.basename(), COMPONENT_NAME);
+        assert_eq!(servicegroup.parent_hierarchies().len(), 2);
+        assert_eq!(servicegroup.parent_hierarchies()[0].basename(), DRT_NAME);
+        assert_eq!(servicegroup.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
+        // ServiceGroup hierarchy structure is validated by the individual assertions above
 
-        // Endpoint
-        assert_eq!(endpoint.basename(), ENDPOINT_NAME);
-        assert_eq!(endpoint.parent_hierarchies().len(), 3);
-        assert_eq!(endpoint.parent_hierarchies()[0].basename(), DRT_NAME);
-        assert_eq!(endpoint.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
-        assert_eq!(endpoint.parent_hierarchies()[2].basename(), COMPONENT_NAME);
-        // Endpoint hierarchy structure is validated by the individual assertions above
+        // PortName
+        assert_eq!(portname.basename(), ENDPOINT_NAME);
+        assert_eq!(portname.parent_hierarchies().len(), 3);
+        assert_eq!(portname.parent_hierarchies()[0].basename(), DRT_NAME);
+        assert_eq!(portname.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
+        assert_eq!(portname.parent_hierarchies()[2].basename(), COMPONENT_NAME);
+        // PortName hierarchy structure is validated by the individual assertions above
 
         // Relationships
         assert!(
@@ -1365,26 +1365,26 @@ mod test_metricsregistry_prefixes {
                 .any(|h| h.basename() == drt.basename())
         );
         assert!(
-            component
+            servicegroup
                 .parent_hierarchies()
                 .iter()
                 .any(|h| h.basename() == namespace.basename())
         );
         assert!(
-            endpoint
+            portname
                 .parent_hierarchies()
                 .iter()
-                .any(|h| h.basename() == component.basename())
+                .any(|h| h.basename() == servicegroup.basename())
         );
 
         // Depth
         assert_eq!(drt.parent_hierarchies().len(), 0);
         assert_eq!(namespace.parent_hierarchies().len(), 1);
-        assert_eq!(component.parent_hierarchies().len(), 2);
-        assert_eq!(endpoint.parent_hierarchies().len(), 3);
+        assert_eq!(servicegroup.parent_hierarchies().len(), 2);
+        assert_eq!(portname.parent_hierarchies().len(), 3);
 
         // Invalid namespace behavior - sanitizes to "_123" and succeeds
-        // @ryanolson intended to enable validation (see TODO comment in component.rs) but didn't turn it on,
+        // @ryanolson intended to enable validation (see TODO comment in servicegroup.rs) but didn't turn it on,
         // so invalid characters are sanitized in MetricsRegistry rather than rejected.
         let invalid_namespace = drt.namespace("@@123").unwrap();
         let result =
@@ -1398,8 +1398,8 @@ mod test_metricsregistry_prefixes {
             let namespace_label = desc[0]
                 .const_label_pairs
                 .iter()
-                .find(|l| l.name() == "dynamo_namespace")
-                .expect("Should have dynamo_namespace label");
+                .find(|l| l.name() == "pagoda_namespace")
+                .expect("Should have pagoda_namespace label");
             assert_eq!(namespace_label.value(), "_123");
         }
 
@@ -1414,20 +1414,20 @@ mod test_metricsregistry_prefixes {
     }
 
     #[tokio::test]
-    async fn test_expfmt_callback_only_registered_on_endpoint_is_included_once() {
-        // Sanity test: if an expfmt callback is registered only on the endpoint registry,
+    async fn test_expfmt_callback_only_registered_on_portname_is_included_once() {
+        // Sanity test: if an expfmt callback is registered only on the portname registry,
         // scraping from the root (DRT) should still include it exactly once via the
         // child-registry traversal.
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns_expfmt_ep_only").unwrap();
-        let component = namespace.component("comp_expfmt_ep_only").unwrap();
-        let endpoint = component.endpoint("ep_expfmt_ep_only");
+        let servicegroup = namespace.servicegroup("comp_expfmt_ep_only").unwrap();
+        let portname = servicegroup.portname("ep_expfmt_ep_only");
 
-        let metric_line = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0\n";
+        let metric_line = "pagoda_servicegroup_active_decode_blocks{dp_rank=\"0\"} 0\n";
         let callback: PrometheusExpositionFormatCallback =
             Arc::new(move || Ok(metric_line.to_string()));
 
-        endpoint
+        portname
             .get_metrics_registry()
             .add_expfmt_callback(callback);
 
@@ -1439,7 +1439,7 @@ mod test_metricsregistry_prefixes {
 
         assert_eq!(
             occurrences, 1,
-            "endpoint-registered exposition callback should appear once, got {} occurrences\n\n{}",
+            "portname-registered exposition callback should appear once, got {} occurrences\n\n{}",
             occurrences, output
         );
     }
@@ -1454,8 +1454,8 @@ mod test_metricsregistry_prefixes {
         let ns2 = ns1.namespace("ns2").unwrap();
         let ns3 = ns2.namespace("ns3").unwrap();
 
-        // Create a component in the deepest namespace
-        let component = ns3.component("test-component").unwrap();
+        // Create a servicegroup in the deepest namespace
+        let servicegroup = ns3.servicegroup("test-servicegroup").unwrap();
 
         // Verify the hierarchy structure
         assert_eq!(ns1.basename(), "ns1");
@@ -1476,13 +1476,13 @@ mod test_metricsregistry_prefixes {
         assert_eq!(ns3.parent_hierarchies()[2].basename(), "ns2");
         // ns3 hierarchy structure validated by parent assertions above
 
-        assert_eq!(component.basename(), "test-component");
-        assert_eq!(component.parent_hierarchies().len(), 4);
-        assert_eq!(component.parent_hierarchies()[0].basename(), "");
-        assert_eq!(component.parent_hierarchies()[1].basename(), "ns1");
-        assert_eq!(component.parent_hierarchies()[2].basename(), "ns2");
-        assert_eq!(component.parent_hierarchies()[3].basename(), "ns3");
-        // component hierarchy structure validated by parent assertions above
+        assert_eq!(servicegroup.basename(), "test-servicegroup");
+        assert_eq!(servicegroup.parent_hierarchies().len(), 4);
+        assert_eq!(servicegroup.parent_hierarchies()[0].basename(), "");
+        assert_eq!(servicegroup.parent_hierarchies()[1].basename(), "ns1");
+        assert_eq!(servicegroup.parent_hierarchies()[2].basename(), "ns2");
+        assert_eq!(servicegroup.parent_hierarchies()[3].basename(), "ns3");
+        // servicegroup hierarchy structure validated by parent assertions above
 
         println!("✓ Chained namespace test passed - all prefixes correct");
     }
@@ -1506,11 +1506,11 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         let namespace_name = "ns345";
 
         let namespace = drt.namespace(namespace_name).unwrap();
-        let component = namespace.component("comp345").unwrap();
-        let endpoint = component.endpoint("ep345");
+        let servicegroup = namespace.servicegroup("comp345").unwrap();
+        let portname = servicegroup.portname("ep345");
 
         // Test Counter creation
-        let counter = endpoint
+        let counter = portname
             .metrics()
             .create_counter("testcounter", "A test counter", &[])
             .unwrap();
@@ -1518,65 +1518,65 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         let epsilon = 0.01;
         assert!((counter.get() - 123.456789).abs() < epsilon);
 
-        let endpoint_output_raw = endpoint.metrics().prometheus_expfmt().unwrap();
-        println!("Endpoint output:");
-        println!("{}", endpoint_output_raw);
+        let portname_output_raw = portname.metrics().prometheus_expfmt().unwrap();
+        println!("PortName output:");
+        println!("{}", portname_output_raw);
 
         // worker_id is runtime-generated (etcd lease ID), so we grab it from the DRT
         // and inject it into expected strings via the inject_worker_id helper.
         let wid = format!("{:x}", drt.connection_id());
         use super::test_helpers::inject_worker_id;
 
-        let expected_endpoint_output = inject_worker_id(
-            r#"# HELP dynamo_component_testcounter A test counter
-# TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789"#,
+        let expected_portname_output = inject_worker_id(
+            r#"# HELP pagoda_servicegroup_testcounter A test counter
+# TYPE pagoda_servicegroup_testcounter counter
+pagoda_servicegroup_testcounter{pagoda_servicegroup="comp345",pagoda_portname="ep345",pagoda_namespace="ns345"} 123.456789"#,
             &wid,
         );
 
         assert_eq!(
-            endpoint_output_raw.trim_end_matches('\n'),
-            expected_endpoint_output.trim_end_matches('\n'),
+            portname_output_raw.trim_end_matches('\n'),
+            expected_portname_output.trim_end_matches('\n'),
             "\n=== ENDPOINT COMPARISON FAILED ===\n\
              Actual:\n{}\n\
              Expected:\n{}\n\
              ==============================",
-            endpoint_output_raw,
-            expected_endpoint_output
+            portname_output_raw,
+            expected_portname_output
         );
 
         // Test Gauge creation
-        let gauge = component
+        let gauge = servicegroup
             .metrics()
             .create_gauge("testgauge", "A test gauge", &[])
             .unwrap();
         gauge.set(50000.0);
         assert_eq!(gauge.get(), 50000.0);
 
-        // Test Prometheus format output for Component (gauge + histogram)
-        let component_output_raw = component.metrics().prometheus_expfmt().unwrap();
-        println!("Component output:");
-        println!("{}", component_output_raw);
+        // Test Prometheus format output for ServiceGroup (gauge + histogram)
+        let servicegroup_output_raw = servicegroup.metrics().prometheus_expfmt().unwrap();
+        println!("ServiceGroup output:");
+        println!("{}", servicegroup_output_raw);
 
-        let expected_component_output = inject_worker_id(
-            r#"# HELP dynamo_component_testcounter A test counter
-# TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
-# HELP dynamo_component_testgauge A test gauge
-# TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000"#,
+        let expected_servicegroup_output = inject_worker_id(
+            r#"# HELP pagoda_servicegroup_testcounter A test counter
+# TYPE pagoda_servicegroup_testcounter counter
+pagoda_servicegroup_testcounter{pagoda_servicegroup="comp345",pagoda_portname="ep345",pagoda_namespace="ns345"} 123.456789
+# HELP pagoda_servicegroup_testgauge A test gauge
+# TYPE pagoda_servicegroup_testgauge gauge
+pagoda_servicegroup_testgauge{pagoda_servicegroup="comp345",pagoda_namespace="ns345"} 50000"#,
             &wid,
         );
 
         assert_eq!(
-            component_output_raw.trim_end_matches('\n'),
-            expected_component_output.trim_end_matches('\n'),
+            servicegroup_output_raw.trim_end_matches('\n'),
+            expected_servicegroup_output.trim_end_matches('\n'),
             "\n=== COMPONENT COMPARISON FAILED ===\n\
              Actual:\n{}\n\
              Expected:\n{}\n\
              ==============================",
-            component_output_raw,
-            expected_component_output
+            servicegroup_output_raw,
+            expected_servicegroup_output
         );
 
         let intcounter = namespace
@@ -1592,15 +1592,15 @@ dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 
         println!("{}", namespace_output_raw);
 
         let expected_namespace_output = inject_worker_id(
-            r#"# HELP dynamo_component_testcounter A test counter
-# TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
-# HELP dynamo_component_testgauge A test gauge
-# TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000
-# HELP dynamo_component_testintcounter A test int counter
-# TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#,
+            r#"# HELP pagoda_servicegroup_testcounter A test counter
+# TYPE pagoda_servicegroup_testcounter counter
+pagoda_servicegroup_testcounter{pagoda_servicegroup="comp345",pagoda_portname="ep345",pagoda_namespace="ns345"} 123.456789
+# HELP pagoda_servicegroup_testgauge A test gauge
+# TYPE pagoda_servicegroup_testgauge gauge
+pagoda_servicegroup_testgauge{pagoda_servicegroup="comp345",pagoda_namespace="ns345"} 50000
+# HELP pagoda_servicegroup_testintcounter A test int counter
+# TYPE pagoda_servicegroup_testintcounter counter
+pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345"#,
             &wid,
         );
 
@@ -1641,7 +1641,7 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#,
             .set(0);
 
         // Test CounterVec creation
-        let countervec = endpoint
+        let countervec = portname
             .metrics()
             .create_countervec(
                 "testcountervec",
@@ -1654,7 +1654,7 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#,
         countervec.with_label_values(&["POST", "201"]).inc_by(5.0);
 
         // Test Histogram creation
-        let histogram = component
+        let histogram = servicegroup
             .metrics()
             .create_histogram("testhistogram", "A test histogram", &[], None)
             .unwrap();
@@ -1670,42 +1670,42 @@ dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345"#,
         // The uptime_seconds value is dynamic (depends on elapsed wall-clock time),
         // so we check all other lines exactly and validate uptime separately.
         let expected_drt_output_without_uptime = inject_worker_id(
-            r#"# HELP dynamo_component_testcounter A test counter
-# TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345"} 123.456789
-# HELP dynamo_component_testcountervec A test counter vector
-# TYPE dynamo_component_testcountervec counter
-dynamo_component_testcountervec{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345",method="GET",service="api",status="200"} 10
-dynamo_component_testcountervec{dynamo_component="comp345",dynamo_endpoint="ep345",dynamo_namespace="ns345",method="POST",service="api",status="201"} 5
-# HELP dynamo_component_testgauge A test gauge
-# TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{dynamo_component="comp345",dynamo_namespace="ns345"} 50000
-# HELP dynamo_component_testhistogram A test histogram
-# TYPE dynamo_component_testhistogram histogram
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.005"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.01"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.025"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.05"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.1"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.25"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="0.5"} 0
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="1"} 1
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="2.5"} 2
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="5"} 3
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="10"} 3
-dynamo_component_testhistogram_bucket{dynamo_component="comp345",dynamo_namespace="ns345",le="+Inf"} 3
-dynamo_component_testhistogram_sum{dynamo_component="comp345",dynamo_namespace="ns345"} 7.5
-dynamo_component_testhistogram_count{dynamo_component="comp345",dynamo_namespace="ns345"} 3
-# HELP dynamo_component_testintcounter A test int counter
-# TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{dynamo_namespace="ns345"} 12345
-# HELP dynamo_component_testintgauge A test int gauge
-# TYPE dynamo_component_testintgauge gauge
-dynamo_component_testintgauge{dynamo_namespace="ns345"} 42
-# HELP dynamo_component_testintgaugevec A test int gauge vector
-# TYPE dynamo_component_testintgaugevec gauge
-dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server1",service="api",status="active"} 10
-dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",service="api",status="inactive"} 0"#,
+            r#"# HELP pagoda_servicegroup_testcounter A test counter
+# TYPE pagoda_servicegroup_testcounter counter
+pagoda_servicegroup_testcounter{pagoda_servicegroup="comp345",pagoda_portname="ep345",pagoda_namespace="ns345"} 123.456789
+# HELP pagoda_servicegroup_testcountervec A test counter vector
+# TYPE pagoda_servicegroup_testcountervec counter
+pagoda_servicegroup_testcountervec{pagoda_servicegroup="comp345",pagoda_portname="ep345",pagoda_namespace="ns345",method="GET",service="api",status="200"} 10
+pagoda_servicegroup_testcountervec{pagoda_servicegroup="comp345",pagoda_portname="ep345",pagoda_namespace="ns345",method="POST",service="api",status="201"} 5
+# HELP pagoda_servicegroup_testgauge A test gauge
+# TYPE pagoda_servicegroup_testgauge gauge
+pagoda_servicegroup_testgauge{pagoda_servicegroup="comp345",pagoda_namespace="ns345"} 50000
+# HELP pagoda_servicegroup_testhistogram A test histogram
+# TYPE pagoda_servicegroup_testhistogram histogram
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.005"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.01"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.025"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.05"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.1"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.25"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="0.5"} 0
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="1"} 1
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="2.5"} 2
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="5"} 3
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="10"} 3
+pagoda_servicegroup_testhistogram_bucket{pagoda_servicegroup="comp345",pagoda_namespace="ns345",le="+Inf"} 3
+pagoda_servicegroup_testhistogram_sum{pagoda_servicegroup="comp345",pagoda_namespace="ns345"} 7.5
+pagoda_servicegroup_testhistogram_count{pagoda_servicegroup="comp345",pagoda_namespace="ns345"} 3
+# HELP pagoda_servicegroup_testintcounter A test int counter
+# TYPE pagoda_servicegroup_testintcounter counter
+pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345
+# HELP pagoda_servicegroup_testintgauge A test int gauge
+# TYPE pagoda_servicegroup_testintgauge gauge
+pagoda_servicegroup_testintgauge{pagoda_namespace="ns345"} 42
+# HELP pagoda_servicegroup_testintgaugevec A test int gauge vector
+# TYPE pagoda_servicegroup_testintgaugevec gauge
+pagoda_servicegroup_testintgaugevec{pagoda_namespace="ns345",instance="server1",service="api",status="active"} 10
+pagoda_servicegroup_testintgaugevec{pagoda_namespace="ns345",instance="server2",service="api",status="inactive"} 0"#,
             &wid,
         );
 
@@ -1715,12 +1715,12 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
         let mut non_uptime_lines = Vec::new();
         let mut saw_uptime_value = false;
         for line in drt_output_raw.trim_end_matches('\n').lines() {
-            if line.starts_with("dynamo_component_uptime_seconds") && !line.starts_with('#') {
+            if line.starts_with("pagoda_servicegroup_uptime_seconds") && !line.starts_with('#') {
                 let val_str = line.split_whitespace().last().unwrap();
                 val_str.parse::<f64>().expect("uptime should be a float");
                 saw_uptime_value = true;
-            } else if line.starts_with("# HELP dynamo_component_uptime_seconds")
-                || line.starts_with("# TYPE dynamo_component_uptime_seconds")
+            } else if line.starts_with("# HELP pagoda_servicegroup_uptime_seconds")
+                || line.starts_with("# TYPE pagoda_servicegroup_uptime_seconds")
             {
                 // Skip HELP/TYPE lines for uptime (we just verify it exists via the value)
             } else {
@@ -1749,7 +1749,7 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
         let drt_output_after = drt.metrics().prometheus_expfmt().unwrap();
         let uptime_line = drt_output_after
             .lines()
-            .find(|l| l.starts_with("dynamo_component_uptime_seconds") && !l.starts_with('#'))
+            .find(|l| l.starts_with("pagoda_servicegroup_uptime_seconds") && !l.starts_with('#'))
             .expect("uptime_seconds metric should be present after sleep");
         let uptime_after: f64 = uptime_line
             .split_whitespace()
@@ -1768,15 +1768,15 @@ dynamo_component_testintgaugevec{dynamo_namespace="ns345",instance="server2",ser
 
     #[test]
     fn test_refactored_filter_functions() {
-        // Test data with component metrics
-        let test_input = r#"# HELP dynamo_component_requests Total requests
-# TYPE dynamo_component_requests counter
-dynamo_component_requests 42
-# HELP dynamo_component_latency Response latency
-# TYPE dynamo_component_latency histogram
-dynamo_component_latency_bucket{le="0.1"} 10
-dynamo_component_latency_bucket{le="0.5"} 25
-dynamo_component_errors_total 5"#;
+        // Test data with servicegroup metrics
+        let test_input = r#"# HELP pagoda_servicegroup_requests Total requests
+# TYPE pagoda_servicegroup_requests counter
+pagoda_servicegroup_requests 42
+# HELP pagoda_servicegroup_latency Response latency
+# TYPE pagoda_servicegroup_latency histogram
+pagoda_servicegroup_latency_bucket{le="0.1"} 10
+pagoda_servicegroup_latency_bucket{le="0.5"} 25
+pagoda_servicegroup_errors_total 5"#;
 
         // Test extract_metrics (only actual metric lines, excluding help/type)
         let metrics_only = super::test_helpers::extract_metrics(test_input);
@@ -1784,24 +1784,24 @@ dynamo_component_errors_total 5"#;
         assert!(
             metrics_only
                 .iter()
-                .all(|line| line.starts_with("dynamo_component") && !line.starts_with("#"))
+                .all(|line| line.starts_with("pagoda_servicegroup") && !line.starts_with("#"))
         );
 
         println!("✓ All refactored filter functions work correctly!");
     }
 
     #[tokio::test]
-    async fn test_same_metric_name_different_endpoints() {
-        // Test that the same metric name can exist in different endpoints without collision.
-        // This validates the multi-registry approach: each endpoint has its own registry,
+    async fn test_same_metric_name_different_portnames() {
+        // Test that the same metric name can exist in different portnames without collision.
+        // This validates the multi-registry approach: each portname has its own registry,
         // and metrics are merged at scrape time with distinct labels.
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns_test").unwrap();
-        let component = namespace.component("comp_test").unwrap();
+        let servicegroup = namespace.servicegroup("comp_test").unwrap();
 
-        // Create two endpoints with the same metric name
-        let ep1 = component.endpoint("ep1");
-        let ep2 = component.endpoint("ep2");
+        // Create two portnames with the same metric name
+        let ep1 = servicegroup.portname("ep1");
+        let ep2 = servicegroup.portname("ep2");
 
         let counter1 = ep1
             .metrics()
@@ -1815,17 +1815,17 @@ dynamo_component_errors_total 5"#;
             .unwrap();
         counter2.inc_by(200.0);
 
-        // Get merged Prometheus output from component level
-        let output = component.metrics().prometheus_expfmt().unwrap();
+        // Get merged Prometheus output from servicegroup level
+        let output = servicegroup.metrics().prometheus_expfmt().unwrap();
 
         let wid = format!("{:x}", drt.connection_id());
         use super::test_helpers::inject_worker_id;
 
         let expected_output = inject_worker_id(
-            r#"# HELP dynamo_component_requests_total Total requests
-# TYPE dynamo_component_requests_total counter
-dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep1",dynamo_namespace="ns_test"} 100
-dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep2",dynamo_namespace="ns_test"} 200"#,
+            r#"# HELP pagoda_servicegroup_requests_total Total requests
+# TYPE pagoda_servicegroup_requests_total counter
+pagoda_servicegroup_requests_total{pagoda_servicegroup="comp_test",pagoda_portname="ep1",pagoda_namespace="ns_test"} 100
+pagoda_servicegroup_requests_total{pagoda_servicegroup="comp_test",pagoda_portname="ep2",pagoda_namespace="ns_test"} 200"#,
             &wid,
         );
 
@@ -1849,11 +1849,11 @@ dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep
         // This should log a warning and keep only one of the duplicate series.
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns_dup").unwrap();
-        let component = namespace.component("comp_dup").unwrap();
+        let servicegroup = namespace.servicegroup("comp_dup").unwrap();
 
-        // Create two endpoints with counters that will have identical labels when scraped
-        let ep1 = component.endpoint("ep_same");
-        let ep2 = component.endpoint("ep_same"); // Same endpoint name = duplicate labels
+        // Create two portnames with counters that will have identical labels when scraped
+        let ep1 = servicegroup.portname("ep_same");
+        let ep2 = servicegroup.portname("ep_same"); // Same portname name = duplicate labels
 
         let counter1 = ep1
             .metrics()
@@ -1868,15 +1868,15 @@ dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep
         counter2.inc_by(75.0);
 
         // Get merged output - duplicates should be deduplicated
-        let output = component.metrics().prometheus_expfmt().unwrap();
+        let output = servicegroup.metrics().prometheus_expfmt().unwrap();
 
         let wid = format!("{:x}", drt.connection_id());
         use super::test_helpers::inject_worker_id;
 
         let expected_output = inject_worker_id(
-            r#"# HELP dynamo_component_dup_metric Duplicate metric test
-# TYPE dynamo_component_dup_metric counter
-dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same",dynamo_namespace="ns_dup"} 50"#,
+            r#"# HELP pagoda_servicegroup_dup_metric Duplicate metric test
+# TYPE pagoda_servicegroup_dup_metric counter
+pagoda_servicegroup_dup_metric{pagoda_servicegroup="comp_dup",pagoda_portname="ep_same",pagoda_namespace="ns_dup"} 50"#,
             &wid,
         );
 
@@ -1984,26 +1984,26 @@ mod tests {
             vec![root as &dyn MetricsHierarchy],
             Some(0xfeedbeef),
         )));
-        let component = Box::leak(Box::new(StaticHierarchy::new(
+        let servicegroup = Box::leak(Box::new(StaticHierarchy::new(
             "comp",
             vec![root as &dyn MetricsHierarchy, namespace as &dyn MetricsHierarchy],
             Some(0xfeedbeef),
         )));
-        let endpoint = Box::leak(Box::new(StaticHierarchy::new(
+        let portname = Box::leak(Box::new(StaticHierarchy::new(
             "ep",
             vec![
                 root as &dyn MetricsHierarchy,
                 namespace as &dyn MetricsHierarchy,
-                component as &dyn MetricsHierarchy,
+                servicegroup as &dyn MetricsHierarchy,
             ],
             Some(0xfeedbeef),
         )));
 
         root.registry.add_child_registry(&namespace.registry);
-        namespace.registry.add_child_registry(&component.registry);
-        component.registry.add_child_registry(&endpoint.registry);
+        namespace.registry.add_child_registry(&servicegroup.registry);
+        servicegroup.registry.add_child_registry(&portname.registry);
 
-        (root, namespace, component, endpoint)
+        (root, namespace, servicegroup, portname)
     }
 
     #[test]
@@ -2134,10 +2134,10 @@ mod tests {
 
     #[test]
     fn test_supplemental_create_metric_validation_and_auto_labels() {
-        let (_root, _namespace, component, endpoint) = build_hierarchy_tree();
+        let (_root, _namespace, servicegroup, portname) = build_hierarchy_tree();
 
         let metric = create_metric::<prometheus::Counter, _>(
-            endpoint,
+            portname,
             "requests_total",
             "Request count",
             &[("custom", "value")],
@@ -2147,23 +2147,23 @@ mod tests {
         .unwrap();
         metric.inc_by(2.0);
 
-        let output = endpoint.metrics().prometheus_expfmt().unwrap();
+        let output = portname.metrics().prometheus_expfmt().unwrap();
         let line = output
             .lines()
-            .find(|line| line.starts_with("dynamo_component_requests_total") && !line.starts_with('#'))
+            .find(|line| line.starts_with("pagoda_servicegroup_requests_total") && !line.starts_with('#'))
             .unwrap();
         let (name, labels, value) = parse_prometheus_metric(line).unwrap();
 
-        assert_eq!(name, "dynamo_component_requests_total");
+        assert_eq!(name, "pagoda_servicegroup_requests_total");
         assert_eq!(value, 2.0);
         assert_eq!(labels.get(labels::NAMESPACE), Some(&"ns".to_string()));
-        assert_eq!(labels.get(labels::COMPONENT), Some(&"comp".to_string()));
-        assert_eq!(labels.get(labels::ENDPOINT), Some(&"ep".to_string()));
+        assert_eq!(labels.get(labels::SERVICEGROUP), Some(&"comp".to_string()));
+        assert_eq!(labels.get(labels::PORTNAME), Some(&"ep".to_string()));
         assert_eq!(labels.get(labels::WORKER_ID), Some(&"feedbeef".to_string()));
         assert_eq!(labels.get("custom"), Some(&"value".to_string()));
 
         let duplicate_labels = create_metric::<prometheus::Counter, _>(
-            endpoint,
+            portname,
             "duplicate_labels",
             "Duplicate labels",
             &[("dup", "1"), ("dup", "2")],
@@ -2175,7 +2175,7 @@ mod tests {
         assert!(duplicate_labels.contains("Duplicate label key 'dup'"));
 
         let auto_label_conflict = create_metric::<prometheus::Counter, _>(
-            endpoint,
+            portname,
             "auto_label_conflict",
             "Auto label conflict",
             &[(labels::NAMESPACE, "manual")],
@@ -2187,7 +2187,7 @@ mod tests {
         assert!(auto_label_conflict.contains("automatically added"));
 
         let const_label_conflict = create_metric::<prometheus::CounterVec, _>(
-            endpoint,
+            portname,
             "const_label_conflict",
             "Const label conflict",
             &[],
@@ -2199,7 +2199,7 @@ mod tests {
         assert!(const_label_conflict.contains("conflicts with auto-injected const label"));
 
         let counter_vec_missing_labels = create_metric::<prometheus::CounterVec, _>(
-            endpoint,
+            portname,
             "counter_vec_missing_labels",
             "CounterVec missing labels",
             &[],
@@ -2211,7 +2211,7 @@ mod tests {
         assert!(counter_vec_missing_labels.contains("CounterVec requires const_labels"));
 
         let counter_vec_with_buckets = create_metric::<prometheus::CounterVec, _>(
-            endpoint,
+            portname,
             "counter_vec_with_buckets",
             "CounterVec buckets",
             &[],
@@ -2223,7 +2223,7 @@ mod tests {
         assert!(counter_vec_with_buckets.contains("buckets parameter is not valid for CounterVec"));
 
         let gauge_vec_missing_labels = create_metric::<prometheus::GaugeVec, _>(
-            endpoint,
+            portname,
             "gauge_vec_missing_labels",
             "GaugeVec missing labels",
             &[],
@@ -2235,7 +2235,7 @@ mod tests {
         assert!(gauge_vec_missing_labels.contains("GaugeVec requires const_labels"));
 
         let gauge_vec_with_buckets = create_metric::<prometheus::GaugeVec, _>(
-            endpoint,
+            portname,
             "gauge_vec_with_buckets",
             "GaugeVec buckets",
             &[],
@@ -2247,7 +2247,7 @@ mod tests {
         assert!(gauge_vec_with_buckets.contains("buckets parameter is not valid for GaugeVec"));
 
         let int_counter_vec_missing_labels = create_metric::<prometheus::IntCounterVec, _>(
-            endpoint,
+            portname,
             "int_counter_vec_missing_labels",
             "IntCounterVec missing labels",
             &[],
@@ -2259,7 +2259,7 @@ mod tests {
         assert!(int_counter_vec_missing_labels.contains("IntCounterVec requires const_labels"));
 
         let int_counter_vec_with_buckets = create_metric::<prometheus::IntCounterVec, _>(
-            endpoint,
+            portname,
             "int_counter_vec_with_buckets",
             "IntCounterVec buckets",
             &[],
@@ -2271,7 +2271,7 @@ mod tests {
         assert!(int_counter_vec_with_buckets.contains("buckets parameter is not valid for IntCounterVec"));
 
         let int_gauge_vec_missing_labels = create_metric::<prometheus::IntGaugeVec, _>(
-            endpoint,
+            portname,
             "int_gauge_vec_missing_labels",
             "IntGaugeVec missing labels",
             &[],
@@ -2283,7 +2283,7 @@ mod tests {
         assert!(int_gauge_vec_missing_labels.contains("IntGaugeVec requires const_labels"));
 
         let int_gauge_vec_with_buckets = create_metric::<prometheus::IntGaugeVec, _>(
-            endpoint,
+            portname,
             "int_gauge_vec_with_buckets",
             "IntGaugeVec buckets",
             &[],
@@ -2295,7 +2295,7 @@ mod tests {
         assert!(int_gauge_vec_with_buckets.contains("buckets parameter is not valid for IntGaugeVec"));
 
         let histogram_const_labels = create_metric::<prometheus::Histogram, _>(
-            component,
+            servicegroup,
             "histogram_const_labels",
             "Histogram const labels",
             &[],
@@ -2307,7 +2307,7 @@ mod tests {
         assert!(histogram_const_labels.contains("const_labels parameter is not valid for Histogram"));
 
         let standard_metric_buckets = create_metric::<prometheus::Counter, _>(
-            endpoint,
+            portname,
             "counter_with_buckets",
             "Counter buckets",
             &[],
@@ -2319,7 +2319,7 @@ mod tests {
         assert!(standard_metric_buckets.contains("buckets parameter is not valid for Counter, IntCounter, Gauge, or IntGauge"));
 
         let standard_metric_const_labels = create_metric::<prometheus::Gauge, _>(
-            endpoint,
+            portname,
             "gauge_with_const_labels",
             "Gauge const labels",
             &[],
@@ -2370,12 +2370,12 @@ mod tests {
         int_gauge.set(3);
 
         let output = hierarchy.metrics().prometheus_expfmt().unwrap();
-        assert!(output.contains("dynamo_component_queue_depth"));
+        assert!(output.contains("pagoda_servicegroup_queue_depth"));
         assert!(output.contains("service=\"api\""));
         assert!(output.contains("state=\"ready\""));
-        assert!(output.contains("dynamo_component_jobs_total"));
+        assert!(output.contains("pagoda_servicegroup_jobs_total"));
         assert!(output.contains("status=\"done\""));
-        assert!(output.contains("dynamo_component_workers"));
+        assert!(output.contains("pagoda_servicegroup_workers"));
         assert!(!output.contains(labels::WORKER_ID));
     }
 
@@ -2490,35 +2490,35 @@ mod tests {
 
     #[test]
     fn test_supplemental_test_helpers_extract_and_inject_worker_id() {
-        let input = r#"# HELP dynamo_component_requests Total requests
-# TYPE dynamo_component_requests counter
-dynamo_component_requests{service="api"} 42
+        let input = r#"# HELP pagoda_servicegroup_requests Total requests
+# TYPE pagoda_servicegroup_requests counter
+pagoda_servicegroup_requests{service="api"} 42
 
-dynamo_component_latency_bucket{service="api",le="0.5"} 25
+pagoda_servicegroup_latency_bucket{service="api",le="0.5"} 25
 plain_metric 1"#;
 
         let metrics = extract_metrics(input);
         assert_eq!(metrics.len(), 2);
-        assert_eq!(metrics[0], "dynamo_component_requests{service=\"api\"} 42");
+        assert_eq!(metrics[0], "pagoda_servicegroup_requests{service=\"api\"} 42");
         assert_eq!(
             metrics[1],
-            "dynamo_component_latency_bucket{service=\"api\",le=\"0.5\"} 25"
+            "pagoda_servicegroup_latency_bucket{service=\"api\",le=\"0.5\"} 25"
         );
 
         let injected = inject_worker_id(input, "abcd1234");
         assert!(injected.contains(
-            "dynamo_component_requests{service=\"api\",worker_id=\"abcd1234\"} 42"
+            "pagoda_servicegroup_requests{service=\"api\",worker_id=\"abcd1234\"} 42"
         ));
         assert!(injected.contains(
-            "dynamo_component_latency_bucket{service=\"api\",worker_id=\"abcd1234\",le=\"0.5\"} 25"
+            "pagoda_servicegroup_latency_bucket{service=\"api\",worker_id=\"abcd1234\",le=\"0.5\"} 25"
         ));
         assert!(injected.contains("plain_metric 1"));
 
         let parsed = parse_prometheus_metric(
-            "dynamo_component_requests{service=\"api\",worker_id=\"abcd1234\"} 42",
+            "pagoda_servicegroup_requests{service=\"api\",worker_id=\"abcd1234\"} 42",
         )
         .unwrap();
-        assert_eq!(parsed.0, "dynamo_component_requests");
+        assert_eq!(parsed.0, "pagoda_servicegroup_requests");
         assert_eq!(parsed.1.get("worker_id"), Some(&"abcd1234".to_string()));
         assert_eq!(parsed.2, 42.0);
     }

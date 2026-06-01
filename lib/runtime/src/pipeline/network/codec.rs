@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::codec` —— TwoPart 协议帧编解码器
@@ -13,16 +13,16 @@
 //!   再次导出，让上层 `network::codec::TwoPartCodec` 这样的短路径仍然可用。
 //!
 //! ## 外部契约
-//! - 公开符号（顺序与 lib-copy 严格一致）：
+//! - 公开符号（顺序严格一致）：
 //!   `pub mod zero_copy_decoder`、`pub use two_part::{TwoPartCodec, TwoPartMessage,
 //!   TwoPartMessageType}`、`pub use zero_copy_decoder::{TcpRequestMessageZeroCopy,
-//!   ZeroCopyTcpDecoder}`、`pub struct TcpRequestMessage { pub endpoint_path:
+//!   ZeroCopyTcpDecoder}`、`pub struct TcpRequestMessage { pub portname_path:
 //!   String, pub headers: std::collections::HashMap<String, String>, pub payload:
 //!   Bytes }`、`pub struct TcpResponseMessage { pub data: Bytes }`、
 //!   `pub struct TcpResponseCodec`。
 //! - 公开方法签名（**不可** 修改）：
-//!   - `TcpRequestMessage::new(endpoint_path: String, payload: Bytes) -> Self`
-//!   - `TcpRequestMessage::with_headers(endpoint_path: String, headers:
+//!   - `TcpRequestMessage::new(portname_path: String, payload: Bytes) -> Self`
+//!   - `TcpRequestMessage::with_headers(portname_path: String, headers:
 //!     std::collections::HashMap<String, String>, payload: Bytes) -> Self`
 //!   - `TcpRequestMessage::encode(&self) -> Result<Bytes, std::io::Error>`
 //!   - `TcpRequestMessage::decode(bytes: &Bytes) -> Result<Self, std::io::Error>`
@@ -34,13 +34,13 @@
 //! - `pub headers: std::collections::HashMap<String, String>` —— 必须使用全路径
 //!   `std::collections::HashMap`，与 lib-copy 保持完全一致的 import 风格。
 //! - 二进制线协议字段顺序与字节序为跨进程契约：
-//!   `u16 BE endpoint_len | endpoint_bytes | u16 BE headers_len | headers_json |
+//!   `u16 BE portname_len | portname_bytes | u16 BE headers_len | headers_json |
 //!    u32 BE payload_len | payload_bytes`；
 //!   响应帧：`u32 BE data_len | data_bytes`。
 //! - `TcpResponseCodec` 既要在 `Encoder` 上拒绝超 `max_message_size`，也要在 `Decoder`
 //!   上同步拒绝（双向防御）；`max_message_size` 与 `total_len = 4 + data_len` 对比。
 //! - 错误语义：
-//!   - 长度字段（endpoint / headers / payload）超出对应整数宽度 → `InvalidInput`；
+//!   - 长度字段（portname / headers / payload）超出对应整数宽度 → `InvalidInput`；
 //!   - 缓冲不够长 / 缺字节 → `UnexpectedEof`；
 //!   - UTF-8 失败 / JSON 失败 / 超 `max_message_size` → `InvalidData`。
 //!
@@ -83,7 +83,7 @@ pub use zero_copy_decoder::{TcpRequestMessageZeroCopy, ZeroCopyTcpDecoder};
 
 /// 线协议字段宽度集中定义；任何对这些常量的修改都会破坏跨进程兼容性。
 mod wire {
-    /// 请求帧 endpoint 长度字段（u16 BE）。
+    /// 请求帧 portname 长度字段（u16 BE）。
     pub(super) const ENDPOINT_LEN_WIDTH: usize = 2;
     /// 请求帧 headers 长度字段（u16 BE）。
     pub(super) const HEADERS_LEN_WIDTH: usize = 2;
@@ -210,7 +210,7 @@ impl<'a> FrameCursor<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TcpRequestLayout {
-    endpoint: std::ops::Range<usize>,
+    portname: std::ops::Range<usize>,
     headers: std::ops::Range<usize>,
     payload: std::ops::Range<usize>,
     total_len: usize,
@@ -220,12 +220,12 @@ struct TcpRequestLayout {
 ///
 /// 通过校验后返回最终序列化所需的总字节数，用于一次性 `BytesMut::with_capacity`。
 fn validate_request_encode_lengths(
-    endpoint_len: usize,
+    portname_len: usize,
     headers_len: usize,
     payload_len: usize,
 ) -> Result<usize, std::io::Error> {
-    if endpoint_len > u16::MAX as usize {
-        return Err(length_overflow("Endpoint path too long", endpoint_len));
+    if portname_len > u16::MAX as usize {
+        return Err(length_overflow("PortName path too long", portname_len));
     }
     if headers_len > u16::MAX as usize {
         return Err(length_overflow("Headers too large", headers_len));
@@ -235,7 +235,7 @@ fn validate_request_encode_lengths(
     }
 
     let header_overhead = wire::ENDPOINT_LEN_WIDTH
-        + endpoint_len
+        + portname_len
         + wire::HEADERS_LEN_WIDTH
         + headers_len
         + wire::PAYLOAD_LEN_WIDTH;
@@ -252,8 +252,8 @@ fn validate_request_encode_lengths(
 fn parse_request_layout(bytes: &[u8]) -> Result<TcpRequestLayout, std::io::Error> {
     let mut cur = FrameCursor::new(bytes);
 
-    let endpoint_len = cur.read_u16_be("Not enough bytes for endpoint path length")? as usize;
-    let endpoint = cur.skip(endpoint_len, "Not enough bytes for endpoint path")?;
+    let portname_len = cur.read_u16_be("Not enough bytes for portname path length")? as usize;
+    let portname = cur.skip(portname_len, "Not enough bytes for portname path")?;
 
     let headers_len = cur.read_u16_be("Not enough bytes for headers length")? as usize;
     let headers = cur.skip(headers_len, "Not enough bytes for headers")?;
@@ -272,7 +272,7 @@ fn parse_request_layout(bytes: &[u8]) -> Result<TcpRequestLayout, std::io::Error
     }
 
     Ok(TcpRequestLayout {
-        endpoint,
+        portname,
         headers,
         payload: payload_start..total_len,
         total_len,
@@ -281,38 +281,38 @@ fn parse_request_layout(bytes: &[u8]) -> Result<TcpRequestLayout, std::io::Error
 
 // === SECTION: TcpRequestMessage ===
 
-/// TCP request plane protocol message with endpoint routing and trace headers
+/// TCP request plane protocol message with portname routing and trace headers
 ///
 /// Wire format:
-/// - endpoint_path_len: u16 (big-endian)
-/// - endpoint_path: UTF-8 string
+/// - portname_path_len: u16 (big-endian)
+/// - portname_path: UTF-8 string
 /// - headers_len: u16 (big-endian)
 /// - headers: JSON-encoded HashMap<String, String>
 /// - payload_len: u32 (big-endian)
 /// - payload: bytes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpRequestMessage {
-    pub endpoint_path: String,
+    pub portname_path: String,
     pub headers: std::collections::HashMap<String, String>,
     pub payload: Bytes,
 }
 
 impl TcpRequestMessage {
-    pub fn new(endpoint_path: String, payload: Bytes) -> Self {
+    pub fn new(portname_path: String, payload: Bytes) -> Self {
         Self {
-            endpoint_path,
+            portname_path,
             headers: std::collections::HashMap::new(),
             payload,
         }
     }
 
     pub fn with_headers(
-        endpoint_path: String,
+        portname_path: String,
         headers: std::collections::HashMap<String, String>,
         payload: Bytes,
     ) -> Self {
         Self {
-            endpoint_path,
+            portname_path,
             headers,
             payload,
         }
@@ -320,8 +320,8 @@ impl TcpRequestMessage {
 
     /// Encode message to bytes
     pub fn encode(&self) -> Result<Bytes, std::io::Error> {
-        let endpoint_bytes = self.endpoint_path.as_bytes();
-        let endpoint_len = endpoint_bytes.len();
+        let portname_bytes = self.portname_path.as_bytes();
+        let portname_len = portname_bytes.len();
 
         // 头部 JSON 化一次，长度同时用于校验与一次性 reserve。
         let headers_json = serde_json::to_vec(&self.headers).map_err(|e| {
@@ -333,11 +333,11 @@ impl TcpRequestMessage {
         let headers_len = headers_json.len();
 
         let total_len =
-            validate_request_encode_lengths(endpoint_len, headers_len, self.payload.len())?;
+            validate_request_encode_lengths(portname_len, headers_len, self.payload.len())?;
 
         let mut buf = BytesMut::with_capacity(total_len);
-        buf.put_u16(endpoint_len as u16);
-        buf.put_slice(endpoint_bytes);
+        buf.put_u16(portname_len as u16);
+        buf.put_slice(portname_bytes);
         buf.put_u16(headers_len as u16);
         buf.put_slice(&headers_json);
         buf.put_u32(self.payload.len() as u32);
@@ -350,9 +350,9 @@ impl TcpRequestMessage {
     pub fn decode(bytes: &Bytes) -> Result<Self, std::io::Error> {
         let layout = parse_request_layout(bytes)?;
 
-        // endpoint：必须复制做 UTF-8 校验，但只复制 endpoint 段（通常很短）。
-        let endpoint_path = String::from_utf8(bytes[layout.endpoint.clone()].to_vec())
-            .map_err(|e| invalid_data(format!("Invalid UTF-8 in endpoint path: {e}")))?;
+        // portname：必须复制做 UTF-8 校验，但只复制 portname 段（通常很短）。
+        let portname_path = String::from_utf8(bytes[layout.portname.clone()].to_vec())
+            .map_err(|e| invalid_data(format!("Invalid UTF-8 in portname path: {e}")))?;
 
         // headers：JSON 反序列化必然要消费切片，但 payload 段完全 zero-copy。
         let headers: std::collections::HashMap<String, String> =
@@ -362,7 +362,7 @@ impl TcpRequestMessage {
         let payload = bytes.slice(layout.payload);
 
         Ok(Self {
-            endpoint_path,
+            portname_path,
             headers,
             payload,
         })
@@ -501,7 +501,7 @@ impl Encoder<TcpResponseMessage> for TcpResponseCodec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TcpRequestWireHeader {
-    endpoint_len: usize,
+    portname_len: usize,
     headers_len: usize,
     payload_len: usize,
     header_size: usize,
@@ -509,16 +509,16 @@ struct TcpRequestWireHeader {
 }
 
 impl TcpRequestWireHeader {
-    fn endpoint_start(&self) -> usize {
+    fn portname_start(&self) -> usize {
         wire::ENDPOINT_LEN_WIDTH
     }
 
-    fn endpoint_end(&self) -> usize {
-        self.endpoint_start() + self.endpoint_len
+    fn portname_end(&self) -> usize {
+        self.portname_start() + self.portname_len
     }
 
     fn headers_start(&self) -> usize {
-        self.endpoint_end() + wire::HEADERS_LEN_WIDTH
+        self.portname_end() + wire::HEADERS_LEN_WIDTH
     }
 
     fn headers_end(&self) -> usize {
@@ -530,25 +530,25 @@ impl TcpRequestWireHeader {
     }
 }
 
-fn tcp_request_endpoint_len(bytes: &[u8]) -> Result<usize, std::io::Error> {
+fn tcp_request_portname_len(bytes: &[u8]) -> Result<usize, std::io::Error> {
     let mut cur = FrameCursor::new(bytes);
-    Ok(cur.read_u16_be("Not enough bytes for endpoint path length")? as usize)
+    Ok(cur.read_u16_be("Not enough bytes for portname path length")? as usize)
 }
 
 fn tcp_request_headers_len(
     bytes: &[u8],
-    endpoint_len: usize,
+    portname_len: usize,
 ) -> Result<usize, std::io::Error> {
     let mut cur = FrameCursor::new(bytes);
-    let _ = cur.read_u16_be("Not enough bytes for endpoint path length")?;
-    cur.skip(endpoint_len, "Not enough bytes for endpoint path")?;
+    let _ = cur.read_u16_be("Not enough bytes for portname path length")?;
+    cur.skip(portname_len, "Not enough bytes for portname path")?;
     cur.read_u16_be("Not enough bytes for headers length")
         .map(|v| v as usize)
 }
 
-fn tcp_request_header_size(endpoint_len: usize, headers_len: usize) -> usize {
+fn tcp_request_header_size(portname_len: usize, headers_len: usize) -> usize {
     wire::ENDPOINT_LEN_WIDTH
-        + endpoint_len
+        + portname_len
         + wire::HEADERS_LEN_WIDTH
         + headers_len
         + wire::PAYLOAD_LEN_WIDTH
@@ -560,8 +560,8 @@ fn parse_tcp_request_frame_header(
     bytes: &[u8],
 ) -> Result<TcpRequestWireHeader, std::io::Error> {
     let mut cur = FrameCursor::new(bytes);
-    let endpoint_len = cur.read_u16_be("Not enough bytes for endpoint path length")? as usize;
-    cur.skip(endpoint_len, "Not enough bytes for endpoint path")?;
+    let portname_len = cur.read_u16_be("Not enough bytes for portname path length")? as usize;
+    cur.skip(portname_len, "Not enough bytes for portname path")?;
     let headers_len = cur.read_u16_be("Not enough bytes for headers length")? as usize;
     cur.skip(headers_len, "Not enough bytes for headers")?;
     let payload_len = cur.read_u32_be("Not enough bytes for payload length")? as usize;
@@ -571,7 +571,7 @@ fn parse_tcp_request_frame_header(
     })?;
 
     Ok(TcpRequestWireHeader {
-        endpoint_len,
+        portname_len,
         headers_len,
         payload_len,
         header_size,
@@ -598,22 +598,22 @@ mod tests {
     //!
     //! | 用例 | 覆盖目标 |
     //! |------|----------|
-    //! | `test_tcp_request_encode_decode` | request 完整 round-trip（lib-copy 名） |
-    //! | `test_tcp_request_empty_payload` | payload 长度=0（lib-copy 名） |
-    //! | `test_tcp_request_large_payload` | 1MB payload（lib-copy 名） |
-    //! | `test_tcp_request_decode_truncated` | 末尾截断 → UnexpectedEof（lib-copy 名） |
-    //! | `test_tcp_request_decode_invalid_endpoint_utf8` | UTF-8 错误 → InvalidData（lib-copy 名） |
-    //! | `test_tcp_request_decode_invalid_headers_json` | JSON 错误 → InvalidData（lib-copy 名） |
-    //! | `test_tcp_request_empty_endpoint_path` | endpoint=""（lib-copy 名） |
+    //! | `test_tcp_request_encode_decode` | request 完整 round-trip |
+    //! | `test_tcp_request_empty_payload` | payload 长度=0 |
+    //! | `test_tcp_request_large_payload` | 1MB payload |
+    //! | `test_tcp_request_decode_truncated` | 末尾截断 → UnexpectedEof |
+    //! | `test_tcp_request_decode_invalid_portname_utf8` | UTF-8 错误 → InvalidData |
+    //! | `test_tcp_request_decode_invalid_headers_json` | JSON 错误 → InvalidData |
+    //! | `test_tcp_request_empty_portname_path` | portname=""（lib-copy 名） |
     //! | `test_tcp_response_encode_decode` | response round-trip（lib-copy 名） |
     //! | `test_tcp_response_empty` | data=""（lib-copy 名） |
     //! | `test_tcp_response_decode_truncated` | 4 字节长度都不够（lib-copy 名） |
-    //! | `test_tcp_request_unicode_endpoint` | endpoint 多字节字符（lib-copy 名） |
+    //! | `test_tcp_request_unicode_portname` | portname 多字节字符（lib-copy 名） |
     //! | `test_tcp_response_codec` | codec encode + decode（lib-copy 名） |
     //! | `test_tcp_response_codec_partial` | 分片喂入返回 None（lib-copy 名） |
     //! | `test_tcp_response_codec_max_size` | encode 端 max-size 拒绝（lib-copy 名） |
     //! | `test_tcp_request_with_headers_round_trip` | 多 header 完整保留 |
-    //! | `test_tcp_request_endpoint_length_overflow` | endpoint > u16::MAX → InvalidInput |
+    //! | `test_tcp_request_portname_length_overflow` | portname > u16::MAX → InvalidInput |
     //! | `test_tcp_request_headers_length_overflow` | headers > u16::MAX → InvalidInput |
     //! | `test_tcp_request_decode_trailing_bytes_ignored` | 末尾多余字节不破坏 decode |
     //! | `test_tcp_request_decode_byte_by_byte` | 流式逐字节，仅完整时才能 decode |
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn test_tcp_request_encode_decode() {
         let msg = TcpRequestMessage::new(
-            "test.endpoint".to_string(),
+            "test.portname".to_string(),
             Bytes::from(vec![1, 2, 3, 4, 5]),
         );
         let encoded = msg.encode().unwrap();
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_request_decode_invalid_endpoint_utf8() {
+    fn test_tcp_request_decode_invalid_portname_utf8() {
         let mut encoded = BytesMut::new();
         encoded.put_u16(2);
         encoded.put_slice(&[0xff, 0xff]);
@@ -697,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_request_empty_endpoint_path() {
+    fn test_tcp_request_empty_portname_path() {
         let msg = TcpRequestMessage::new(String::new(), Bytes::from_static(b"payload"));
         let encoded = msg.encode().unwrap();
         let decoded = TcpRequestMessage::decode(&encoded).unwrap();
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_request_unicode_endpoint() {
+    fn test_tcp_request_unicode_portname() {
         let msg = TcpRequestMessage::new("тест.端点".to_string(), Bytes::from(vec![1, 2, 3]));
         let encoded = msg.encode().unwrap();
         let decoded = TcpRequestMessage::decode(&encoded).unwrap();
@@ -775,7 +775,7 @@ mod tests {
     fn test_tcp_request_with_headers_round_trip() {
         let mut headers = std::collections::HashMap::new();
         headers.insert("trace-id".to_string(), "abc123".to_string());
-        headers.insert("x-dynamo-request-id".to_string(), "req-7".to_string());
+        headers.insert("x-pagoda-request-id".to_string(), "req-7".to_string());
         headers.insert("multi-byte".to_string(), "值\u{1F600}".to_string());
 
         let msg = TcpRequestMessage::with_headers(
@@ -789,13 +789,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_request_endpoint_length_overflow() {
-        // 直接构造一条 endpoint 超 u16::MAX 的请求；encode 必须 InvalidInput。
-        let endpoint = "x".repeat(u16::MAX as usize + 1);
-        let msg = TcpRequestMessage::new(endpoint, Bytes::new());
+    fn test_tcp_request_portname_length_overflow() {
+        // 直接构造一条 portname 超 u16::MAX 的请求；encode 必须 InvalidInput。
+        let portname = "x".repeat(u16::MAX as usize + 1);
+        let msg = TcpRequestMessage::new(portname, Bytes::new());
         let err = msg.encode().unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("Endpoint path too long"));
+        assert!(err.to_string().contains("PortName path too long"));
     }
 
     #[test]

@@ -1,16 +1,16 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 原生 Kubernetes 对象的高层读写操作
 //!
 //! ## 职责
 //!
-//! 本模块是 **业务组装层**，负责将 Dynamo 的三类发现对象生命周期
+//! 本模块是 **业务组装层**，负责将 Pagoda 的三类发现对象生命周期
 //! 映射到原生 K8s 资源的 CRUD 操作：
 //!
-//! | Dynamo 对象      | K8s 原生对象              | 生命周期管理              |
+//! | Pagoda 对象      | K8s 原生对象              | 生命周期管理              |
 //! |-----------------|--------------------------|--------------------------|
-//! | `Endpoint`      | `Service` + `EndpointSlice` | Pod `ownerRef` → GC    |
+//! | `PortName`      | `Service` + `EndpointSlice` | Pod `ownerRef` → GC    |
 //! | `Model`         | `ConfigMap`              | Pod `ownerRef` → GC      |
 //! | `EventChannel`  | `Lease`                  | Pod `ownerRef` + TTL     |
 //!
@@ -19,14 +19,6 @@
 //! - `service_registry` = **纯构建层**，负责把参数转换为 K8s struct，不含业务语义
 //! - `objects` = **业务组装层**，负责填充 annotations、调用 service_registry、处理合并逻辑
 //!
-//! ## 关键设计差异（与旧版相比）
-//!
-//! | 旧版风格 | 新版风格 |
-//! |---------|---------|
-//! | `match x { Some(v) => v, None => return Ok(None) }` | `?` + `ok_or_else` / `Option::and_then` |
-//! | 重复的 `sanitize` / `short_hash` 定义 | 统一从 `super::utils` 引用 |
-//! | 分散的 `api.delete` + 404 检查 | `NotFoundOk` trait 扩展，一行调用 |
-//! | 直接读 `BTreeMap` | `AnnotationReader` 辅助结构体封装 |
 
 use std::collections::BTreeMap;
 
@@ -42,7 +34,7 @@ use kube::{
 };
 
 use crate::{
-    component::{Instance, TransportType},
+    servicegroup::{Instance, TransportType},
     discovery::{DiscoveryInstance, EventTransport},
 };
 
@@ -50,7 +42,7 @@ use super::{
     service_registry::{
         EndpointSliceName, MANAGED_BY_LABEL, MANAGED_BY_VALUE, Registration, SERVICE_NAME_LABEL,
         apply_endpoint_slice, apply_service, build_endpoint_slice, build_service,
-        component_service_name, delete_endpoint_slice,
+        servicegroup_service_name, delete_endpoint_slice,
     },
     utils::{PodInfo, hash_pod_name, sanitize, short_hash},
 };
@@ -58,37 +50,37 @@ use super::{
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
 /// server-side apply 的 field manager 名称，标识字段所有权归属。
-const FIELD_MANAGER: &str = "dynamo-worker-native";
+const FIELD_MANAGER: &str = "pagoda-worker-native";
 
-/// 标识 Dynamo 对象类型的 label key，用于区分 Endpoint / Model / EventChannel。
+/// 标识 Pagoda 对象类型的 label key，用于区分 PortName / Model / EventChannel。
 ///
 /// 在同一 namespace 中，Model ConfigMap 和 EventChannel Lease 分别携带不同的
 /// `KIND_LABEL` 值，使 watch 可以通过 label selector 精确过滤目标对象类型。
-pub const KIND_LABEL: &str = "nvidia.com/dynamo-kind";
+pub const KIND_LABEL: &str = "bedicloud.com/pagoda-kind";
 
-/// [`KIND_LABEL`] 的 Model 值：标识此对象是 Dynamo Model ConfigMap。
+/// [`KIND_LABEL`] 的 Model 值：标识此对象是 Pagoda Model ConfigMap。
 pub const MODEL_KIND_VALUE: &str = "model";
 
-/// [`KIND_LABEL`] 的 EventChannel 值：标识此对象是 Dynamo EventChannel Lease。
+/// [`KIND_LABEL`] 的 EventChannel 值：标识此对象是 Pagoda EventChannel Lease。
 pub const EVENT_CHANNEL_KIND_VALUE: &str = "event-channel";
 
-/// EndpointSlice annotation：Dynamo namespace 路径。
-const ANNOTATION_NAMESPACE: &str = "nvidia.com/dynamo-namespace";
-/// EndpointSlice annotation：Dynamo component 路径。
-const ANNOTATION_COMPONENT: &str = "nvidia.com/dynamo-component";
-/// EndpointSlice annotation：Dynamo endpoint 名称。
-const ANNOTATION_ENDPOINT: &str = "nvidia.com/dynamo-endpoint";
-/// Lease annotation：Dynamo topic 名称。
-const ANNOTATION_TOPIC: &str = "nvidia.com/dynamo-topic";
+/// EndpointSlice annotation：Pagoda namespace 路径。
+const ANNOTATION_NAMESPACE: &str = "bedicloud.com/pagoda-namespace";
+/// EndpointSlice annotation：Pagoda servicegroup 路径。
+const ANNOTATION_COMPONENT: &str = "bedicloud.com/pagoda-servicegroup";
+/// EndpointSlice annotation：Pagoda portname 名称。
+const ANNOTATION_ENDPOINT: &str = "bedicloud.com/pagoda-portname";
+/// Lease annotation：Pagoda topic 名称。
+const ANNOTATION_TOPIC: &str = "bedicloud.com/pagoda-topic";
 /// EndpointSlice / Lease annotation：序列化的 `TransportType` / `EventTransport` JSON。
-const ANNOTATION_TRANSPORT: &str = "nvidia.com/dynamo-transport";
+const ANNOTATION_TRANSPORT: &str = "bedicloud.com/pagoda-transport";
 
 /// ConfigMap `data` 字段中的 namespace key。
 const DATA_NAMESPACE: &str = "namespace";
-/// ConfigMap `data` 字段中的 component key。
-const DATA_COMPONENT: &str = "component";
-/// ConfigMap `data` 字段中的 endpoint key。
-const DATA_ENDPOINT: &str = "endpoint";
+/// ConfigMap `data` 字段中的 servicegroup key。
+const DATA_COMPONENT: &str = "servicegroup";
+/// ConfigMap `data` 字段中的 portname key。
+const DATA_ENDPOINT: &str = "portname";
 /// ConfigMap `data` 字段中的 instance_id key（16 进制字符串）。
 const DATA_INSTANCE_ID: &str = "instance_id";
 /// ConfigMap `data` 字段中的 model_suffix key（LoRA adapter 标识）。
@@ -176,28 +168,28 @@ impl<'a> AnnotationReader<'a> {
     }
 }
 
-// ─── Endpoint 注册 / 注销 ────────────────────────────────────────────────────
+// ─── PortName 注册 / 注销 ────────────────────────────────────────────────────
 
-/// 在 Kubernetes 中注册一个 endpoint 实例（`Service` + `EndpointSlice`）。
+/// 在 Kubernetes 中注册一个 portname 实例（`Service` + `EndpointSlice`）。
 ///
 /// ## 设计意图
 ///
-/// 将 Dynamo endpoint 实例映射为 K8s `Service`（共享） + `EndpointSlice`（Per-Pod）对。
-/// 同一 component 的所有 endpoint 共享一个 Service（多端口），
-/// 每个 `(component, endpoint, pod)` 三元组对应一个独立的 EndpointSlice。
+/// 将 Pagoda portname 实例映射为 K8s `Service`（共享） + `EndpointSlice`（Per-Pod）对。
+/// 同一 servicegroup 的所有 portname 共享一个 Service（多端口），
+/// 每个 `(servicegroup, portname, pod)` 三元组对应一个独立的 EndpointSlice。
 ///
 /// ## 处理过程
 ///
 /// 1. 从 `instance.transport` 推断端口号
-/// 2. 用 [`Registration::builder`] 链式填充参数（Dynamo annotations 作为额外字段）
-/// 3. [`apply_or_merge_endpoint_service`]：create-or-merge Service（合并已有端口）
+/// 2. 用 [`Registration::builder`] 链式填充参数（Pagoda annotations 作为额外字段）
+/// 3. [`apply_or_merge_portname_service`]：create-or-merge Service（合并已有端口）
 /// 4. [`apply_endpoint_slice`]：幂等 upsert EndpointSlice
 ///
 /// # 参数
 /// - `kube_client`：K8s API 客户端
 /// - `pod_info`：注册方 Pod 的身份信息
-/// - `instance`：待注册的 Dynamo endpoint 实例
-pub async fn register_endpoint_instance(
+/// - `instance`：待注册的 Pagoda portname 实例
+pub async fn register_portname_instance(
     kube_client: &KubeClient,
     pod_info: &PodInfo,
     instance: &Instance,
@@ -205,71 +197,71 @@ pub async fn register_endpoint_instance(
     let port = transport_port_hint(&instance.transport, pod_info.system_port as i32);
 
     let reg = Registration::builder(
-        component_service_name(&instance.component),
-        &instance.endpoint,
+        servicegroup_service_name(&instance.servicegroup),
+        &instance.portname,
         port,
         &pod_info.pod_name,
         &pod_info.pod_uid,
         &pod_info.pod_ip,
     )
     .service_annotation(ANNOTATION_NAMESPACE, &instance.namespace)
-    .service_annotation(ANNOTATION_COMPONENT, &instance.component)
-    .endpoint_annotation(ANNOTATION_NAMESPACE, &instance.namespace)
-    .endpoint_annotation(ANNOTATION_COMPONENT, &instance.component)
-    .endpoint_annotation(ANNOTATION_ENDPOINT, &instance.endpoint)
-    .endpoint_annotation(ANNOTATION_TRANSPORT, serde_json::to_string(&instance.transport)?)
+    .service_annotation(ANNOTATION_COMPONENT, &instance.servicegroup)
+    .portname_annotation(ANNOTATION_NAMESPACE, &instance.namespace)
+    .portname_annotation(ANNOTATION_COMPONENT, &instance.servicegroup)
+    .portname_annotation(ANNOTATION_ENDPOINT, &instance.portname)
+    .portname_annotation(ANNOTATION_TRANSPORT, serde_json::to_string(&instance.transport)?)
     .build()?;
 
     let service = build_service(&reg);
-    apply_or_merge_endpoint_service(kube_client, &instance.namespace, &service).await?;
+    apply_or_merge_portname_service(kube_client, &instance.namespace, &service).await?;
 
     let slice = build_endpoint_slice(&reg);
     apply_endpoint_slice(kube_client, &instance.namespace, &slice).await
 }
 
-/// 从 Kubernetes 中注销一个 endpoint 实例。
+/// 从 Kubernetes 中注销一个 portname 实例。
 ///
 /// ## 设计意图
 ///
 /// 主动注销时立即删除 EndpointSlice，触发 watch 的 Removed 事件，
 /// 比等待 Pod 死亡后 GC 响应更及时。
-/// 同时清理 Service 中该 endpoint 对应的端口，若 Service 无剩余端口则删除 Service。
+/// 同时清理 Service 中该 portname 对应的端口，若 Service 无剩余端口则删除 Service。
 ///
 /// # 参数
 /// - `kube_client`：K8s API 客户端
 /// - `pod_name`：注销方 Pod 名称（用于计算 EndpointSlice 名称）
-/// - `namespace`：Dynamo namespace 字符串
-/// - `component`：Dynamo component 字符串
-/// - `endpoint`：Dynamo endpoint 字符串
-pub async fn unregister_endpoint_instance(
+/// - `namespace`：Pagoda namespace 字符串
+/// - `servicegroup`：Pagoda servicegroup 字符串
+/// - `portname`：Pagoda portname 字符串
+pub async fn unregister_portname_instance(
     kube_client: &KubeClient,
     pod_name: &str,
     namespace: &str,
-    component: &str,
-    endpoint: &str,
+    servicegroup: &str,
+    portname: &str,
 ) -> Result<()> {
-    let service_name = component_service_name(component);
-    let slice_name = EndpointSliceName::new(&service_name, endpoint, pod_name);
+    let service_name = servicegroup_service_name(servicegroup);
+    let slice_name = EndpointSliceName::new(&service_name, portname, pod_name);
     delete_endpoint_slice(kube_client, namespace, slice_name.as_str()).await?;
-    cleanup_endpoint_service_port(
-        kube_client, namespace, &service_name, endpoint, slice_name.as_str(),
+    cleanup_portname_service_port(
+        kube_client, namespace, &service_name, portname, slice_name.as_str(),
     )
     .await
 }
 
-/// 从 `Service` + `EndpointSlice` 恢复一个 [`DiscoveryInstance::Endpoint`]。
+/// 从 `Service` + `EndpointSlice` 恢复一个 [`DiscoveryInstance::PortName`]。
 ///
 /// ## 设计意图
 ///
-/// daemon 在聚合快照时，从 `EndpointSlice`（含 transport）+ `Service`（含 namespace/component）
+/// daemon 在聚合快照时，从 `EndpointSlice`（含 transport）+ `Service`（含 namespace/servicegroup）
 /// 联合恢复完整的 `DiscoveryInstance`。
 ///
 /// 使用 [`AnnotationReader`] 消除重复的 `match ... return Ok(None)` 模式。
 ///
 /// ## 处理过程
 ///
-/// 1. 从 Service annotations 读取 `namespace`、`component`
-/// 2. 从 EndpointSlice annotations 读取 `endpoint`、`transport`
+/// 1. 从 Service annotations 读取 `namespace`、`servicegroup`
+/// 2. 从 EndpointSlice annotations 读取 `portname`、`transport`
 /// 3. 验证 EndpointSlice 的 `SERVICE_NAME_LABEL` 和 `MANAGED_BY_LABEL`
 /// 4. 验证 Service 端口定义与 EndpointSlice 端口定义一致
 /// 5. 从 EndpointSlice `targetRef` 提取 `pod_name`，计算 `instance_id`
@@ -292,14 +284,14 @@ pub fn endpoint_instance_from_service_and_slice(
         Some(v) => v,
         None => return Ok(None),
     };
-    let component = match svc_ann.optional(ANNOTATION_COMPONENT) {
+    let servicegroup = match svc_ann.optional(ANNOTATION_COMPONENT) {
         Some(v) => v,
         None => return Ok(None),
     };
 
     // ── 2. 从 EndpointSlice 提取元数据 ──────────────────────────────────────
     let slice_ann = AnnotationReader::new(slice.metadata.annotations.as_ref());
-    let endpoint = match slice_ann.optional(ANNOTATION_ENDPOINT) {
+    let portname = match slice_ann.optional(ANNOTATION_ENDPOINT) {
         Some(v) => v,
         None => return Ok(None),
     };
@@ -316,9 +308,9 @@ pub fn endpoint_instance_from_service_and_slice(
     };
     let belongs_to_service =
         slice_labels.get(SERVICE_NAME_LABEL).map(String::as_str) == Some(service_name);
-    let managed_by_dynamo =
+    let managed_by_pagoda =
         slice_labels.get(MANAGED_BY_LABEL).map(String::as_str) == Some(MANAGED_BY_VALUE);
-    if !belongs_to_service || !managed_by_dynamo {
+    if !belongs_to_service || !managed_by_pagoda {
         return Ok(None);
     }
 
@@ -326,7 +318,7 @@ pub fn endpoint_instance_from_service_and_slice(
     let svc_port = service
         .spec.as_ref()
         .and_then(|s| s.ports.as_ref())
-        .and_then(|ports| ports.iter().find(|p| p.name.as_deref() == Some(endpoint.as_str())));
+        .and_then(|ports| ports.iter().find(|p| p.name.as_deref() == Some(portname.as_str())));
     let Some(svc_port) = svc_port else {
         return Ok(None);
     };
@@ -347,10 +339,10 @@ pub fn endpoint_instance_from_service_and_slice(
         return Ok(None);
     };
 
-    Ok(Some(DiscoveryInstance::Endpoint(Instance {
+    Ok(Some(DiscoveryInstance::PortName(Instance {
         namespace,
-        component,
-        endpoint,
+        servicegroup,
+        portname,
         instance_id: hash_pod_name(&pod_name),
         transport,
         device_type: None,
@@ -371,7 +363,7 @@ pub fn endpoint_instance_from_service_and_slice(
 ///
 /// 1. 提取 `DiscoveryInstance::Model` 各字段（若类型不符则返回错误）
 /// 2. 生成确定性 ConfigMap 名称
-/// 3. 构建 `data` map（namespace / component / endpoint / instance_id / card.json）
+/// 3. 构建 `data` map（namespace / servicegroup / portname / instance_id / card.json）
 /// 4. 设置 `ownerReference → Pod`，添加 `KIND_LABEL` label
 /// 5. 使用 server-side apply 持久化（幂等 upsert）
 ///
@@ -386,8 +378,8 @@ pub async fn apply_model_config_map(
 ) -> Result<()> {
     let DiscoveryInstance::Model {
         namespace,
-        component,
-        endpoint,
+        servicegroup,
+        portname,
         instance_id,
         card_json,
         model_suffix,
@@ -396,13 +388,13 @@ pub async fn apply_model_config_map(
         return Err(anyhow!("apply_model_config_map 期望 Model instance，收到其他类型"));
     };
 
-    let name = model_config_map_name(component, endpoint, *instance_id, model_suffix.as_deref());
+    let name = model_config_map_name(servicegroup, portname, *instance_id, model_suffix.as_deref());
 
     // 构建 data map：先填必填字段，再条件追加可选字段
     let mut data: BTreeMap<String, String> = [
         (DATA_NAMESPACE, namespace.as_str()),
-        (DATA_COMPONENT, component.as_str()),
-        (DATA_ENDPOINT,  endpoint.as_str()),
+        (DATA_COMPONENT, servicegroup.as_str()),
+        (DATA_ENDPOINT,  portname.as_str()),
         (DATA_INSTANCE_ID, &format!("{:x}", instance_id)),
     ]
     .into_iter()
@@ -437,19 +429,19 @@ pub async fn apply_model_config_map(
 /// # 参数
 /// - `kube_client`：K8s API 客户端
 /// - `namespace`：ConfigMap 所在命名空间
-/// - `component`：Dynamo component 字符串
-/// - `endpoint`：Dynamo endpoint 字符串
+/// - `servicegroup`：Pagoda servicegroup 字符串
+/// - `portname`：Pagoda portname 字符串
 /// - `instance_id`：实例唯一标识符
 /// - `model_suffix`：LoRA adapter 后缀（基础模型为 `None`）
 pub async fn delete_model_config_map(
     kube_client: &KubeClient,
     namespace: &str,
-    component: &str,
-    endpoint: &str,
+    servicegroup: &str,
+    portname: &str,
     instance_id: u64,
     model_suffix: Option<&str>,
 ) -> Result<()> {
-    let name = model_config_map_name(component, endpoint, instance_id, model_suffix);
+    let name = model_config_map_name(servicegroup, portname, instance_id, model_suffix);
     Api::<ConfigMap>::namespaced(kube_client.clone(), namespace)
         .delete(&name, &DeleteParams::default())
         .await
@@ -489,16 +481,16 @@ pub fn model_instance_from_config_map(cm: &ConfigMap) -> Result<Option<Discovery
     };
 
     let namespace   = data_field(DATA_NAMESPACE)?;
-    let component   = data_field(DATA_COMPONENT)?;
-    let endpoint    = data_field(DATA_ENDPOINT)?;
+    let servicegroup   = data_field(DATA_COMPONENT)?;
+    let portname    = data_field(DATA_ENDPOINT)?;
     let instance_id = u64::from_str_radix(&data_field(DATA_INSTANCE_ID)?, 16)?;
     let card_json   = serde_json::from_str(&data_field(DATA_CARD_JSON)?)?;
     let model_suffix = data.get(DATA_MODEL_SUFFIX).cloned();
 
     Ok(Some(DiscoveryInstance::Model {
         namespace,
-        component,
-        endpoint,
+        servicegroup,
+        portname,
         instance_id,
         card_json,
         model_suffix,
@@ -520,7 +512,7 @@ pub fn model_instance_from_config_map(cm: &ConfigMap) -> Result<Option<Discovery
 /// 1. 提取 `DiscoveryInstance::EventChannel` 各字段
 /// 2. 生成确定性 Lease 名称
 /// 3. 构建 `LeaseSpec`（`holderIdentity=instance_id_hex`，`leaseDurationSeconds=30`）
-/// 4. 携带 namespace / component / topic / transport annotations
+/// 4. 携带 namespace / servicegroup / topic / transport annotations
 /// 5. 使用 server-side apply 持久化
 ///
 /// # 参数
@@ -534,7 +526,7 @@ pub async fn apply_event_lease(
 ) -> Result<()> {
     let DiscoveryInstance::EventChannel {
         namespace,
-        component,
+        servicegroup,
         topic,
         instance_id,
         transport,
@@ -543,7 +535,7 @@ pub async fn apply_event_lease(
         return Err(anyhow!("apply_event_lease 期望 EventChannel instance，收到其他类型"));
     };
 
-    let name = event_lease_name(component, topic, *instance_id);
+    let name = event_lease_name(servicegroup, topic, *instance_id);
 
     let lease = Lease {
         metadata: ObjectMeta {
@@ -553,7 +545,7 @@ pub async fn apply_event_lease(
             ])),
             annotations: Some(BTreeMap::from([
                 (ANNOTATION_NAMESPACE.to_owned(), namespace.clone()),
-                (ANNOTATION_COMPONENT.to_owned(), component.clone()),
+                (ANNOTATION_COMPONENT.to_owned(), servicegroup.clone()),
                 (ANNOTATION_TOPIC.to_owned(),     topic.clone()),
                 (ANNOTATION_TRANSPORT.to_owned(), serde_json::to_string(transport)?),
             ])),
@@ -583,17 +575,17 @@ pub async fn apply_event_lease(
 /// # 参数
 /// - `kube_client`：K8s API 客户端
 /// - `namespace`：Lease 所在命名空间
-/// - `component`：Dynamo component 字符串
+/// - `servicegroup`：Pagoda servicegroup 字符串
 /// - `topic`：事件通道 topic 字符串
 /// - `instance_id`：实例唯一标识符
 pub async fn delete_event_lease(
     kube_client: &KubeClient,
     namespace: &str,
-    component: &str,
+    servicegroup: &str,
     topic: &str,
     instance_id: u64,
 ) -> Result<()> {
-    let name = event_lease_name(component, topic, instance_id);
+    let name = event_lease_name(servicegroup, topic, instance_id);
     Api::<Lease>::namespaced(kube_client.clone(), namespace)
         .delete(&name, &DeleteParams::default())
         .await
@@ -605,7 +597,7 @@ pub async fn delete_event_lease(
 /// ## 处理过程
 ///
 /// 1. 通过 `KIND_LABEL=event-channel` 快速过滤
-/// 2. 用 [`AnnotationReader`] 读取 namespace / component / topic / transport
+/// 2. 用 [`AnnotationReader`] 读取 namespace / servicegroup / topic / transport
 /// 3. 从 `spec.holder_identity` 解析 `instance_id`（16 进制字符串）
 ///
 /// # 返回
@@ -621,7 +613,7 @@ pub fn event_instance_from_lease(lease: &Lease) -> Result<Option<DiscoveryInstan
 
     let ann = AnnotationReader::new(lease.metadata.annotations.as_ref());
     let namespace  = ann.required(ANNOTATION_NAMESPACE)?;
-    let component  = ann.required(ANNOTATION_COMPONENT)?;
+    let servicegroup  = ann.required(ANNOTATION_COMPONENT)?;
     let topic      = ann.required(ANNOTATION_TOPIC)?;
     let transport: EventTransport = serde_json::from_str(&ann.required(ANNOTATION_TRANSPORT)?)?;
 
@@ -633,7 +625,7 @@ pub fn event_instance_from_lease(lease: &Lease) -> Result<Option<DiscoveryInstan
 
     Ok(Some(DiscoveryInstance::EventChannel {
         namespace,
-        component,
+        servicegroup,
         topic,
         instance_id,
         transport,
@@ -646,30 +638,30 @@ pub fn event_instance_from_lease(lease: &Lease) -> Result<Option<DiscoveryInstan
 ///
 /// ## 格式
 ///
-/// `dyn-model-<component>-<endpoint>-<instance_id_hex>[-<suffix_hash>]`
+/// `pgd-model-<servicegroup>-<portname>-<instance_id_hex>[-<suffix_hash>]`
 ///
-/// - component / endpoint 各截取最多 18 字符（规范化后）
+/// - servicegroup / portname 各截取最多 18 字符（规范化后）
 /// - LoRA adapter 通过 `suffix_hash` 区分，防止同实例多模型版本名称碰撞
 ///
 /// ## 长度上限
 ///
 /// 最坏情况（含 suffix）：
-/// - `"dyn-model-"` = 10
-/// - component（≤18） + `"-"` = 19
-/// - endpoint（≤18） + `"-"` = 19
+/// - `"pgd-model-"` = 10
+/// - servicegroup（≤18） + `"-"` = 19
+/// - portname（≤18） + `"-"` = 19
 /// - instance_id（≤16） + `"-"` = 17
 /// - suffix_hash = 8
 /// - 合计 ≤ 73（略超，但实际 instance_id 最多 16 位已极少见，通常 ≤ 8 位）
 pub fn model_config_map_name(
-    component: &str,
-    endpoint: &str,
+    servicegroup: &str,
+    portname: &str,
     instance_id: u64,
     model_suffix: Option<&str>,
 ) -> String {
     let base = format!(
-        "dyn-model-{}-{}-{:x}",
-        sanitize(component, 18),
-        sanitize(endpoint, 18),
+        "pgd-model-{}-{}-{:x}",
+        sanitize(servicegroup, 18),
+        sanitize(portname, 18),
         instance_id
     );
     // 仅当后缀非空时追加 hash，避免空字符串后缀改变名称
@@ -683,11 +675,11 @@ pub fn model_config_map_name(
 ///
 /// ## 格式
 ///
-/// `dyn-event-<component>-<topic>-<instance_id_hex>`
-pub fn event_lease_name(component: &str, topic: &str, instance_id: u64) -> String {
+/// `pgd-event-<servicegroup>-<topic>-<instance_id_hex>`
+pub fn event_lease_name(servicegroup: &str, topic: &str, instance_id: u64) -> String {
     format!(
-        "dyn-event-{}-{}-{:x}",
-        sanitize(component, 18),
+        "pgd-event-{}-{}-{:x}",
+        sanitize(servicegroup, 18),
         sanitize(topic, 18),
         instance_id
     )
@@ -739,21 +731,21 @@ fn transport_port_hint(transport: &TransportType, fallback_port: i32) -> i32 {
 ///
 /// ## 设计意图
 ///
-/// endpoint 注销后，如果同 Service 下已无其他 Pod 使用该端口，
+/// portname 注销后，如果同 Service 下已无其他 Pod 使用该端口，
 /// 则从 `spec.ports` 中移除该端口，避免 Service 中积累过期端口定义。
 /// 若 Service 无剩余端口，则删除整个 Service。
 ///
 /// ## 处理过程
 ///
-/// 1. 列出 Service 下由 Dynamo 管理的所有 EndpointSlice（label selector）
-/// 2. 排除即将删除的 slice，检查剩余 slice 中是否有该 endpoint 端口
+/// 1. 列出 Service 下由 Pagoda 管理的所有 EndpointSlice（label selector）
+/// 2. 排除即将删除的 slice，检查剩余 slice 中是否有该 portname 端口
 /// 3. 若有则保持 Service 不变
 /// 4. 若无则从 Service spec.ports 中删除该端口，空端口时删除 Service
-async fn cleanup_endpoint_service_port(
+async fn cleanup_portname_service_port(
     kube_client: &KubeClient,
     namespace: &str,
     service_name: &str,
-    endpoint: &str,
+    portname: &str,
     deleting_slice_name: &str,
 ) -> Result<()> {
     let selector = format!(
@@ -762,21 +754,21 @@ async fn cleanup_endpoint_service_port(
     );
 
     let slice_api: Api<EndpointSlice> = Api::namespaced(kube_client.clone(), namespace);
-    let remaining_has_endpoint = slice_api
+    let remaining_has_portname = slice_api
         .list(&kube::api::ListParams::default().labels(&selector))
         .await?
         .items
         .into_iter()
         // 排除正在删除的 slice 本身
         .filter(|s| s.metadata.name.as_deref() != Some(deleting_slice_name))
-        // 检查剩余 slice 中是否有该 endpoint 端口
+        // 检查剩余 slice 中是否有该 portname 端口
         .any(|s| {
             s.ports.as_deref().unwrap_or(&[])
                 .iter()
-                .any(|p| p.name.as_deref() == Some(endpoint))
+                .any(|p| p.name.as_deref() == Some(portname))
         });
 
-    if remaining_has_endpoint {
+    if remaining_has_portname {
         return Ok(());
     }
 
@@ -787,7 +779,7 @@ async fn cleanup_endpoint_service_port(
     };
 
     if let Some(ports) = svc.spec.as_mut().and_then(|s| s.ports.as_mut()) {
-        ports.retain(|p| p.name.as_deref() != Some(endpoint));
+        ports.retain(|p| p.name.as_deref() != Some(portname));
     }
 
     let has_ports = svc.spec.as_ref()
@@ -806,7 +798,7 @@ async fn cleanup_endpoint_service_port(
 ///
 /// ## 设计意图
 ///
-/// 同一 component 下多个 Pod 共享同一 Service，每次注册只携带自己的端口。
+/// 同一 servicegroup 下多个 Pod 共享同一 Service，每次注册只携带自己的端口。
 /// 通过先读取已有 Service 再合并端口，避免覆盖其他 Pod 已注册的端口定义。
 /// 相同名称的端口以**新值**为准，未出现的已有端口**保留**。
 ///
@@ -816,7 +808,7 @@ async fn cleanup_endpoint_service_port(
 /// 2. 若不存在，直接 apply 传入的 Service
 /// 3. 若已存在，合并 annotations 和 ports（已有优先，新增追加，重名更新）
 /// 4. apply 合并后的 Service
-async fn apply_or_merge_endpoint_service(
+async fn apply_or_merge_portname_service(
     kube_client: &KubeClient,
     namespace: &str,
     service: &Service,
@@ -869,7 +861,7 @@ async fn apply_or_merge_endpoint_service(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::TransportType;
+    use crate::servicegroup::TransportType;
 
     // ── AnnotationReader ──────────────────────────────────────────────────────
 
@@ -962,11 +954,11 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// 名称以 "dyn-model-" 开头。
+    /// 名称以 "pgd-model-" 开头。
     #[test]
     fn model_config_map_name_prefix() {
         let name = model_config_map_name("comp", "ep", 1, None);
-        assert!(name.starts_with("dyn-model-"), "名称应以 dyn-model- 开头");
+        assert!(name.starts_with("pgd-model-"), "名称应以 pgd-model- 开头");
     }
 
     /// 有 model_suffix 时产生不同名称（suffix hash 被追加）。
@@ -995,11 +987,11 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// 名称以 "dyn-event-" 开头。
+    /// 名称以 "pgd-event-" 开头。
     #[test]
     fn event_lease_name_prefix() {
         let name = event_lease_name("c", "t", 0);
-        assert!(name.starts_with("dyn-event-"));
+        assert!(name.starts_with("pgd-event-"));
     }
 
     /// 不同 topic 产生不同名称。
@@ -1094,10 +1086,10 @@ mod tests {
 
         let result = model_instance_from_config_map(&cm).unwrap().unwrap();
         match result {
-            DiscoveryInstance::Model { namespace, component, endpoint, instance_id: id, .. } => {
+            DiscoveryInstance::Model { namespace, servicegroup, portname, instance_id: id, .. } => {
                 assert_eq!(namespace, "ns");
-                assert_eq!(component, "comp");
-                assert_eq!(endpoint, "ep");
+                assert_eq!(servicegroup, "comp");
+                assert_eq!(portname, "ep");
                 assert_eq!(id, 0xdeadbeef);
             }
             _ => panic!("期望 Model variant"),
@@ -1123,7 +1115,7 @@ mod tests {
     #[test]
     fn event_instance_from_lease_valid() {
         use crate::discovery::EventTransport;
-        let transport = EventTransport::Nats { subject_prefix: "ns.dynamo.comp.ep".to_owned() };
+        let transport = EventTransport::Nats { subject_prefix: "ns.pagoda.comp.ep".to_owned() };
         let instance_id: u64 = 0xabcdef;
 
         let lease = Lease {
@@ -1147,9 +1139,9 @@ mod tests {
 
         let result = event_instance_from_lease(&lease).unwrap().unwrap();
         match result {
-            DiscoveryInstance::EventChannel { namespace, component, topic, instance_id: id, .. } => {
+            DiscoveryInstance::EventChannel { namespace, servicegroup, topic, instance_id: id, .. } => {
                 assert_eq!(namespace, "ns");
-                assert_eq!(component, "comp");
+                assert_eq!(servicegroup, "comp");
                 assert_eq!(topic, "topic");
                 assert_eq!(id, 0xabcdef);
             }

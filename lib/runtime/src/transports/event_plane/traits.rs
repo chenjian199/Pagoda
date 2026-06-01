@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 事件平面：envelope 与流别名
@@ -21,7 +21,7 @@
 //! - [`TypedEventStream<T>`]：解码后的 `(envelope, T)` 流别名。
 //!
 //! ## 实现要点
-//! 与 lib-copy 字段顺序、序列化策略完全一致；这是序列化契约不能动。
+//! 字段顺序、序列化策略完全一致；这是序列化契约不能动。
 
 use anyhow::Result;
 use bytes::Bytes;

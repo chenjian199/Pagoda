@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Work Handler Transport 时延拆分（后端侧）
@@ -174,11 +174,11 @@ mod tests {
     fn test_supplemental_work_handler_metric_name_and_descriptors() {
         assert_eq!(
             work_handler_metric_name(work_handler::NETWORK_TRANSIT_SECONDS),
-            "dynamo_work_handler_network_transit_seconds"
+            "pagoda_work_handler_network_transit_seconds"
         );
         assert_eq!(
             work_handler_metric_name(work_handler::TIME_TO_FIRST_RESPONSE_SECONDS),
-            "dynamo_work_handler_time_to_first_response_seconds"
+            "pagoda_work_handler_time_to_first_response_seconds"
         );
         assert_eq!(
             work_handler_metric_name(""),
@@ -186,7 +186,7 @@ mod tests {
         );
         assert_eq!(
             work_handler_metric_name("custom-suffix"),
-            "dynamo_work_handler_custom-suffix"
+            "pagoda_work_handler_custom-suffix"
         );
 
         let n = WORK_HANDLER_NETWORK_TRANSIT_SECONDS.desc();

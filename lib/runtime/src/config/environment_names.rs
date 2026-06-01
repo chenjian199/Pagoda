@@ -1,46 +1,46 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `config::environment_names` —— 环境变量名集中表
 //!
 //! ## 设计意图
 //!
-//! Dynamo 在十几个子系统里读取了上百个环境变量。早期这些字符串散落
-//! 在各处，曾出现"代码里写 `DYN_LOG_USE_LOCAL_TZ`，文档里写
-//! `DYN_LOGGING_USE_LOCAL_TZ`"这种悄无声息的拼写漂移。本模块的目的
+//! Pagoda 在十几个子系统里读取了上百个环境变量。这些字符串散落
+//! 在各处，曾出现"代码里写 `PGD_LOG_USE_LOCAL_TZ`，文档里写
+//! `PGD_LOGGING_USE_LOCAL_TZ`"这种悄无声息的拼写漂移。本模块的目的
 //! 只有一个——**用 `pub const` 把所有变量名集中声明一次**，让每一处
 //! 引用都强制经过编译器名称解析，永远拼不错、永远改得动。
 //!
 //! ## 实现要点
 //!
 //! 绝大多数常量是"标识符与字面值完全相同"的纯样板（例如
-//! `pub const DYN_LOG: &str = "DYN_LOG";`）。为消除噪声、突出**例
+//! `pub const PGD_LOG: &str = "PGD_LOG";`）。为消除噪声、突出**例
 //! 外项**（少数几个 `_PREFIX`），引入一个私有 [`mirror!`] 宏：
 //!
 //! ```ignore
 //! mirror! {
 //!     /// Log level
-//!     DYN_LOG,
+//!     PGD_LOG,
 //!     /// JSONL logging
-//!     DYN_LOGGING_JSONL,
+//!     PGD_LOGGING_JSONL,
 //! }
 //! ```
 //!
 //! 展开后等价于：
 //!
 //! ```ignore
-//! pub const DYN_LOG: &str = "DYN_LOG";
-//! pub const DYN_LOGGING_JSONL: &str = "DYN_LOGGING_JSONL";
+//! pub const PGD_LOG: &str = "PGD_LOG";
+//! pub const PGD_LOGGING_JSONL: &str = "PGD_LOGGING_JSONL";
 //! ```
 //!
-//! 三个真正的"前缀型"常量（`DYN_COMPUTE_` / `DYN_KVBM_NIXL_BACKEND_`
-//! / `DYN_HISTOGRAM_`）继续写成普通 `pub const`——它们**不应**遵循
+//! 三个真正的"前缀型"常量（`PGD_COMPUTE_` / `PGD_KVBM_NIXL_BACKEND_`
+//! / `PGD_HISTOGRAM_`）继续写成普通 `pub const`——它们**不应**遵循
 //! "name == value"模式。
 //!
 //! ## 外部契约
 //!
 //! 所有常量的**名字**、**值**、**所在子模块路径**都保持与历史版本
-//! 完全一致——其他子项目以 `use dynamo_runtime::config::environment_names::xxx::YYY;`
+//! 完全一致——其他子项目以 `use pagoda_runtime::config::environment_names::xxx::YYY;`
 //! 形式直接消费这些常量。
 
 // ============================================================================
@@ -68,17 +68,17 @@ macro_rules! mirror {
 pub mod logging {
     mirror! {
         /// 日志级别（例如 "debug" / "info" / "warn" / "error"）。
-        DYN_LOG,
+        PGD_LOG,
         /// 日志配置文件路径。
-        DYN_LOGGING_CONFIG_PATH,
+        PGD_LOGGING_CONFIG_PATH,
         /// 启用 JSONL 输出格式。
-        DYN_LOGGING_JSONL,
+        PGD_LOGGING_JSONL,
         /// 关闭 ANSI 颜色 / 控制字符。
-        DYN_SDK_DISABLE_ANSI_LOGGING,
+        PGD_SDK_DISABLE_ANSI_LOGGING,
         /// 使用本地时区而不是 UTC。
-        DYN_LOG_USE_LOCAL_TZ,
+        PGD_LOG_USE_LOCAL_TZ,
         /// 启用 span event 日志（create / close）。
-        DYN_LOGGING_SPAN_EVENTS,
+        PGD_LOGGING_SPAN_EVENTS,
     }
 
     /// OTLP（OpenTelemetry Protocol）相关。
@@ -104,47 +104,47 @@ pub mod logging {
 pub mod runtime {
     mirror! {
         /// async worker 线程数。
-        DYN_RUNTIME_NUM_WORKER_THREADS,
+        PGD_RUNTIME_NUM_WORKER_THREADS,
         /// blocking 线程数上限。
-        DYN_RUNTIME_MAX_BLOCKING_THREADS,
+        PGD_RUNTIME_MAX_BLOCKING_THREADS,
         /// 启用 Tokio poll-time histogram。
-        DYN_ENABLE_POLL_HISTOGRAM,
+        PGD_ENABLE_POLL_HISTOGRAM,
     }
 
     /// system 状态服务配置。
     pub mod system {
         mirror! {
             /// 启用 system 状态服务。⚠️ 已废弃。
-            DYN_SYSTEM_ENABLED,
+            PGD_SYSTEM_ENABLED,
             /// system 状态服务 host。
-            DYN_SYSTEM_HOST,
+            PGD_SYSTEM_HOST,
             /// system 状态服务端口。
-            DYN_SYSTEM_PORT,
-            /// 已废弃：曾用于声明哪些 endpoint 参与汇总健康判定。
-            DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+            PGD_SYSTEM_PORT,
+            /// 已废弃：曾用于声明哪些 portname 参与汇总健康判定。
+            PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
             /// 进程启动初始健康状态。
-            DYN_SYSTEM_STARTING_HEALTH_STATUS,
+            PGD_SYSTEM_STARTING_HEALTH_STATUS,
             /// `/health` 路径。
-            DYN_SYSTEM_HEALTH_PATH,
+            PGD_SYSTEM_HEALTH_PATH,
             /// `/live` 路径。
-            DYN_SYSTEM_LIVE_PATH,
+            PGD_SYSTEM_LIVE_PATH,
         }
     }
 
     /// compute 子系统。
     pub mod compute {
-        /// `DYN_COMPUTE_*` 系列环境变量的前缀。
+        /// `PGD_COMPUTE_*` 系列环境变量的前缀。
         ///
         /// 例外：该常量是"前缀"而不是某个具体变量名，故不能用
         /// `mirror!` 自动生成。
-        pub const PREFIX: &str = "DYN_COMPUTE_";
+        pub const PREFIX: &str = "PGD_COMPUTE_";
     }
 
     /// canary 部署。
     pub mod canary {
         mirror! {
             /// canary 等候时间（秒）。
-            DYN_CANARY_WAIT_TIME,
+            PGD_CANARY_WAIT_TIME,
         }
     }
 }
@@ -157,7 +157,7 @@ pub mod runtime {
 pub mod worker {
     mirror! {
         /// worker 优雅关闭超时（秒）。
-        DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+        PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
     }
 }
 
@@ -192,7 +192,7 @@ pub mod nats {
     pub mod stream {
         mirror! {
             /// NATS 流消息最大保留时长（秒）。
-            DYN_NATS_STREAM_MAX_AGE,
+            PGD_NATS_STREAM_MAX_AGE,
         }
     }
 }
@@ -200,7 +200,7 @@ pub mod nats {
 /// ETCD 传输。
 pub mod etcd {
     mirror! {
-        /// ETCD endpoints（逗号分隔 URL 列表）。
+        /// ETCD portnames（逗号分隔 URL 列表）。
         ETCD_ENDPOINTS,
     }
 
@@ -228,23 +228,23 @@ pub mod etcd {
 /// KVBM 相关。
 pub mod kvbm {
     mirror! {
-        /// 启用 KVBM 指标 endpoint。
-        DYN_KVBM_METRICS,
-        /// KVBM 指标 endpoint 端口。
-        DYN_KVBM_METRICS_PORT,
+        /// 启用 KVBM 指标 portname。
+        PGD_KVBM_METRICS,
+        /// KVBM 指标 portname 端口。
+        PGD_KVBM_METRICS_PORT,
         /// 启用 KVBM 调试录制。
-        DYN_KVBM_ENABLE_RECORD,
+        PGD_KVBM_ENABLE_RECORD,
         /// 关闭磁盘 offload 过滤器。
-        DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
+        PGD_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
     }
 
     /// CPU 缓存。
     pub mod cpu_cache {
         mirror! {
             /// CPU 缓存大小（GB）。
-            DYN_KVBM_CPU_CACHE_GB,
+            PGD_KVBM_CPU_CACHE_GB,
             /// CPU 缓存块数覆写。
-            DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
+            PGD_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
         }
     }
 
@@ -252,9 +252,9 @@ pub mod kvbm {
     pub mod disk_cache {
         mirror! {
             /// 磁盘缓存大小（GB）。
-            DYN_KVBM_DISK_CACHE_GB,
+            PGD_KVBM_DISK_CACHE_GB,
             /// 磁盘缓存块数覆写。
-            DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
+            PGD_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
         }
     }
 
@@ -262,19 +262,19 @@ pub mod kvbm {
     pub mod object_storage {
         mirror! {
             /// 启用对象存储（"1" 启用）。
-            DYN_KVBM_OBJECT_ENABLED,
+            PGD_KVBM_OBJECT_ENABLED,
             /// bucket 名（支持 `{worker_id}` 模板）。
-            DYN_KVBM_OBJECT_BUCKET,
-            /// endpoint。
-            DYN_KVBM_OBJECT_ENDPOINT,
+            PGD_KVBM_OBJECT_BUCKET,
+            /// portname。
+            PGD_KVBM_OBJECT_ENDPOINT,
             /// region。
-            DYN_KVBM_OBJECT_REGION,
+            PGD_KVBM_OBJECT_REGION,
             /// access key。
-            DYN_KVBM_OBJECT_ACCESS_KEY,
+            PGD_KVBM_OBJECT_ACCESS_KEY,
             /// secret key。
-            DYN_KVBM_OBJECT_SECRET_KEY,
+            PGD_KVBM_OBJECT_SECRET_KEY,
             /// 存储块数。
-            DYN_KVBM_OBJECT_NUM_BLOCKS,
+            PGD_KVBM_OBJECT_NUM_BLOCKS,
         }
     }
 
@@ -282,7 +282,7 @@ pub mod kvbm {
     pub mod transfer {
         mirror! {
             /// 单批最大块数。
-            DYN_KVBM_TRANSFER_BATCH_SIZE,
+            PGD_KVBM_TRANSFER_BATCH_SIZE,
         }
     }
 
@@ -290,22 +290,22 @@ pub mod kvbm {
     pub mod leader {
         mirror! {
             /// leader/worker 初始化超时（秒）。
-            DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
+            PGD_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
             /// ZMQ host。
-            DYN_KVBM_LEADER_ZMQ_HOST,
+            PGD_KVBM_LEADER_ZMQ_HOST,
             /// ZMQ pub 端口。
-            DYN_KVBM_LEADER_ZMQ_PUB_PORT,
+            PGD_KVBM_LEADER_ZMQ_PUB_PORT,
             /// ZMQ ack 端口。
-            DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+            PGD_KVBM_LEADER_ZMQ_ACK_PORT,
         }
     }
 
     /// NIXL backend。
     pub mod nixl {
-        /// `DYN_KVBM_NIXL_BACKEND_*` 系列环境变量的前缀。
+        /// `PGD_KVBM_NIXL_BACKEND_*` 系列环境变量的前缀。
         ///
         /// 例外：前缀型常量，不走 `mirror!`。
-        pub const PREFIX: &str = "DYN_KVBM_NIXL_BACKEND_";
+        pub const PREFIX: &str = "PGD_KVBM_NIXL_BACKEND_";
     }
 }
 
@@ -317,75 +317,75 @@ pub mod kvbm {
 pub mod llm {
     mirror! {
         /// HTTP body 体积上限（MB）。
-        DYN_HTTP_BODY_LIMIT_MB,
+        PGD_HTTP_BODY_LIMIT_MB,
         /// HTTP 优雅关闭超时（秒）。
-        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+        PGD_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
         /// 启用 LoRA 适配器。
-        DYN_LORA_ENABLED,
+        PGD_LORA_ENABLED,
         /// LoRA 缓存目录。
-        DYN_LORA_PATH,
+        PGD_LORA_PATH,
         /// 启用实验性 Anthropic Messages API。
-        DYN_ENABLE_ANTHROPIC_API,
+        PGD_ENABLE_ANTHROPIC_API,
         /// 是否剥离 Claude Code 计费 preamble。
-        DYN_STRIP_ANTHROPIC_PREAMBLE,
+        PGD_STRIP_ANTHROPIC_PREAMBLE,
         /// 启用流式工具调用分发。
-        DYN_ENABLE_STREAMING_TOOL_DISPATCH,
+        PGD_ENABLE_STREAMING_TOOL_DISPATCH,
         /// 启用流式 reasoning 分发。
-        DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+        PGD_ENABLE_STREAMING_REASONING_DISPATCH,
         /// 后端流空闲超时（秒）。
-        DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
+        PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
         /// 启用 LoRA 分配控制器。
-        DYN_LORA_ALLOCATION_ENABLED,
+        PGD_LORA_ALLOCATION_ENABLED,
         /// LoRA 分配算法（"hrw" / "random"）。
-        DYN_LORA_ALLOCATION_ALGORITHM,
+        PGD_LORA_ALLOCATION_ALGORITHM,
         /// LoRA 分配重算间隔（秒）。
-        DYN_LORA_ALLOCATION_TIMESTEP_SECS,
+        PGD_LORA_ALLOCATION_TIMESTEP_SECS,
         /// LoRA 副本缩容 cooldown 周期数。
-        DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
+        PGD_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
         /// 速率窗口相对周期的倍率。
-        DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
+        PGD_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
         /// `BucketedRateCounter` 每秒桶数。
-        DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
+        PGD_LORA_ALLOCATION_BUCKETS_PER_SECOND,
         /// 负载预测器类型（"none" / "ema"）。
-        DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
+        PGD_LORA_ALLOCATION_PREDICTOR_TYPE,
         /// EMA 平滑系数 alpha。
-        DYN_LORA_ALLOCATION_EMA_ALPHA,
+        PGD_LORA_ALLOCATION_EMA_ALPHA,
     }
 
     /// Metrics 配置。
     pub mod metrics {
         mirror! {
-            /// 自定义 metrics 前缀（覆盖默认 "dynamo_frontend"）。
-            DYN_METRICS_PREFIX,
+            /// 自定义 metrics 前缀（覆盖默认 "pagoda_frontend"）。
+            PGD_METRICS_PREFIX,
         }
 
         /// 直方图前缀。
         ///
         /// 例外：前缀型常量。
-        pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+        pub const HISTOGRAM_PREFIX: &str = "PGD_HISTOGRAM_";
     }
 
     /// Audit sink 配置。
     pub mod audit {
         mirror! {
             /// audit sink 选择（逗号分隔：`stderr`/`nats`/`jsonl`/`jsonl_gz`）。
-            DYN_AUDIT_SINKS,
+            PGD_AUDIT_SINKS,
             /// 强制 audit 即使 `store=false`。
-            DYN_AUDIT_FORCE_LOGGING,
+            PGD_AUDIT_FORCE_LOGGING,
             /// 进程内 audit bus 容量。
-            DYN_AUDIT_CAPACITY,
+            PGD_AUDIT_CAPACITY,
             /// JetStream audit sink 的 NATS 主题。
-            DYN_AUDIT_NATS_SUBJECT,
+            PGD_AUDIT_NATS_SUBJECT,
             /// 本地 audit 输出路径。
-            DYN_AUDIT_OUTPUT_PATH,
+            PGD_AUDIT_OUTPUT_PATH,
             /// JSONL audit sink 缓冲区字节数。
-            DYN_AUDIT_JSONL_BUFFER_BYTES,
+            PGD_AUDIT_JSONL_BUFFER_BYTES,
             /// JSONL audit sink 周期 flush 间隔（毫秒）。
-            DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
+            PGD_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             /// 轮转 gz audit sink 阈值（未压缩字节数）。
-            DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
+            PGD_AUDIT_JSONL_GZ_ROLL_BYTES,
             /// 轮转 gz audit sink 阈值（记录行数）。
-            DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            PGD_AUDIT_JSONL_GZ_ROLL_LINES,
         }
     }
 
@@ -393,25 +393,25 @@ pub mod llm {
     pub mod agent_trace {
         mirror! {
             /// trace sink 选择。
-            DYN_AGENT_TRACE_SINKS,
+            PGD_AGENT_TRACE_SINKS,
             /// 本地输出路径。
-            DYN_AGENT_TRACE_OUTPUT_PATH,
+            PGD_AGENT_TRACE_OUTPUT_PATH,
             /// 进程内 trace bus 容量。
-            DYN_AGENT_TRACE_CAPACITY,
+            PGD_AGENT_TRACE_CAPACITY,
             /// JSONL sink 缓冲区字节数。
-            DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            PGD_AGENT_TRACE_JSONL_BUFFER_BYTES,
             /// JSONL sink 周期 flush 间隔（毫秒）。
-            DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            PGD_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
             /// 轮转 gz sink 阈值（未压缩字节数）。
-            DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
+            PGD_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
             /// 轮转 gz sink 阈值（记录行数）。
-            DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            PGD_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
             /// 启用 replay prompt block 哈希。
-            DYN_AGENT_TRACE_REPLAY_HASHES,
-            /// harness tool 事件本地 ZMQ PULL endpoint。
-            DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            PGD_AGENT_TRACE_REPLAY_HASHES,
+            /// harness tool 事件本地 ZMQ PULL portname。
+            PGD_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             /// harness tool 事件可选 ZMQ topic 过滤。
-            DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            PGD_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
         }
     }
 }
@@ -451,11 +451,11 @@ pub mod model {
 pub mod router {
     mirror! {
         /// prefill 负载缩放因子。
-        DYN_ROUTER_PREFILL_LOAD_SCALE,
+        PGD_ROUTER_PREFILL_LOAD_SCALE,
         /// prefill token 容量排队阈值。
-        DYN_ROUTER_QUEUE_THRESHOLD,
+        PGD_ROUTER_QUEUE_THRESHOLD,
         /// 路由队列调度策略（"fcfs" / "wspt"）。
-        DYN_ROUTER_QUEUE_POLICY,
+        PGD_ROUTER_QUEUE_POLICY,
     }
 }
 
@@ -463,9 +463,9 @@ pub mod router {
 pub mod tcp_response_stream {
     mirror! {
         /// TCP 响应流服务端口；未设或 0 时由 OS 分配。
-        DYN_TCP_RESPONSE_STREAM_PORT,
+        PGD_TCP_RESPONSE_STREAM_PORT,
         /// host/interface；未设时自动探测可路由 IP。
-        DYN_TCP_RESPONSE_STREAM_HOST,
+        PGD_TCP_RESPONSE_STREAM_HOST,
     }
 }
 
@@ -473,9 +473,9 @@ pub mod tcp_response_stream {
 pub mod event_plane {
     mirror! {
         /// 传输选择（"zmq" / "nats"）。
-        DYN_EVENT_PLANE,
+        PGD_EVENT_PLANE,
         /// 编解码（"json" / "msgpack"）。
-        DYN_EVENT_PLANE_CODEC,
+        PGD_EVENT_PLANE_CODEC,
     }
 }
 
@@ -483,9 +483,9 @@ pub mod event_plane {
 pub mod zmq_broker {
     mirror! {
         /// 显式 ZMQ broker URL。
-        DYN_ZMQ_BROKER_URL,
+        PGD_ZMQ_BROKER_URL,
         /// 启用 ZMQ broker 发现模式。
-        DYN_ZMQ_BROKER_ENABLED,
+        PGD_ZMQ_BROKER_ENABLED,
         /// XSUB 绑定地址（broker 二进制）。
         ZMQ_BROKER_XSUB_BIND,
         /// XPUB 绑定地址（broker 二进制）。
@@ -499,9 +499,9 @@ pub mod zmq_broker {
 pub mod discovery {
     mirror! {
         /// 发现后端（"kubernetes" / "etcd"）。
-        DYN_DISCOVERY_BACKEND,
+        PGD_DISCOVERY_BACKEND,
         /// kube 发现模式（"pod" / "container"）。
-        DYN_KUBE_DISCOVERY_MODE,
+        PGD_KUBE_DISCOVERY_MODE,
     }
 }
 
@@ -509,7 +509,7 @@ pub mod discovery {
 pub mod cuda {
     mirror! {
         /// 自定义 CUDA fatbin 文件路径。
-        DYN_FATBIN_PATH,
+        PGD_FATBIN_PATH,
     }
 }
 
@@ -525,9 +525,9 @@ pub mod build {
 pub mod mocker {
     mirror! {
         /// 启用 KV cache 分配 / 淘汰结构化 trace 日志。
-        DYN_MOCKER_KV_CACHE_TRACE,
+        PGD_MOCKER_KV_CACHE_TRACE,
         /// 使用原始 direct() 路径（存在启动期竞争，不建议常开）。
-        DYN_MOCKER_SYNC_DIRECT,
+        PGD_MOCKER_SYNC_DIRECT,
     }
 }
 
@@ -535,11 +535,11 @@ pub mod mocker {
 pub mod testing {
     mirror! {
         /// 启用排队式请求处理。
-        DYN_QUEUED_UP_PROCESSING,
+        PGD_QUEUED_UP_PROCESSING,
         /// soak 测试时长（例如 "3s" / "5m"）。
-        DYN_SOAK_RUN_DURATION,
+        PGD_SOAK_RUN_DURATION,
         /// soak 测试批量负载。
-        DYN_SOAK_BATCH_LOAD,
+        PGD_SOAK_BATCH_LOAD,
     }
 }
 
@@ -564,29 +564,29 @@ mod tests {
         let mut seen = HashSet::new();
         let vars = [
             // Logging
-            logging::DYN_LOG,
-            logging::DYN_LOGGING_CONFIG_PATH,
-            logging::DYN_LOGGING_JSONL,
-            logging::DYN_SDK_DISABLE_ANSI_LOGGING,
-            logging::DYN_LOG_USE_LOCAL_TZ,
-            logging::DYN_LOGGING_SPAN_EVENTS,
+            logging::PGD_LOG,
+            logging::PGD_LOGGING_CONFIG_PATH,
+            logging::PGD_LOGGING_JSONL,
+            logging::PGD_SDK_DISABLE_ANSI_LOGGING,
+            logging::PGD_LOG_USE_LOCAL_TZ,
+            logging::PGD_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
             logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
             // Runtime
-            runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
-            runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
-            runtime::system::DYN_SYSTEM_ENABLED,
-            runtime::system::DYN_SYSTEM_HOST,
-            runtime::system::DYN_SYSTEM_PORT,
-            runtime::system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
-            runtime::system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
-            runtime::system::DYN_SYSTEM_HEALTH_PATH,
-            runtime::system::DYN_SYSTEM_LIVE_PATH,
-            runtime::canary::DYN_CANARY_WAIT_TIME,
+            runtime::PGD_RUNTIME_NUM_WORKER_THREADS,
+            runtime::PGD_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::system::PGD_SYSTEM_ENABLED,
+            runtime::system::PGD_SYSTEM_HOST,
+            runtime::system::PGD_SYSTEM_PORT,
+            runtime::system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+            runtime::system::PGD_SYSTEM_STARTING_HEALTH_STATUS,
+            runtime::system::PGD_SYSTEM_HEALTH_PATH,
+            runtime::system::PGD_SYSTEM_LIVE_PATH,
+            runtime::canary::PGD_CANARY_WAIT_TIME,
             // Worker
-            worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            worker::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS
             nats::NATS_SERVER,
             nats::auth::NATS_AUTH_USERNAME,
@@ -594,7 +594,7 @@ mod tests {
             nats::auth::NATS_AUTH_TOKEN,
             nats::auth::NATS_AUTH_NKEY,
             nats::auth::NATS_AUTH_CREDENTIALS_FILE,
-            nats::stream::DYN_NATS_STREAM_MAX_AGE,
+            nats::stream::PGD_NATS_STREAM_MAX_AGE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
             etcd::auth::ETCD_AUTH_USERNAME,
@@ -603,55 +603,55 @@ mod tests {
             etcd::auth::ETCD_AUTH_CLIENT_CERT,
             etcd::auth::ETCD_AUTH_CLIENT_KEY,
             // KVBM
-            kvbm::DYN_KVBM_METRICS,
-            kvbm::DYN_KVBM_METRICS_PORT,
-            kvbm::DYN_KVBM_ENABLE_RECORD,
-            kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
-            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
-            kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
-            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_GB,
-            kvbm::disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
-            kvbm::leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
-            kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+            kvbm::PGD_KVBM_METRICS,
+            kvbm::PGD_KVBM_METRICS_PORT,
+            kvbm::PGD_KVBM_ENABLE_RECORD,
+            kvbm::PGD_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
+            kvbm::cpu_cache::PGD_KVBM_CPU_CACHE_GB,
+            kvbm::cpu_cache::PGD_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
+            kvbm::disk_cache::PGD_KVBM_DISK_CACHE_GB,
+            kvbm::disk_cache::PGD_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
+            kvbm::leader::PGD_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,
+            kvbm::leader::PGD_KVBM_LEADER_ZMQ_HOST,
+            kvbm::leader::PGD_KVBM_LEADER_ZMQ_PUB_PORT,
+            kvbm::leader::PGD_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
-            llm::DYN_HTTP_BODY_LIMIT_MB,
-            llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
-            llm::DYN_LORA_ENABLED,
-            llm::DYN_LORA_PATH,
-            llm::DYN_ENABLE_ANTHROPIC_API,
-            llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
-            llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
-            llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
-            llm::DYN_LORA_ALLOCATION_ENABLED,
-            llm::DYN_LORA_ALLOCATION_ALGORITHM,
-            llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
-            llm::DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
-            llm::DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
-            llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
-            llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
-            llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
-            llm::metrics::DYN_METRICS_PREFIX,
-            llm::audit::DYN_AUDIT_SINKS,
-            llm::audit::DYN_AUDIT_FORCE_LOGGING,
-            llm::audit::DYN_AUDIT_CAPACITY,
-            llm::audit::DYN_AUDIT_NATS_SUBJECT,
-            llm::audit::DYN_AUDIT_OUTPUT_PATH,
-            llm::audit::DYN_AUDIT_JSONL_BUFFER_BYTES,
-            llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
-            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
-            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
-            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
-            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::PGD_HTTP_BODY_LIMIT_MB,
+            llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
+            llm::PGD_LORA_ENABLED,
+            llm::PGD_LORA_PATH,
+            llm::PGD_ENABLE_ANTHROPIC_API,
+            llm::PGD_STRIP_ANTHROPIC_PREAMBLE,
+            llm::PGD_ENABLE_STREAMING_TOOL_DISPATCH,
+            llm::PGD_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::PGD_LORA_ALLOCATION_ENABLED,
+            llm::PGD_LORA_ALLOCATION_ALGORITHM,
+            llm::PGD_LORA_ALLOCATION_TIMESTEP_SECS,
+            llm::PGD_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
+            llm::PGD_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
+            llm::PGD_LORA_ALLOCATION_BUCKETS_PER_SECOND,
+            llm::PGD_LORA_ALLOCATION_PREDICTOR_TYPE,
+            llm::PGD_LORA_ALLOCATION_EMA_ALPHA,
+            llm::metrics::PGD_METRICS_PREFIX,
+            llm::audit::PGD_AUDIT_SINKS,
+            llm::audit::PGD_AUDIT_FORCE_LOGGING,
+            llm::audit::PGD_AUDIT_CAPACITY,
+            llm::audit::PGD_AUDIT_NATS_SUBJECT,
+            llm::audit::PGD_AUDIT_OUTPUT_PATH,
+            llm::audit::PGD_AUDIT_JSONL_BUFFER_BYTES,
+            llm::audit::PGD_AUDIT_JSONL_FLUSH_INTERVAL_MS,
+            llm::audit::PGD_AUDIT_JSONL_GZ_ROLL_BYTES,
+            llm::audit::PGD_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::PGD_AGENT_TRACE_SINKS,
+            llm::agent_trace::PGD_AGENT_TRACE_OUTPUT_PATH,
+            llm::agent_trace::PGD_AGENT_TRACE_CAPACITY,
+            llm::agent_trace::PGD_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            llm::agent_trace::PGD_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::agent_trace::PGD_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::agent_trace::PGD_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::PGD_AGENT_TRACE_REPLAY_HASHES,
+            llm::agent_trace::PGD_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::agent_trace::PGD_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -660,35 +660,35 @@ mod tests {
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
-            router::DYN_ROUTER_PREFILL_LOAD_SCALE,
-            router::DYN_ROUTER_QUEUE_THRESHOLD,
-            router::DYN_ROUTER_QUEUE_POLICY,
+            router::PGD_ROUTER_PREFILL_LOAD_SCALE,
+            router::PGD_ROUTER_QUEUE_THRESHOLD,
+            router::PGD_ROUTER_QUEUE_POLICY,
             // TCP Response Stream
-            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
-            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+            tcp_response_stream::PGD_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::PGD_TCP_RESPONSE_STREAM_HOST,
             // Event Plane
-            event_plane::DYN_EVENT_PLANE,
-            event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::PGD_EVENT_PLANE,
+            event_plane::PGD_EVENT_PLANE_CODEC,
             // ZMQ Broker
-            zmq_broker::DYN_ZMQ_BROKER_URL,
-            zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::PGD_ZMQ_BROKER_URL,
+            zmq_broker::PGD_ZMQ_BROKER_ENABLED,
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
             // Discovery
-            discovery::DYN_DISCOVERY_BACKEND,
-            discovery::DYN_KUBE_DISCOVERY_MODE,
+            discovery::PGD_DISCOVERY_BACKEND,
+            discovery::PGD_KUBE_DISCOVERY_MODE,
             // CUDA
-            cuda::DYN_FATBIN_PATH,
+            cuda::PGD_FATBIN_PATH,
             // Build
             build::OUT_DIR,
             // Mocker
-            mocker::DYN_MOCKER_KV_CACHE_TRACE,
-            mocker::DYN_MOCKER_SYNC_DIRECT,
+            mocker::PGD_MOCKER_KV_CACHE_TRACE,
+            mocker::PGD_MOCKER_SYNC_DIRECT,
             // Testing
-            testing::DYN_QUEUED_UP_PROCESSING,
-            testing::DYN_SOAK_RUN_DURATION,
-            testing::DYN_SOAK_BATCH_LOAD,
+            testing::PGD_QUEUED_UP_PROCESSING,
+            testing::PGD_SOAK_RUN_DURATION,
+            testing::PGD_SOAK_BATCH_LOAD,
         ];
 
         for var in &vars {
@@ -700,17 +700,17 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 逐厂家断言常量字符串前缀符合命名约定（DYN_ / NATS_ / ETCD_ /
+    /// 逐厂家断言常量字符串前缀符合命名约定（PGD_ / NATS_ / ETCD_ /
     /// OTEL_）。
     ///
     /// ## 意义
     /// 防止维护时把不属于本厂家的变量名错放进对应子模块。
     #[test]
     fn test_naming_conventions() {
-        assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
-        assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
-        assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
-        assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));
+        assert!(runtime::PGD_RUNTIME_NUM_WORKER_THREADS.starts_with("PGD_"));
+        assert!(runtime::system::PGD_SYSTEM_ENABLED.starts_with("PGD_"));
+        assert!(kvbm::PGD_KVBM_METRICS.starts_with("PGD_"));
+        assert!(worker::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("PGD_"));
 
         assert!(nats::NATS_SERVER.starts_with("NATS_"));
         assert!(nats::auth::NATS_AUTH_USERNAME.starts_with("NATS_AUTH_"));
@@ -729,10 +729,10 @@ mod tests {
     /// 防止未来不小心把宏调用从 `mirror!` 改成手写后值漂移。
     #[test]
     fn test_mirror_macro_value_equals_identifier() {
-        assert_eq!(logging::DYN_LOG, "DYN_LOG");
+        assert_eq!(logging::PGD_LOG, "PGD_LOG");
         assert_eq!(
-            runtime::system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
-            "DYN_SYSTEM_STARTING_HEALTH_STATUS"
+            runtime::system::PGD_SYSTEM_STARTING_HEALTH_STATUS,
+            "PGD_SYSTEM_STARTING_HEALTH_STATUS"
         );
         assert_eq!(model::huggingface::HF_TOKEN, "HF_TOKEN");
         assert_eq!(build::OUT_DIR, "OUT_DIR");
@@ -742,12 +742,12 @@ mod tests {
     /// 三个例外型前缀常量必须保留其历史字面值，不能被未来误改。
     ///
     /// ## 意义
-    /// 上层代码会用这些前缀字符串去枚举形如 `DYN_COMPUTE_*` 的环境
+    /// 上层代码会用这些前缀字符串去枚举形如 `PGD_COMPUTE_*` 的环境
     /// 变量；前缀错了会静默丢失大量配置。
     #[test]
     fn test_prefix_constants_match_history() {
-        assert_eq!(runtime::compute::PREFIX, "DYN_COMPUTE_");
-        assert_eq!(kvbm::nixl::PREFIX, "DYN_KVBM_NIXL_BACKEND_");
-        assert_eq!(llm::metrics::HISTOGRAM_PREFIX, "DYN_HISTOGRAM_");
+        assert_eq!(runtime::compute::PREFIX, "PGD_COMPUTE_");
+        assert_eq!(kvbm::nixl::PREFIX, "PGD_KVBM_NIXL_BACKEND_");
+        assert_eq!(llm::metrics::HISTOGRAM_PREFIX, "PGD_HISTOGRAM_");
     }
 }

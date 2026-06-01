@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::egress::tcp_client` —— TCP 请求平面客户端与共享连接池
@@ -9,7 +9,7 @@
 //! 端点多连接并发复用，使 tail-latency 不被单点队列堵住。
 //!
 //! ## 外部契约
-//! - 公开类型 / 方法集 / `transport_name() -> "tcp"` / `start_warmup` 重写 —— 与 lib-copy 严格一致；
+//! - 公开类型 / 方法集 / `transport_name() -> "tcp"` / `start_warmup` 严格一致；
 //! - 不额外暴露 LRU / 轮询 / 信差安装的实现细节；连接池参数仅通过构造器提供。
 //! - 错误映射：连接失败与超时被隐藏在 `RequestPlaneClient::send_request` 返回的
 //!   `anyhow::Error` 中，可依 `chain()` 追溯。
@@ -18,15 +18,6 @@
 //! - 使用锁自由数据结构（`DashMap` + atomic counter）避免热点互斥；
 //! - `start_warmup` 启动后台任务监听 instance discovery watch，对新发现后端预建连接，
 //!   只有 TCP 客户端趋于需要这个提前作为（HTTP/NATS 用默认 no-op）。
-
-//! TCP Request Plane Client
-//!
-//! Lock-free, LRU-based shared connection pool with round-robin selection.
-//! Connections are Arc-wrapped and shared across concurrent requests.
-//! The hot path (per-request) is fully lock-free: ArcSwap + atomic round-robin + SegQueue push.
-//! The cold path (connect/prune) uses a Mutex on the LRU cache.
-//! Writer tasks batch requests into a reusable BytesMut buffer for a single write_all()
-//! syscall per drain, avoiding the fixed-size cap and double-copy of BufWriter.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use crate::metrics::transport_metrics::{
@@ -91,7 +82,7 @@ const WRITER_INITIAL_BUF_CAPACITY: usize = 256 * 1024;
 
 /// Check if latency tracing is enabled via environment
 fn latency_trace_enabled() -> bool {
-    std::env::var("DYN_TCP_LATENCY_TRACE")
+    std::env::var("PGD_TCP_LATENCY_TRACE")
         .ok()
         .is_some_and(|v| v == "1" || v == "true")
 }
@@ -125,25 +116,25 @@ impl TcpRequestConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
-        if let Ok(val) = std::env::var("DYN_TCP_REQUEST_TIMEOUT")
+        if let Ok(val) = std::env::var("PGD_TCP_REQUEST_TIMEOUT")
             && let Ok(timeout) = val.parse::<u64>()
         {
             config.request_timeout = Duration::from_secs(timeout);
         }
 
-        if let Ok(val) = std::env::var("DYN_TCP_POOL_SIZE")
+        if let Ok(val) = std::env::var("PGD_TCP_POOL_SIZE")
             && let Ok(size) = val.parse::<usize>()
         {
             config.pool_size = size;
         }
 
-        if let Ok(val) = std::env::var("DYN_TCP_CONNECT_TIMEOUT")
+        if let Ok(val) = std::env::var("PGD_TCP_CONNECT_TIMEOUT")
             && let Ok(timeout) = val.parse::<u64>()
         {
             config.connect_timeout = Duration::from_secs(timeout);
         }
 
-        if let Ok(val) = std::env::var("DYN_TCP_CHANNEL_BUFFER")
+        if let Ok(val) = std::env::var("PGD_TCP_CHANNEL_BUFFER")
             && let Ok(size) = val.parse::<usize>()
         {
             config.channel_buffer = size;
@@ -664,9 +655,9 @@ impl TcpConnection {
             anyhow::bail!("Connection closed (writer exited)");
         }
 
-        let endpoint_path = headers
-            .get("x-endpoint-path")
-            .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
+        let portname_path = headers
+            .get("x-portname-path")
+            .ok_or_else(|| anyhow::anyhow!("Missing x-portname-path header for TCP request"))?
             .to_string();
 
         let trace = latency_trace_enabled();
@@ -692,7 +683,7 @@ impl TcpConnection {
 
         // encode() called here — after admission is granted — so the frame is
         // only allocated once we have capacity to process it.
-        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
+        let request_msg = TcpRequestMessage::with_headers(portname_path, headers.clone(), payload);
         let encoded_data = request_msg.encode()?;
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -1082,12 +1073,12 @@ struct TcpConnectionPool {
 
 impl TcpConnectionPool {
     fn new(config: TcpRequestConfig) -> Self {
-        let global_limit = std::env::var("DYN_TCP_GLOBAL_CONNECT_LIMIT")
+        let global_limit = std::env::var("PGD_TCP_GLOBAL_CONNECT_LIMIT")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(DEFAULT_GLOBAL_CONNECT_LIMIT);
 
-        let host_idle_ttl_secs = std::env::var("DYN_TCP_HOST_IDLE_TTL_SECS")
+        let host_idle_ttl_secs = std::env::var("PGD_TCP_HOST_IDLE_TTL_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_HOST_IDLE_TTL_SECS);
@@ -1151,7 +1142,7 @@ impl TcpConnectionPool {
     /// addresses, only warms truly new ones.
     fn start_warmup_watcher(
         self: &Arc<Self>,
-        mut instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
+        mut instance_rx: tokio::sync::watch::Receiver<Vec<crate::servicegroup::Instance>>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) {
         let pool = Arc::clone(self);
@@ -1162,7 +1153,7 @@ impl TcpConnectionPool {
             {
                 let instances = instance_rx.borrow_and_update();
                 for inst in instances.iter() {
-                    if let crate::component::TransportType::Tcp(ref addr_str) = inst.transport
+                    if let crate::servicegroup::TransportType::Tcp(ref addr_str) = inst.transport
                         && let Ok((sock, _)) = TcpRequestClient::parse_address(addr_str)
                     {
                         known_addrs.insert(sock);
@@ -1186,7 +1177,7 @@ impl TcpConnectionPool {
                         let mut current_addrs = std::collections::HashSet::<SocketAddr>::new();
 
                         for inst in &instances {
-                            if let crate::component::TransportType::Tcp(ref addr_str) = inst.transport
+                            if let crate::servicegroup::TransportType::Tcp(ref addr_str) = inst.transport
                                 && let Ok((sock, _)) = TcpRequestClient::parse_address(addr_str)
                             {
                                 current_addrs.insert(sock);
@@ -1285,7 +1276,7 @@ impl TcpConnectionPool {
             return;
         };
         let pool = Arc::downgrade(self);
-        // Floor at 30s to prevent busy-loop if DYN_TCP_HOST_IDLE_TTL_SECS=0
+        // Floor at 30s to prevent busy-loop if PGD_TCP_HOST_IDLE_TTL_SECS=0
         let interval = Duration::from_millis((self.host_idle_ttl_ms / 2).max(30_000));
         handle.spawn(async move {
             loop {
@@ -1350,15 +1341,15 @@ impl TcpRequestClient {
     /// Delegates to [`TcpConnectionPool::start_warmup_watcher`].
     pub fn start_warmup(
         &self,
-        instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
+        instance_rx: tokio::sync::watch::Receiver<Vec<crate::servicegroup::Instance>>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) {
         self.pool.start_warmup_watcher(instance_rx, cancel_token);
     }
 
     /// Parse TCP address from string
-    /// Supports formats: "host:port" or "tcp://host:port" or "host:port/endpoint_name"
-    /// Returns (SocketAddr, Option<endpoint_name>)
+    /// Supports formats: "host:port" or "tcp://host:port" or "host:port/portname_name"
+    /// Returns (SocketAddr, Option<portname_name>)
     pub(crate) fn parse_address(address: &str) -> Result<(SocketAddr, Option<String>)> {
         let addr_str = if let Some(stripped) = address.strip_prefix("tcp://") {
             stripped
@@ -1366,12 +1357,12 @@ impl TcpRequestClient {
             address
         };
 
-        // Check if endpoint name is included (format: host:port/endpoint_name)
-        if let Some((socket_part, endpoint_name)) = addr_str.split_once('/') {
+        // Check if portname name is included (format: host:port/portname_name)
+        if let Some((socket_part, portname_name)) = addr_str.split_once('/') {
             let socket_addr = socket_part
                 .parse::<SocketAddr>()
                 .map_err(|e| anyhow::anyhow!("Invalid TCP address '{}': {}", address, e))?;
-            Ok((socket_addr, Some(endpoint_name.to_string())))
+            Ok((socket_addr, Some(portname_name.to_string())))
         } else {
             let socket_addr = addr_str
                 .parse::<SocketAddr>()
@@ -1401,10 +1392,10 @@ impl RequestPlaneClient for TcpRequestClient {
             .bytes_sent
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
 
-        let (addr, endpoint_name) = Self::parse_address(&address)?;
+        let (addr, portname_name) = Self::parse_address(&address)?;
 
-        if let Some(endpoint_name) = endpoint_name {
-            headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
+        if let Some(portname_name) = portname_name {
+            headers.insert("x-portname-path".to_string(), portname_name.clone());
         }
 
         // Get shared connection from pool (Arc, not exclusive borrow)
@@ -1432,11 +1423,11 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
-                let cause = crate::error::DynamoError::from(
+                let cause = crate::error::PagodaError::from(
                     e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
                 );
                 Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
+                    crate::error::PagodaError::builder()
                         .error_type(crate::error::ErrorType::CannotConnect)
                         .message(format!("TCP request to {addr} failed"))
                         .cause(cause)
@@ -1448,7 +1439,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request timeout to {}", addr);
                 Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
+                    crate::error::PagodaError::builder()
                         .error_type(crate::error::ErrorType::CannotConnect)
                         .message(format!("TCP request to {addr} timed out"))
                         .build()
@@ -1467,7 +1458,7 @@ impl RequestPlaneClient for TcpRequestClient {
 
     fn start_warmup(
         &self,
-        instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
+        instance_rx: tokio::sync::watch::Receiver<Vec<crate::servicegroup::Instance>>,
         cancel_token: tokio_util::sync::CancellationToken,
     ) {
         TcpRequestClient::start_warmup(self, instance_rx, cancel_token);
@@ -1496,12 +1487,12 @@ mod tests {
     //!
     //! | 测试名 | 覆盖维度 |
     //! |---|---|
-    //! | `test_tcp_config_default` | （lib-copy）`Default` 锁定关键常量 |
-    //! | `test_tcp_config_from_env` | （lib-copy）4 个环境变量覆盖路径 |
-    //! | `test_parse_address` | （lib-copy）3 种地址格式 + 非法回退 |
-    //! | `test_tcp_client_creation` | （lib-copy）`new` + transport_name/is_healthy 契约 |
-    //! | `test_connection_health_check` 等 17 个 async | （lib-copy）连接池 / LRU / 并发 / 故障恢复 / warmup 端到端集成 |
-    //! | `test_parse_address_with_tcp_prefix_and_endpoint` | tcp:// 前缀 + endpoint 后缀同时存在 |
+    //! | `test_tcp_config_default` | `Default` 锁定关键常量 |
+    //! | `test_tcp_config_from_env` | 4 个环境变量覆盖路径 |
+    //! | `test_parse_address` | 3 种地址格式 + 非法回退 |
+    //! | `test_tcp_client_creation` | `new` + transport_name/is_healthy 契约 |
+    //! | `test_connection_health_check` 等 17 个 async | 连接池 / LRU / 并发 / 故障恢复 / warmup 端到端集成 |
+    //! | `test_parse_address_with_tcp_prefix_and_portname` | tcp:// 前缀 + portname 后缀同时存在 |
     //! | `test_parse_address_rejects_empty_input` | 空串 → Err |
     //! | `test_parse_address_rejects_address_without_port` | 缺少 port → Err |
     //! | `test_parse_address_error_message_includes_input` | 错误消息含入参（可观测性） |
@@ -1532,10 +1523,10 @@ mod tests {
     #[test]
     fn test_tcp_config_from_env() {
         unsafe {
-            std::env::set_var("DYN_TCP_REQUEST_TIMEOUT", "10");
-            std::env::set_var("DYN_TCP_POOL_SIZE", "50");
-            std::env::set_var("DYN_TCP_CONNECT_TIMEOUT", "3");
-            std::env::set_var("DYN_TCP_CHANNEL_BUFFER", "100");
+            std::env::set_var("PGD_TCP_REQUEST_TIMEOUT", "10");
+            std::env::set_var("PGD_TCP_POOL_SIZE", "50");
+            std::env::set_var("PGD_TCP_CONNECT_TIMEOUT", "3");
+            std::env::set_var("PGD_TCP_CHANNEL_BUFFER", "100");
         }
 
         let config = TcpRequestConfig::from_env();
@@ -1546,10 +1537,10 @@ mod tests {
 
         // Clean up env vars
         unsafe {
-            std::env::remove_var("DYN_TCP_REQUEST_TIMEOUT");
-            std::env::remove_var("DYN_TCP_POOL_SIZE");
-            std::env::remove_var("DYN_TCP_CONNECT_TIMEOUT");
-            std::env::remove_var("DYN_TCP_CHANNEL_BUFFER");
+            std::env::remove_var("PGD_TCP_REQUEST_TIMEOUT");
+            std::env::remove_var("PGD_TCP_POOL_SIZE");
+            std::env::remove_var("PGD_TCP_CONNECT_TIMEOUT");
+            std::env::remove_var("PGD_TCP_CHANNEL_BUFFER");
         }
     }
 
@@ -1561,10 +1552,10 @@ mod tests {
         let (addr2, _) = TcpRequestClient::parse_address("tcp://127.0.0.1:9090").unwrap();
         assert_eq!(addr2.port(), 9090);
 
-        let (addr3, endpoint) =
-            TcpRequestClient::parse_address("127.0.0.1:8080/test_endpoint").unwrap();
+        let (addr3, portname) =
+            TcpRequestClient::parse_address("127.0.0.1:8080/test_portname").unwrap();
         assert_eq!(addr3.port(), 8080);
-        assert_eq!(endpoint, Some("test_endpoint".to_string()));
+        assert_eq!(portname, Some("test_portname".to_string()));
 
         assert!(TcpRequestClient::parse_address("invalid").is_err());
     }
@@ -1688,7 +1679,7 @@ mod tests {
         assert!(conn.is_healthy(), "New connection should be healthy");
 
         let mut headers = Headers::new();
-        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+        headers.insert("x-portname-path".to_string(), "test".to_string());
 
         let result = conn.send_request(Bytes::from("ping"), &headers).await;
         assert!(result.is_ok(), "Request should succeed");
@@ -1760,7 +1751,7 @@ mod tests {
             let conn = conn.clone();
             let handle = tokio::spawn(async move {
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 let payload = format!("request_{}", i);
                 conn.send_request(Bytes::from(payload.clone()), &headers)
                     .await
@@ -1799,7 +1790,7 @@ mod tests {
         // Get connection twice sequentially -- should reuse the same TCP connection
         let conn1 = pool.get_connection(addr).await.unwrap();
         let mut headers = Headers::new();
-        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+        headers.insert("x-portname-path".to_string(), "test".to_string());
         let _ = conn1
             .send_request(Bytes::from("ping1"), &headers)
             .await
@@ -1867,7 +1858,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let conn = pool.get_connection(addr).await?;
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 conn.send_request(Bytes::from(format!("req_{}", i)), &headers)
                     .await
             }));
@@ -1908,7 +1899,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let conn = pool.get_connection(addr).await?;
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 conn.send_request(Bytes::from(format!("req_{}", i)), &headers)
                     .await
             }));
@@ -1991,7 +1982,7 @@ mod tests {
         // Use pool successfully
         let conn = pool.get_connection(addr).await.unwrap();
         let mut headers = Headers::new();
-        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+        headers.insert("x-portname-path".to_string(), "test".to_string());
         let result = conn
             .send_request(Bytes::from("before_crash"), &headers)
             .await;
@@ -2093,7 +2084,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let conn = pool.get_connection(addr).await?;
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 conn.send_request(Bytes::from(format!("req_{}", i)), &headers)
                     .await
             }));
@@ -2136,7 +2127,7 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     let conn = pool.get_connection(addr).await?;
                     let mut headers = Headers::new();
-                    headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                    headers.insert("x-portname-path".to_string(), "test".to_string());
                     conn.send_request(Bytes::from(format!("round_{}_req_{}", round, i)), &headers)
                         .await
                 }));
@@ -2174,7 +2165,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let conn = pool.get_connection(addr).await?;
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 conn.send_request(Bytes::from(format!("req_{}", i)), &headers)
                     .await
             }));
@@ -2312,7 +2303,7 @@ mod tests {
                 handles.push(tokio::spawn(async move {
                     let conn = pool.get_connection(addr).await?;
                     let mut headers = Headers::new();
-                    headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                    headers.insert("x-portname-path".to_string(), "test".to_string());
                     conn.send_request(Bytes::from(format!("req_{}", i)), &headers)
                         .await
                 }));
@@ -2359,7 +2350,7 @@ mod tests {
         // Create a connection to populate the host entry
         let conn = pool.get_connection(addr).await.unwrap();
         let mut headers = Headers::new();
-        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+        headers.insert("x-portname-path".to_string(), "test".to_string());
         let _ = conn.send_request(Bytes::from("test"), &headers).await;
         drop(conn);
 
@@ -2391,7 +2382,7 @@ mod tests {
         // Get connection twice from pool
         let conn1 = pool.get_connection(addr).await.unwrap();
         let mut headers = Headers::new();
-        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+        headers.insert("x-portname-path".to_string(), "test".to_string());
         let _ = conn1
             .send_request(Bytes::from("test1"), &headers)
             .await
@@ -2438,7 +2429,7 @@ mod tests {
 
         if let Ok(conn) = result {
             let mut headers = Headers::new();
-            headers.insert("x-endpoint-path".to_string(), "test".to_string());
+            headers.insert("x-portname-path".to_string(), "test".to_string());
             let result = tokio::time::timeout(
                 Duration::from_millis(250),
                 conn.send_request(Bytes::from("test"), &headers),
@@ -2464,7 +2455,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_warmup_pre_connects_on_instance_discovery() {
-        use crate::component::{Instance, TransportType};
+        use crate::servicegroup::{Instance, TransportType};
 
         let (addr, conn_count) = spawn_echo_server().await;
 
@@ -2490,11 +2481,11 @@ mod tests {
         assert_eq!(conn_count.load(Ordering::SeqCst), 0);
 
         // Discover a new TCP backend
-        let tcp_addr = format!("{}:{}/test_endpoint", addr.ip(), addr.port());
+        let tcp_addr = format!("{}:{}/test_portname", addr.ip(), addr.port());
         instance_tx
             .send(vec![Instance {
-                component: "test".to_string(),
-                endpoint: "test_ep".to_string(),
+                servicegroup: "test".to_string(),
+                portname: "test_ep".to_string(),
                 namespace: "default".to_string(),
                 instance_id: 1,
                 transport: TransportType::Tcp(tcp_addr),
@@ -2536,7 +2527,7 @@ mod tests {
             let conn = conn.clone();
             tokio::spawn(async move {
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 tokio::time::timeout(
                     Duration::from_millis(200),
                     conn.send_request(Bytes::from("queued_after_close"), &headers),
@@ -2587,7 +2578,7 @@ mod tests {
             let conn = conn.clone();
             handles.push(tokio::spawn(async move {
                 let mut headers = Headers::new();
-                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                headers.insert("x-portname-path".to_string(), "test".to_string());
                 conn.send_request(Bytes::from(format!("batch_req_{}", i)), &headers)
                     .await
             }));
@@ -2611,7 +2602,7 @@ mod tests {
     // ── 新增：parse_address 边界 + 构造器 / 配置 / latency-trace ──────────────
 
     #[test]
-    fn test_parse_address_with_tcp_prefix_and_endpoint() {
+    fn test_parse_address_with_tcp_prefix_and_portname() {
         let (addr, ep) =
             TcpRequestClient::parse_address("tcp://127.0.0.1:5555/inference").unwrap();
         assert_eq!(addr.port(), 5555);
@@ -2653,7 +2644,7 @@ mod tests {
 
     #[test]
     fn test_latency_trace_enabled_env_values() {
-        let key = "DYN_TCP_LATENCY_TRACE";
+        let key = "PGD_TCP_LATENCY_TRACE";
         unsafe {
             std::env::remove_var(key);
         }

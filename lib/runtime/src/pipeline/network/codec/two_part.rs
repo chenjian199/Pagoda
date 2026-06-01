@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::codec::two_part` —— TwoPart 协议底层帧构造与解析
@@ -342,7 +342,6 @@ mod tests {
     //! | `test_decode_skips_zero_checksum` | 对端 checksum=0 → 跳过校验 |
     //!
     //! ## 意义
-    //! 17 条 lib-copy 名锁定 codec 协议与状态机；8 条新增覆盖：状态机 `Ok(None)`
     //! 增量返回、长度溢出在 `MessageTooLarge` 上的语义、`encode` 后 `dst.len()` 严
     //! 格等于 `total_len`（不多 reserve、不多写）、`TwoPartMessage` 9 个公开方法
     //! 的相互一致性，以及"对端 checksum=0 → 跳过"的向后兼容路径。
@@ -358,8 +357,6 @@ mod tests {
     use tokio_util::codec::{Decoder, FramedRead};
 
     use super::*;
-
-    // -------- lib-copy 原 17 条（语义不变） --------
 
     /// Test encoding and decoding of a message with both header and data.
     #[test]
@@ -751,8 +748,6 @@ mod tests {
         assert_eq!(decoded.header, header_data);
         assert_eq!(decoded.data, body_data);
     }
-
-    // -------- 新增（按测试矩阵第 18~25 条） --------
 
     /// 帧前缀 24 字节未集齐时 `Decoder` 返回 `Ok(None)`，等待更多输入。
     #[test]

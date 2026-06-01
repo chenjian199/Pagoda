@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::codec::zero_copy_decoder` —— TCP 请求帧的零拷贝解码器
@@ -7,15 +7,15 @@
 //! - 与 [`super::TcpRequest`] / [`super::TwoPartCodec`] 走的"拥有式"路径互补：本模块持有
 //!   一个 **可重用** 的 [`BytesMut`] 读缓冲，通过 `split_to(n).freeze()` 将完整帧切出为
 //!   `Bytes`（Arc 引用计数），然后用 **借用切片** 形式（`&[u8]` / `Bytes::slice(..)`)
-//!   暴露 endpoint / headers / payload。整条路径 **0 次内存拷贝**，clone 也仅是 Arc 增引。
+//!   暴露 portname / headers / payload。整条路径 **0 次内存拷贝**，clone 也仅是 Arc 增引。
 //! - 缓冲在 **空且容量过大** 时主动收缩回 [`INITIAL_BUFFER_SIZE`]，避免长尾大消息把缓冲
-//!   永久撑大；收缩阈值可通过环境变量 `DYN_TCP_SHRINK_MESSAGE_SIZE` 调整。
+//!   永久撑大；收缩阈值可通过环境变量 `PGD_TCP_SHRINK_MESSAGE_SIZE` 调整。
 //!
-//! ## 外部契约（必须与 lib-copy 字节级一致）
+//! ## 外部契约
 //! - `pub struct ZeroCopyTcpDecoder` + `new() / with_capacity(usize) / read_message<R> /
 //!   buffer_capacity() / buffered_len() / Default`
-//! - `pub struct TcpRequestMessageZeroCopy: Clone + Debug` + `endpoint_path() ->
-//!   Result<&str, Utf8Error> / endpoint_path_bytes() / headers_bytes() / headers() /
+//! - `pub struct TcpRequestMessageZeroCopy: Clone + Debug` + `portname_path() ->
+//!   Result<&str, Utf8Error> / portname_path_bytes() / headers_bytes() / headers() /
 //!   payload() -> Bytes / total_size() / raw_bytes() -> &Bytes`
 //! - 错误语义：
 //!   - 连接尚未发出任何字节就关闭 → [`io::ErrorKind::UnexpectedEof`] + `"connection closed"`
@@ -48,7 +48,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 use super::{
-    check_tcp_request_max_message_size, parse_tcp_request_frame_header, tcp_request_endpoint_len,
+    check_tcp_request_max_message_size, parse_tcp_request_frame_header, tcp_request_portname_len,
     tcp_request_header_size, tcp_request_headers_len,
 };
 use crate::pipeline::network::get_tcp_max_message_size;
@@ -87,7 +87,7 @@ const _: () = assert!(DEFAULT_SHRINK_SIZE > 0);
 /// 进程内 once-init 的收缩阈值缓存（受 `get_tcp_max_message_size()` 与环境变量影响）。
 static SHRINK_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// 读取环境变量 `DYN_TCP_SHRINK_MESSAGE_SIZE`，与 `max_message_size`、`INITIAL_BUFFER_SIZE`
+/// 读取环境变量 `PGD_TCP_SHRINK_MESSAGE_SIZE`，与 `max_message_size`、`INITIAL_BUFFER_SIZE`
 /// 共同决定最终收缩阈值，并把结果缓存到 [`SHRINK_MESSAGE_SIZE`]。
 ///
 /// 该函数仅在首次调用时做解析与日志告警，后续调用走 `OnceLock::get_or_init` 的快路径。
@@ -96,13 +96,13 @@ fn get_shrink_message_size() -> usize {
         let max_size = get_tcp_max_message_size();
 
         // Check for environment variable override
-        let env_result = std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE");
+        let env_result = std::env::var("PGD_TCP_SHRINK_MESSAGE_SIZE");
         let env_shrink_size = env_result.as_ref().ok().and_then(|s| {
             s.parse::<usize>().ok().or_else(|| {
                 tracing::warn!(
-                    env_var = "DYN_TCP_SHRINK_MESSAGE_SIZE",
+                    env_var = "PGD_TCP_SHRINK_MESSAGE_SIZE",
                     value = %s,
-                    "Invalid value for DYN_TCP_SHRINK_MESSAGE_SIZE, using default"
+                    "Invalid value for PGD_TCP_SHRINK_MESSAGE_SIZE, using default"
                 );
                 None
             })
@@ -119,7 +119,7 @@ fn get_shrink_message_size() -> usize {
                 resolved_size = resolved,
                 max_size = max_size,
                 initial_buffer_size = INITIAL_BUFFER_SIZE,
-                "DYN_TCP_SHRINK_MESSAGE_SIZE was clamped to valid range. Note the size is in bytes."
+                "PGD_TCP_SHRINK_MESSAGE_SIZE was clamped to valid range. Note the size is in bytes."
             );
         }
 
@@ -150,15 +150,15 @@ fn resolve_shrink_message_size(max_size: usize, env_shrink_size: Option<usize>) 
 /// 当前填充阶段，仅用于在 `fill_at_least` 内部根据语义生成精确的 EOF 错误消息。
 ///
 /// 状态切换路径：
-/// `EndpointLen -> EndpointAndHeadersLen -> FullHeader -> FullMessage { total }`
+/// `PortNameLen -> PortNameAndHeadersLen -> FullHeader -> FullMessage { total }`
 #[derive(Debug, Clone, Copy)]
 enum FillStage {
     /// 还在等首 2 字节的 path_len。若此时连接被关闭：
     /// - 缓冲为空 → `"connection closed"`（对端正常关闭，无入站请求）；
     /// - 缓冲非空 → `"incomplete message header"`（开头几个字节后就断）。
-    EndpointLen,
+    PortNameLen,
     /// 已知 path_len，正等 path 与 headers_len。EOF 一律视为头部不完整。
-    EndpointAndHeadersLen,
+    PortNameAndHeadersLen,
     /// 已知 headers_len，正等 headers 与 payload_len（即整个帧头完整）。EOF 视为头部不完整。
     FullHeader,
     /// 帧头完整、已知 payload 全长 `total`，正等剩余 payload。EOF 给出"期望 N 实际 M"。
@@ -169,11 +169,11 @@ impl FillStage {
     /// 把当前阶段与"读到 0 字节"的事实翻译成具体 [`io::Error`]。
     fn into_eof_error(self, buffered_now: usize) -> io::Error {
         match self {
-            FillStage::EndpointLen if buffered_now == 0 => {
+            FillStage::PortNameLen if buffered_now == 0 => {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")
             }
-            FillStage::EndpointLen
-            | FillStage::EndpointAndHeadersLen
+            FillStage::PortNameLen
+            | FillStage::PortNameAndHeadersLen
             | FillStage::FullHeader => {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete message header")
             }
@@ -197,7 +197,7 @@ impl FillStage {
 /// This decoder maintains an internal buffer and only allocates when necessary.
 /// Messages are returned as Arc-counted Bytes slices, making cloning extremely cheap.
 /// The reusable buffer resets back to INITIAL_BUFFER_SIZE only when unread data
-/// is empty and capacity exceeds DYN_TCP_SHRINK_MESSAGE_SIZE.
+/// is empty and capacity exceeds PGD_TCP_SHRINK_MESSAGE_SIZE.
 pub struct ZeroCopyTcpDecoder {
     /// Reusable read buffer - grows as needed, shrinks when empty and oversized
     read_buffer: BytesMut,
@@ -235,14 +235,14 @@ impl ZeroCopyTcpDecoder {
         reader: &mut R,
     ) -> io::Result<TcpRequestMessageZeroCopy> {
         // ── Stage 1：等到至少读出 path_len（前 2 字节） ──
-        self.fill_at_least(reader, super::TCP_REQUEST_ENDPOINT_LEN_WIDTH, FillStage::EndpointLen)
+        self.fill_at_least(reader, super::TCP_REQUEST_ENDPOINT_LEN_WIDTH, FillStage::PortNameLen)
             .await?;
-        let path_len = tcp_request_endpoint_len(&self.read_buffer)?;
+        let path_len = tcp_request_portname_len(&self.read_buffer)?;
 
         // ── Stage 2：等到 path + headers_len 全部到达 ──
         let initial_header_size =
             super::TCP_REQUEST_ENDPOINT_LEN_WIDTH + path_len + super::TCP_REQUEST_HEADERS_LEN_WIDTH;
-        self.fill_at_least(reader, initial_header_size, FillStage::EndpointAndHeadersLen)
+        self.fill_at_least(reader, initial_header_size, FillStage::PortNameAndHeadersLen)
             .await?;
         let headers_len = tcp_request_headers_len(&self.read_buffer, path_len)?;
 
@@ -345,16 +345,16 @@ impl TcpRequestMessageZeroCopy {
         Self { raw, parsed }
     }
 
-    /// Get endpoint path as a string slice (zero-copy)
+    /// Get portname path as a string slice (zero-copy)
     ///
     /// This returns a reference into the message buffer, no allocation.
-    pub fn endpoint_path(&self) -> Result<&str, std::str::Utf8Error> {
-        std::str::from_utf8(self.endpoint_path_bytes())
+    pub fn portname_path(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(self.portname_path_bytes())
     }
 
-    /// Get endpoint path as bytes (zero-copy)
-    pub fn endpoint_path_bytes(&self) -> &[u8] {
-        &self.raw[self.parsed.endpoint_start()..self.parsed.endpoint_end()]
+    /// Get portname path as bytes (zero-copy)
+    pub fn portname_path_bytes(&self) -> &[u8] {
+        &self.raw[self.parsed.portname_start()..self.parsed.portname_end()]
     }
 
     /// Get headers as bytes (zero-copy)
@@ -402,7 +402,7 @@ impl std::fmt::Debug for TcpRequestMessageZeroCopy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TcpRequestMessageZeroCopy")
             .field("total_size", &self.total_size())
-            .field("endpoint_path", &self.endpoint_path().ok())
+            .field("portname_path", &self.portname_path().ok())
             .field("payload_len", &self.payload_len())
             .finish()
     }
@@ -423,7 +423,7 @@ mod tests {
     //! | `test_decoder_default_equals_new_initial_state` | `Default::default()` 与 `new()` 等价（契约面） |
     //! | `test_buffered_len_zero_after_full_read` | 完整读完后 `buffered_len()` 归零（不变式） |
     //! | `test_zero_copy_decoder_basic` | （lib-copy）单帧 happy path |
-    //! | `test_zero_copy_decoder_allows_empty_and_long_endpoint_paths` | （lib-copy）空 path 与 2 KiB path 边界 |
+    //! | `test_zero_copy_decoder_allows_empty_and_long_portname_paths` | （lib-copy）空 path 与 2 KiB path 边界 |
     //! | `test_zero_copy_decoder_large_payload` | （lib-copy）200 KiB payload，触发 buffer grow |
     //! | `test_zero_copy_decoder_total_size_limit` | （lib-copy）`max_message_size` 越界 → `InvalidData` |
     //! | `test_zero_copy_decoder_with_headers` | （lib-copy）JSON headers 解析 + `headers_bytes()` 视图 |
@@ -434,8 +434,8 @@ mod tests {
     //! | `test_read_message_eof_mid_payload` | 帧头完整但 payload 截断 → `"incomplete message: expected … got …"` |
     //! | `test_headers_invalid_json_returns_empty_map` | 非法 JSON headers → `headers()` 返回空 map（不抛错） |
     //! | `test_payload_is_zero_copy_slice_of_raw` | `payload()` 与 `raw_bytes()` 共享同一底层 buffer |
-    //! | `test_endpoint_path_utf8_error_propagates` | 非 UTF-8 endpoint → `endpoint_path()` 返回 Err |
-    //! | `test_debug_impl_contains_total_size_and_endpoint` | `Debug` 输出含 `total_size` / `endpoint_path` 字段（可观测性） |
+    //! | `test_portname_path_utf8_error_propagates` | 非 UTF-8 portname → `portname_path()` 返回 Err |
+    //! | `test_debug_impl_contains_total_size_and_portname` | `Debug` 输出含 `total_size` / `portname_path` 字段（可观测性） |
     //! | `test_read_message_fragmented_byte_by_byte` | 输入按 1 字节切片分多次到达 —— 状态机鲁棒性 |
 
     use super::*;
@@ -445,10 +445,10 @@ mod tests {
 
     // ── 测试辅助：构造一帧合法 TCP 请求字节序列 ────────────────────────────────
 
-    fn build_frame(endpoint: &str, headers: &[u8], payload: &[u8]) -> Vec<u8> {
+    fn build_frame(portname: &str, headers: &[u8], payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
-        buf.extend_from_slice(endpoint.as_bytes());
+        buf.extend_from_slice(&(portname.len() as u16).to_be_bytes());
+        buf.extend_from_slice(portname.as_bytes());
         buf.extend_from_slice(&(headers.len() as u16).to_be_bytes());
         buf.extend_from_slice(headers);
         buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -476,8 +476,6 @@ mod tests {
             Poll::Ready(Ok(()))
         }
     }
-
-    // ── lib-copy 同名测试 + 新增测试 ──────────────────────────────────────────
 
     #[test]
     fn test_resolve_shrink_message_size_edge_cases() {
@@ -567,46 +565,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_copy_decoder_basic() {
-        let endpoint = "test/endpoint";
+        let portname = "test/portname";
         let payload = b"Hello, World!";
-        let message = build_frame(endpoint, &[], payload);
+        let message = build_frame(portname, &[], payload);
 
         let mut reader = &message[..];
         let mut decoder = ZeroCopyTcpDecoder::new();
         let msg = decoder.read_message(&mut reader).await.unwrap();
 
-        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.portname_path().unwrap(), portname);
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.total_size(), message.len());
         assert_eq!(msg.headers().len(), 0);
     }
 
     #[tokio::test]
-    async fn test_zero_copy_decoder_allows_empty_and_long_endpoint_paths() {
-        for endpoint in [String::new(), "x".repeat(2048)] {
+    async fn test_zero_copy_decoder_allows_empty_and_long_portname_paths() {
+        for portname in [String::new(), "x".repeat(2048)] {
             let payload = b"payload";
-            let message = build_frame(endpoint.as_str(), &[], payload);
+            let message = build_frame(portname.as_str(), &[], payload);
 
             let mut reader = &message[..];
             let mut decoder = ZeroCopyTcpDecoder::new();
             let msg = decoder.read_message(&mut reader).await.unwrap();
 
-            assert_eq!(msg.endpoint_path().unwrap(), endpoint.as_str());
+            assert_eq!(msg.portname_path().unwrap(), portname.as_str());
             assert_eq!(msg.payload().as_ref(), payload);
         }
     }
 
     #[tokio::test]
     async fn test_zero_copy_decoder_large_payload() {
-        let endpoint = "large/endpoint";
+        let portname = "large/portname";
         let payload = vec![0x42u8; 200 * 1024];
-        let message = build_frame(endpoint, &[], &payload);
+        let message = build_frame(portname, &[], &payload);
 
         let mut reader = &message[..];
         let mut decoder = ZeroCopyTcpDecoder::new();
         let msg = decoder.read_message(&mut reader).await.unwrap();
 
-        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.portname_path().unwrap(), portname);
         assert_eq!(msg.payload().len(), payload.len());
     }
 
@@ -616,9 +614,9 @@ mod tests {
         let mut decoder = ZeroCopyTcpDecoder::with_capacity(256);
         decoder.max_message_size = max_size;
 
-        let endpoint = "test/endpoint";
+        let portname = "test/portname";
         let payload = vec![0x42u8; max_size]; // 单独 payload 已等于 max
-        let message = build_frame(endpoint, &[], &payload);
+        let message = build_frame(portname, &[], &payload);
 
         // total_len = 2 + 13 + 2 + 0 + 4 + 1024 = 1045 > 1024
         let mut reader = &message[..];
@@ -632,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_copy_decoder_with_headers() {
-        let endpoint = "api/v1/inference";
+        let portname = "api/v1/inference";
         let payload = b"Request payload data";
 
         let mut headers_map = std::collections::HashMap::new();
@@ -641,13 +639,13 @@ mod tests {
         headers_map.insert("request-id".to_string(), "req-12345".to_string());
 
         let headers_json = serde_json::to_vec(&headers_map).unwrap();
-        let message = build_frame(endpoint, &headers_json, payload);
+        let message = build_frame(portname, &headers_json, payload);
 
         let mut reader = &message[..];
         let mut decoder = ZeroCopyTcpDecoder::new();
         let msg = decoder.read_message(&mut reader).await.unwrap();
 
-        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.portname_path().unwrap(), portname);
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.total_size(), message.len());
 
@@ -668,15 +666,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_copy_decoder_empty_vs_populated_headers() {
-        let endpoint = "test/endpoint";
+        let portname = "test/portname";
         let payload = b"test data";
 
         // Round 1：empty headers
-        let message_empty = build_frame(endpoint, &[], payload);
+        let message_empty = build_frame(portname, &[], payload);
         let mut decoder = ZeroCopyTcpDecoder::new();
         let mut reader = &message_empty[..];
         let msg = decoder.read_message(&mut reader).await.unwrap();
-        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.portname_path().unwrap(), portname);
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.headers().len(), 0);
         assert_eq!(msg.headers_bytes().len(), 0);
@@ -685,10 +683,10 @@ mod tests {
         let mut headers_map = std::collections::HashMap::new();
         headers_map.insert("x-test-header".to_string(), "test-value".to_string());
         let headers_json = serde_json::to_vec(&headers_map).unwrap();
-        let message_with_headers = build_frame(endpoint, &headers_json, payload);
+        let message_with_headers = build_frame(portname, &headers_json, payload);
         let mut reader = &message_with_headers[..];
         let msg = decoder.read_message(&mut reader).await.unwrap();
-        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.portname_path().unwrap(), portname);
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.headers().len(), 1);
         assert_eq!(msg.headers().get("x-test-header").unwrap(), "test-value");
@@ -696,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_copy_decoder_buffer_shrinking() {
-        let endpoint = "test/endpoint";
+        let portname = "test/portname";
         let small_payload = b"small";
         let large_payload = vec![0x42u8; 1024 * 1024]; // 1 MiB
 
@@ -706,7 +704,7 @@ mod tests {
 
         assert!(decoder.buffer_capacity() <= INITIAL_BUFFER_SIZE);
 
-        let large_message = build_frame(endpoint, &[], &large_payload);
+        let large_message = build_frame(portname, &[], &large_payload);
         let mut reader = &large_message[..];
         decoder.read_message(&mut reader).await.unwrap();
 
@@ -717,7 +715,7 @@ mod tests {
         );
         assert_eq!(decoder.buffered_len(), 0, "buffer should be empty after read");
 
-        let small_message = build_frame(endpoint, &[], small_payload);
+        let small_message = build_frame(portname, &[], small_payload);
         let mut reader = &small_message[..];
         let msg = decoder.read_message(&mut reader).await.unwrap();
         assert_eq!(msg.payload().as_ref(), small_payload);
@@ -755,9 +753,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_message_eof_mid_payload() {
         // 帧头完整，但 payload 只发了一半
-        let endpoint = "ep";
+        let portname = "ep";
         let payload = b"FULL-PAYLOAD";
-        let frame = build_frame(endpoint, &[], payload);
+        let frame = build_frame(portname, &[], payload);
         // 只发前 N 字节（截掉 payload 末尾几个字节）
         let truncated = &frame[..frame.len() - 4];
 
@@ -779,10 +777,10 @@ mod tests {
     #[tokio::test]
     async fn test_headers_invalid_json_returns_empty_map() {
         // 非法 JSON header 字节：headers() 应回退到空 map（不抛错）
-        let endpoint = "ep";
+        let portname = "ep";
         let bad_headers = b"\xff\xff\xff not-json"; // 非法 UTF-8 / 非法 JSON
         let payload = b"x";
-        let frame = build_frame(endpoint, bad_headers, payload);
+        let frame = build_frame(portname, bad_headers, payload);
 
         let mut reader = &frame[..];
         let mut decoder = ZeroCopyTcpDecoder::new();
@@ -794,9 +792,9 @@ mod tests {
     #[tokio::test]
     async fn test_payload_is_zero_copy_slice_of_raw() {
         // payload() 是 raw 的 Bytes::slice：指针应落在 raw 区间内、长度匹配 payload_len
-        let endpoint = "ep";
+        let portname = "ep";
         let payload = b"PAYLOAD-XYZ";
-        let frame = build_frame(endpoint, &[], payload);
+        let frame = build_frame(portname, &[], payload);
         let mut decoder = ZeroCopyTcpDecoder::new();
         let mut reader = &frame[..];
         let msg = decoder.read_message(&mut reader).await.unwrap();
@@ -815,8 +813,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_endpoint_path_utf8_error_propagates() {
-        // 构造合法长度但非 UTF-8 的 endpoint 字节
+    async fn test_portname_path_utf8_error_propagates() {
+        // 构造合法长度但非 UTF-8 的 portname 字节
         let bad_endpoint = [0xffu8, 0xfe, 0xfd];
         let mut frame = Vec::new();
         frame.extend_from_slice(&(bad_endpoint.len() as u16).to_be_bytes());
@@ -827,15 +825,15 @@ mod tests {
         let mut decoder = ZeroCopyTcpDecoder::new();
         let mut reader = &frame[..];
         let msg = decoder.read_message(&mut reader).await.unwrap();
-        assert_eq!(msg.endpoint_path_bytes(), &bad_endpoint);
-        assert!(msg.endpoint_path().is_err());
+        assert_eq!(msg.portname_path_bytes(), &bad_endpoint);
+        assert!(msg.portname_path().is_err());
     }
 
     #[tokio::test]
-    async fn test_debug_impl_contains_total_size_and_endpoint() {
-        let endpoint = "dbg/ep";
+    async fn test_debug_impl_contains_total_size_and_portname() {
+        let portname = "dbg/ep";
         let payload = b"d";
-        let frame = build_frame(endpoint, &[], payload);
+        let frame = build_frame(portname, &[], payload);
         let mut decoder = ZeroCopyTcpDecoder::new();
         let mut reader = &frame[..];
         let msg = decoder.read_message(&mut reader).await.unwrap();
@@ -843,7 +841,7 @@ mod tests {
         let s = format!("{:?}", msg);
         assert!(s.contains("TcpRequestMessageZeroCopy"));
         assert!(s.contains("total_size"));
-        assert!(s.contains("endpoint_path"));
+        assert!(s.contains("portname_path"));
         assert!(s.contains(&format!("{}", frame.len())));
     }
 
@@ -851,18 +849,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_message_fragmented_byte_by_byte() {
-        let endpoint = "fragmented/path";
+        let portname = "fragmented/path";
         let mut headers_map = std::collections::HashMap::new();
         headers_map.insert("k".to_string(), "v".to_string());
         let headers_json = serde_json::to_vec(&headers_map).unwrap();
         let payload = b"HELLO-FRAGMENTED-WORLD";
 
-        let frame = build_frame(endpoint, &headers_json, payload);
+        let frame = build_frame(portname, &headers_json, payload);
         let mut reader = ByteByByteReader { data: &frame, pos: 0 };
 
         let mut decoder = ZeroCopyTcpDecoder::new();
         let msg = decoder.read_message(&mut reader).await.unwrap();
-        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.portname_path().unwrap(), portname);
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.headers().get("k").unwrap(), "v");
         assert_eq!(msg.total_size(), frame.len());

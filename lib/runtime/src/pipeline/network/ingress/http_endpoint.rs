@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `pipeline::network::ingress::http_endpoint` —— HTTP/2 入站端点服务器
@@ -9,16 +9,16 @@
 //! TCP/NATS 服务器保持一致。
 //!
 //! ## 外部契约
-//! - 公开 `HttpEndpointServer` 与 `RequestPlaneServer` 实现，签名与 lib-copy 一致；
+//! - 公开 `HttpEndpointServer` 与 `RequestPlaneServer` 实现，签名一致；
 //!   `address()` 返回 `http://host:port` 形式，`transport_name() -> "http"`、`is_healthy()` 行为均为契约。
-//! - 路由路径与 header 名（`x-dynamo-request-id` 等）是跨语言契约。
+//! - 路由路径与 header 名（`x-pagoda-request-id` 等）是跨语言契约。
 //!
 //! ## 实现要点
 //! - 监听 socket 通过 `tokio::net::TcpListener` 创建后立即记录端口，便于 `address()` 拼接；
 //!   监听任务持有 `CancellationToken`，关停时由它触发 graceful。
 //! - 服务端不做 retry / rate-limit，这些策略放在更上层的 router。
 
-//! HTTP endpoint for receiving requests via Axum/HTTP/2
+//! HTTP portname for receiving requests via Axum/HTTP/2
 
 use super::*;
 use crate::SystemHealth;
@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 
-/// Default root path for dynamo RPC endpoints
+/// Default root path for pagoda RPC portnames
 const DEFAULT_RPC_ROOT_PATH: &str = "/v1/rpc";
 
 // === SECTION: [1] 版本与常量 ===
@@ -55,21 +55,21 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // === SECTION: [2] 共享 HTTP 服务器与处理器结构 ===
 
-/// Shared HTTP server that handles multiple endpoints on a single port
+/// Shared HTTP server that handles multiple portnames on a single port
 pub struct SharedHttpServer {
-    handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+    handlers: Arc<DashMap<String, Arc<PortNameHandler>>>,
     bind_addr: SocketAddr,
     actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
 }
 
-/// Handler for a specific endpoint
-struct EndpointHandler {
+/// Handler for a specific portname
+struct PortNameHandler {
     service_handler: Arc<dyn PushWorkHandler>,
     instance_id: u64,
     namespace: Arc<String>,
-    component_name: Arc<String>,
-    endpoint_name: Arc<String>,
+    servicegroup_name: Arc<String>,
+    portname_name: Arc<String>,
     system_health: Arc<Mutex<SystemHealth>>,
     inflight: Arc<AtomicU64>,
     notify: Arc<Notify>,
@@ -90,24 +90,24 @@ impl SharedHttpServer {
         self.actual_addr.try_read().ok().and_then(|g| *g)
     }
 
-    /// Register an endpoint handler with this server
+    /// Register an portname handler with this server
     #[allow(clippy::too_many_arguments)]
-    pub async fn register_endpoint(
+    pub async fn register_portname(
         &self,
         subject: String,
         service_handler: Arc<dyn PushWorkHandler>,
         instance_id: u64,
         namespace: String,
-        component_name: String,
-        endpoint_name: String,
+        servicegroup_name: String,
+        portname_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        let handler = Arc::new(EndpointHandler {
+        let handler = Arc::new(PortNameHandler {
             service_handler,
             instance_id,
             namespace: Arc::new(namespace),
-            component_name: Arc::new(component_name),
-            endpoint_name: Arc::new(endpoint_name.clone()),
+            servicegroup_name: Arc::new(servicegroup_name),
+            portname_name: Arc::new(portname_name.clone()),
             system_health: system_health.clone(),
             inflight: Arc::new(AtomicU64::new(0)),
             notify: Arc::new(Notify::new()),
@@ -117,29 +117,29 @@ impl SharedHttpServer {
         let subject_clone = subject.clone();
         self.handlers.insert(subject, handler);
 
-        system_health.lock().set_endpoint_registered(&endpoint_name);
+        system_health.lock().set_portname_registered(&portname_name);
 
-        tracing::debug!("Registered endpoint handler for subject: {subject_clone}");
+        tracing::debug!("Registered portname handler for subject: {subject_clone}");
         Ok(())
     }
 
-    /// Unregister an endpoint handler
-    pub async fn unregister_endpoint(&self, subject: &str, endpoint_name: &str) {
+    /// Unregister an portname handler
+    pub async fn unregister_portname(&self, subject: &str, portname_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(subject) {
             handler
                 .system_health
                 .lock()
-                .set_endpoint_health_status(endpoint_name, HealthStatus::NotReady);
+                .set_portname_health_status(portname_name, HealthStatus::NotReady);
             tracing::debug!(
-                endpoint_name = %endpoint_name,
+                portname_name = %portname_name,
                 subject = %subject,
-                "Unregistered HTTP endpoint handler"
+                "Unregistered HTTP portname handler"
             );
 
             let inflight_count = handler.inflight.load(Ordering::SeqCst);
             if inflight_count > 0 {
                 tracing::info!(
-                    endpoint_name = %endpoint_name,
+                    portname_name = %portname_name,
                     inflight_count = inflight_count,
                     "Waiting for inflight HTTP requests to complete"
                 );
@@ -147,7 +147,7 @@ impl SharedHttpServer {
                     handler.notify.notified().await;
                 }
                 tracing::info!(
-                    endpoint_name = %endpoint_name,
+                    portname_name = %portname_name,
                     "All inflight HTTP requests completed"
                 );
             }
@@ -158,9 +158,9 @@ impl SharedHttpServer {
     ///
     /// Returns the actual bound `SocketAddr` (important when binding to port 0).
     pub async fn bind_and_start(self: Arc<Self>) -> Result<SocketAddr> {
-        let rpc_root_path = std::env::var("DYN_HTTP_RPC_ROOT_PATH")
+        let rpc_root_path = std::env::var("PGD_HTTP_RPC_ROOT_PATH")
             .unwrap_or_else(|_| DEFAULT_RPC_ROOT_PATH.to_string());
-        let route_pattern = format!("{}/{{*endpoint}}", rpc_root_path);
+        let route_pattern = format!("{}/{{*portname}}", rpc_root_path);
 
         let app = Router::new()
             .route(&route_pattern, post(handle_shared_request))
@@ -174,7 +174,7 @@ impl SharedHttpServer {
             requested = %self.bind_addr,
             actual = %actual_addr,
             rpc_root = %rpc_root_path,
-            "HTTP/2 endpoint server bound"
+            "HTTP/2 portname server bound"
         );
 
         // Store the actual address so `address()` returns the real port.
@@ -227,7 +227,7 @@ impl SharedHttpServer {
         Ok(actual_addr)
     }
 
-    /// Wait for all inflight requests across all endpoints
+    /// Wait for all inflight requests across all portnames
     pub async fn wait_for_inflight(&self) {
         for handler in self.handlers.iter() {
             while handler.value().inflight.load(Ordering::SeqCst) > 0 {
@@ -240,16 +240,16 @@ impl SharedHttpServer {
 /// HTTP handler for the shared server
 async fn handle_shared_request(
     AxumState(server): AxumState<Arc<SharedHttpServer>>,
-    Path(endpoint_path): Path<String>,
+    Path(portname_path): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Look up the handler for this endpoint (lock-free read with DashMap)
-    let handler = match server.handlers.get(&endpoint_path) {
+    // Look up the handler for this portname (lock-free read with DashMap)
+    let handler = match server.handlers.get(&portname_path) {
         Some(h) => h.clone(),
         None => {
-            tracing::warn!("No handler found for endpoint: {endpoint_path}");
-            return (StatusCode::NOT_FOUND, "Endpoint not found");
+            tracing::warn!("No handler found for portname: {portname_path}");
+            return (StatusCode::NOT_FOUND, "PortName not found");
         }
     };
 
@@ -264,8 +264,8 @@ async fn handle_shared_request(
     let inflight = handler.inflight.clone();
     let notify = handler.notify.clone();
     let namespace = handler.namespace.clone();
-    let component_name = handler.component_name.clone();
-    let endpoint_name = handler.endpoint_name.clone();
+    let servicegroup_name = handler.servicegroup_name.clone();
+    let portname_name = handler.portname_name.clone();
     let instance_id = handler.instance_id;
 
     tokio::spawn(async move {
@@ -274,8 +274,8 @@ async fn handle_shared_request(
             .handle_payload(body, traceparent.request_id.clone())
             .instrument(tracing::info_span!(
                 "handle_payload",
-                component = component_name.as_ref(),
-                endpoint = endpoint_name.as_ref(),
+                servicegroup = servicegroup_name.as_ref(),
+                portname = portname_name.as_ref(),
                 namespace = namespace.as_ref(),
                 instance_id = instance_id,
                 trace_id = traceparent.trace_id,
@@ -328,7 +328,7 @@ impl TraceParent {
             traceparent.x_request_id = Some(s.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
+        // Read request-id from internal headers, with fallback to deprecated x-pagoda-request-id
         if let Some(s) = headers
             .get("request-id")
             .and_then(|v| v.to_str().ok())
@@ -336,7 +336,7 @@ impl TraceParent {
         {
             traceparent.request_id = Some(s.to_string());
         } else if let Some(s) = headers
-            .get("x-dynamo-request-id")
+            .get("x-pagoda-request-id")
             .and_then(|v| v.to_str().ok())
             .filter(|s| uuid::Uuid::parse_str(s).is_ok())
         {
@@ -350,30 +350,30 @@ impl TraceParent {
 // Implement RequestPlaneServer trait for SharedHttpServer
 #[async_trait::async_trait]
 impl super::unified_server::RequestPlaneServer for SharedHttpServer {
-    async fn register_endpoint(
+    async fn register_portname(
         &self,
-        endpoint_name: String,
+        portname_name: String,
         service_handler: Arc<dyn PushWorkHandler>,
         instance_id: u64,
         namespace: String,
-        component_name: String,
+        servicegroup_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // For HTTP, we use endpoint_name as both the subject (routing key) and endpoint_name
-        self.register_endpoint(
-            endpoint_name.clone(),
+        // For HTTP, we use portname_name as both the subject (routing key) and portname_name
+        self.register_portname(
+            portname_name.clone(),
             service_handler,
             instance_id,
             namespace,
-            component_name,
-            endpoint_name,
+            servicegroup_name,
+            portname_name,
             system_health,
         )
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        self.unregister_endpoint(endpoint_name, endpoint_name).await;
+    async fn unregister_portname(&self, portname_name: &str) -> Result<()> {
+        self.unregister_portname(portname_name, portname_name).await;
         Ok(())
     }
 
@@ -416,7 +416,7 @@ mod tests {
         headers.insert("tracestate", "test-state".parse().unwrap());
         headers.insert("x-request-id", "req-123".parse().unwrap());
         headers.insert(
-            "x-dynamo-request-id",
+            "x-pagoda-request-id",
             "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
         );
 

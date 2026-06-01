@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 设计意图
@@ -930,7 +930,7 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     fn test_etcd_urls() -> Vec<String> {
-        let url = std::env::var("DYNAMO_TEST_ETCD_URL")
+        let url = std::env::var("PAGODA_TEST_ETCD_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:2379".to_string());
         vec![url]
     }

@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # etcd KV 后端
 //!
 //! ## 设计意图
-//! 把 dynamo `Store` / `Bucket` 抽象映射到 etcd 上：桶名 = 键前缀，
+//! 把 pagoda `Store` / `Bucket` 抽象映射到 etcd 上：桶名 = 键前缀，
 //! 整个 KV 命名空间是平坦的，但用桶名前缀实现"逻辑上的桶"语义。
 //!
 //! 本实现与 lib-copy 标准版**契约完全等价**，差异在于更新路径采用 etcd 原生
@@ -13,7 +13,7 @@
 //! ## 外部契约
 //! - `EtcdStore::new(client)` 公开，便于 [`super::Manager::etcd`] 构造。
 //! - `Store::get_or_create_bucket` / `get_bucket`：不做网络 IO，仅构造 `EtcdBucket`
-//!   句柄；与 lib-copy 一致。
+//!   句柄。
 //! - `connection_id` 返回 etcd 客户端的 `lease_id`。
 //! - `Bucket::insert(key, value, revision)`：
 //!   * `revision == 0` 走 `kv_create`：返回 `Created(1)`；若 key 已存在则返回

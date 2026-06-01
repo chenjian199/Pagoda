@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `compute` —— CPU 密集型工作的统一入口
 //!
 //! ## 设计意图
 //!
-//! 这是 Dynamo runtime "计算" 子系统的根模块。整个子系统围绕一个
+//! 这是 Pagoda runtime "计算" 子系统的根模块。整个子系统围绕一个
 //! Rayon 线程池构建，目标是给 async 代码提供一条**清晰、可观测、可
 //! 验证**的快路径去跑 CPU 密集型工作，避免污染 Tokio worker。
 //!
@@ -393,10 +393,6 @@ mod tests {
         let _m: ComputeMetrics = ComputeMetrics::new();
         let _: fn() -> Result<ComputePool> = ComputePool::with_defaults;
     }
-
-    // ------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留） ============================
-    // ------------------------------------------------------------------
 
     #[test]
     fn test_build_pool() {

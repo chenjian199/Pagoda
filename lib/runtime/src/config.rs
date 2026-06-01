@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # `config` —— 运行时配置加载与布尔语义工具
 //!
 //! ## 设计意图
 //!
-//! 本模块是 Dynamo runtime 的"配置加载层"，承担三类职责：
+//! 本模块是 Pagoda runtime 的"配置加载层"，承担三类职责：
 //!
 //! 1. **结构化配置类型** —— [`WorkerConfig`] / [`RuntimeConfig`] 描述
 //!    可被运行时直接消费的字段集合，并实现 `Serialize` / `Deserialize`
@@ -91,13 +91,13 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
-    /// 从默认值 + `DYN_WORKER_` 前缀环境变量加载。
+    /// 从默认值 + `PGD_WORKER_` 前缀环境变量加载。
     ///
     /// 配置非法时直接 panic——本函数仅在进程启动期被调用。
     pub fn from_settings() -> Self {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
-            .merge(Env::prefixed("DYN_WORKER_"))
+            .merge(Env::prefixed("PGD_WORKER_"))
             .extract()
             .unwrap()
     }
@@ -160,7 +160,7 @@ pub struct RuntimeConfig {
 
     /// 已废弃；保留以兼容旧 toml。新代码使用 `system_port`。
     #[deprecated(
-        note = "Use system_port instead. Set DYN_SYSTEM_PORT to enable the system metrics server."
+        note = "Use system_port instead. Set PGD_SYSTEM_PORT to enable the system metrics server."
     )]
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -171,10 +171,10 @@ pub struct RuntimeConfig {
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub starting_health_status: HealthStatus,
 
-    /// 已废弃；旧版本用来声明"哪些 endpoint 参与汇总健康判定"。
+    /// 已废弃；旧版本用来声明"哪些 portname 参与汇总健康判定"。
     #[builder(default = "vec![]")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub use_endpoint_health_status: Vec<String>,
+    pub use_portname_health_status: Vec<String>,
 
     /// `/health` 路径。
     #[builder(default = "DEFAULT_SYSTEM_HEALTH_PATH.to_string()")]
@@ -229,8 +229,8 @@ impl fmt::Display for RuntimeConfig {
         write!(f, "system_port={}, ", self.system_port)?;
         write!(
             f,
-            "use_endpoint_health_status={:?}",
-            self.use_endpoint_health_status
+            "use_portname_health_status={:?}",
+            self.use_portname_health_status
         )?;
         write!(f, "starting_health_status={:?}", self.starting_health_status)?;
         write!(f, ", system_health_path={}", self.system_health_path)?;
@@ -257,16 +257,16 @@ impl RuntimeConfig {
     pub(crate) fn figment() -> Figment {
         Figment::new()
             .merge(Serialized::defaults(RuntimeConfig::default()))
-            .merge(Toml::file("/opt/dynamo/defaults/runtime.toml"))
-            .merge(Toml::file("/opt/dynamo/etc/runtime.toml"))
-            .merge(prefixed_env_provider("DYN_RUNTIME_", identity_key))
-            .merge(prefixed_env_provider("DYN_SYSTEM_", map_system_key))
-            .merge(prefixed_env_provider("DYN_COMPUTE_", map_compute_key))
+            .merge(Toml::file("/opt/pagoda/defaults/runtime.toml"))
+            .merge(Toml::file("/opt/pagoda/etc/runtime.toml"))
+            .merge(prefixed_env_provider("PGD_RUNTIME_", identity_key))
+            .merge(prefixed_env_provider("PGD_SYSTEM_", map_system_key))
+            .merge(prefixed_env_provider("PGD_COMPUTE_", map_compute_key))
             .merge(prefixed_env_provider(
-                "DYN_HEALTH_CHECK_",
+                "PGD_HEALTH_CHECK_",
                 map_health_check_key,
             ))
-            .merge(prefixed_env_provider("DYN_CANARY_", map_canary_key))
+            .merge(prefixed_env_provider("PGD_CANARY_", map_canary_key))
     }
 
     /// 运行时配置主入口：`figment + validate + deprecation warnings`。
@@ -303,9 +303,9 @@ impl RuntimeConfig {
             .max_blocking_threads(self.max_blocking_threads)
             .enable_all();
 
-        if env_is_truthy(environment_names::runtime::DYN_ENABLE_POLL_HISTOGRAM) {
+        if env_is_truthy(environment_names::runtime::PGD_ENABLE_POLL_HISTOGRAM) {
             tracing::info!(
-                "Tokio poll-time histogram enabled (DYN_ENABLE_POLL_HISTOGRAM); \
+                "Tokio poll-time histogram enabled (PGD_ENABLE_POLL_HISTOGRAM); \
                  expect ~2× Instant::now() overhead per task poll"
             );
             builder.enable_metrics_poll_time_histogram();
@@ -348,7 +348,7 @@ fn base_runtime_defaults() -> RuntimeConfig {
         system_port: DEFAULT_SYSTEM_PORT,
         system_enabled: false,
         starting_health_status: HealthStatus::NotReady,
-        use_endpoint_health_status: Vec::new(),
+        use_portname_health_status: Vec::new(),
         system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
         system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
         compute_threads: None,
@@ -388,7 +388,7 @@ fn map_system_key(key: &str) -> String {
         "HOST" => "system_host",
         "PORT" => "system_port",
         "ENABLED" => "system_enabled",
-        "USE_ENDPOINT_HEALTH_STATUS" => "use_endpoint_health_status",
+        "USE_ENDPOINT_HEALTH_STATUS" => "use_portname_health_status",
         "STARTING_HEALTH_STATUS" => "starting_health_status",
         "HEALTH_PATH" => "system_health_path",
         "LIVE_PATH" => "system_live_path",
@@ -426,18 +426,18 @@ fn map_canary_key(key: &str) -> String {
 
 fn warn_if_deprecated_env_set() {
     use environment_names::runtime::system as env_system;
-    if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
+    if std::env::var(env_system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
         tracing::warn!(
-            "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. \
-             System health is now determined by endpoints that register with health check payloads. \
-             Please update your configuration to register health check payloads directly on endpoints."
+            "PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. \
+             System health is now determined by portnames that register with health check payloads. \
+             Please update your configuration to register health check payloads directly on portnames."
         );
     }
-    if std::env::var(env_system::DYN_SYSTEM_ENABLED).is_ok() {
+    if std::env::var(env_system::PGD_SYSTEM_ENABLED).is_ok() {
         tracing::warn!(
-            "DYN_SYSTEM_ENABLED is deprecated. \
-             System metrics server is now controlled solely by DYN_SYSTEM_PORT. \
-             Set DYN_SYSTEM_PORT to a positive value to enable the server, or set to -1 to disable (default)."
+            "PGD_SYSTEM_ENABLED is deprecated. \
+             System metrics server is now controlled solely by PGD_SYSTEM_PORT. \
+             Set PGD_SYSTEM_PORT to a positive value to enable the server, or set to -1 to disable (default)."
         );
     }
 }
@@ -492,24 +492,24 @@ pub fn env_is_falsey(env: &str) -> bool {
 // 日志相关的 env-bool 快捷查询
 // ----------------------------------------------------------------------------
 
-/// 是否启用 JSONL 日志格式（`DYN_LOGGING_JSONL`）。
+/// 是否启用 JSONL 日志格式（`PGD_LOGGING_JSONL`）。
 pub fn jsonl_logging_enabled() -> bool {
-    env_is_truthy(environment_names::logging::DYN_LOGGING_JSONL)
+    env_is_truthy(environment_names::logging::PGD_LOGGING_JSONL)
 }
 
-/// 是否关闭 ANSI 颜色（`DYN_SDK_DISABLE_ANSI_LOGGING`）。
+/// 是否关闭 ANSI 颜色（`PGD_SDK_DISABLE_ANSI_LOGGING`）。
 pub fn disable_ansi_logging() -> bool {
-    env_is_truthy(environment_names::logging::DYN_SDK_DISABLE_ANSI_LOGGING)
+    env_is_truthy(environment_names::logging::PGD_SDK_DISABLE_ANSI_LOGGING)
 }
 
-/// 日志时间戳是否使用本地时区（`DYN_LOG_USE_LOCAL_TZ`）。
+/// 日志时间戳是否使用本地时区（`PGD_LOG_USE_LOCAL_TZ`）。
 pub fn use_local_timezone() -> bool {
-    env_is_truthy(environment_names::logging::DYN_LOG_USE_LOCAL_TZ)
+    env_is_truthy(environment_names::logging::PGD_LOG_USE_LOCAL_TZ)
 }
 
-/// 是否开启 span event 日志（`DYN_LOGGING_SPAN_EVENTS`）。
+/// 是否开启 span event 日志（`PGD_LOGGING_SPAN_EVENTS`）。
 pub fn span_events_enabled() -> bool {
-    env_is_truthy(environment_names::logging::DYN_LOGGING_SPAN_EVENTS)
+    env_is_truthy(environment_names::logging::PGD_LOGGING_SPAN_EVENTS)
 }
 
 // ============================================================================
@@ -525,8 +525,8 @@ mod tests {
         use environment_names::runtime;
         temp_env::with_vars(
             vec![
-                (runtime::DYN_RUNTIME_NUM_WORKER_THREADS, Some("24")),
-                (runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS, Some("32")),
+                (runtime::PGD_RUNTIME_NUM_WORKER_THREADS, Some("24")),
+                (runtime::PGD_RUNTIME_MAX_BLOCKING_THREADS, Some("32")),
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
@@ -542,8 +542,8 @@ mod tests {
         use environment_names::runtime;
         temp_env::with_vars(
             vec![
-                (runtime::DYN_RUNTIME_NUM_WORKER_THREADS, None::<&str>),
-                (runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS, Some("")),
+                (runtime::PGD_RUNTIME_NUM_WORKER_THREADS, None::<&str>),
+                (runtime::PGD_RUNTIME_MAX_BLOCKING_THREADS, Some("")),
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
@@ -563,8 +563,8 @@ mod tests {
         use environment_names::runtime;
         temp_env::with_vars(
             vec![
-                (runtime::DYN_RUNTIME_NUM_WORKER_THREADS, Some("0")),
-                (runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS, Some("0")),
+                (runtime::PGD_RUNTIME_NUM_WORKER_THREADS, Some("0")),
+                (runtime::PGD_RUNTIME_MAX_BLOCKING_THREADS, Some("0")),
             ],
             || {
                 let err = RuntimeConfig::from_settings().unwrap_err().to_string();
@@ -580,8 +580,8 @@ mod tests {
         use environment_names::runtime::system;
         temp_env::with_vars(
             vec![
-                (system::DYN_SYSTEM_HOST, Some("127.0.0.1")),
-                (system::DYN_SYSTEM_PORT, Some("9090")),
+                (system::PGD_SYSTEM_HOST, Some("127.0.0.1")),
+                (system::PGD_SYSTEM_PORT, Some("9090")),
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn test_system_server_disabled_by_default() {
         use environment_names::runtime::system;
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_PORT, None::<&str>)], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_PORT, None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.system_server_enabled());
             assert_eq!(config.system_port, -1);
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn test_system_server_disabled_with_negative_port() {
         use environment_names::runtime::system;
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_PORT, Some("-1"))], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_PORT, Some("-1"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.system_server_enabled());
             assert_eq!(config.system_port, -1);
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn test_system_server_enabled_with_port() {
         use environment_names::runtime::system;
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_PORT, Some("9527"))], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_PORT, Some("9527"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(config.system_server_enabled());
             assert_eq!(config.system_port, 9527);
@@ -626,7 +626,7 @@ mod tests {
     fn test_system_server_starting_health_status_ready() {
         use environment_names::runtime::system;
         temp_env::with_vars(
-            vec![(system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready"))],
+            vec![(system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready"))],
             || {
                 let config = RuntimeConfig::from_settings().unwrap();
                 assert_eq!(config.starting_health_status, HealthStatus::Ready);
@@ -635,16 +635,16 @@ mod tests {
     }
 
     #[test]
-    fn test_system_use_endpoint_health_status() {
+    fn test_system_use_portname_health_status() {
         use environment_names::runtime::system;
         temp_env::with_vars(
             vec![(
-                system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+                system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
                 Some("[\"ready\"]"),
             )],
             || {
                 let config = RuntimeConfig::from_settings().unwrap();
-                assert_eq!(config.use_endpoint_health_status, vec!["ready"]);
+                assert_eq!(config.use_portname_health_status, vec!["ready"]);
             },
         );
     }
@@ -652,11 +652,11 @@ mod tests {
     #[test]
     fn test_system_health_endpoint_path_default() {
         use environment_names::runtime::system;
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_HEALTH_PATH, None::<&str>)], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_HEALTH_PATH, None::<&str>)], || {
             let c = RuntimeConfig::from_settings().unwrap();
             assert_eq!(c.system_health_path, DEFAULT_SYSTEM_HEALTH_PATH);
         });
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_LIVE_PATH, None::<&str>)], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_LIVE_PATH, None::<&str>)], || {
             let c = RuntimeConfig::from_settings().unwrap();
             assert_eq!(c.system_live_path, DEFAULT_SYSTEM_LIVE_PATH);
         });
@@ -666,14 +666,14 @@ mod tests {
     fn test_system_health_endpoint_path_custom() {
         use environment_names::runtime::system;
         temp_env::with_vars(
-            vec![(system::DYN_SYSTEM_HEALTH_PATH, Some("/custom/health"))],
+            vec![(system::PGD_SYSTEM_HEALTH_PATH, Some("/custom/health"))],
             || {
                 let c = RuntimeConfig::from_settings().unwrap();
                 assert_eq!(c.system_health_path, "/custom/health");
             },
         );
         temp_env::with_vars(
-            vec![(system::DYN_SYSTEM_LIVE_PATH, Some("/custom/live"))],
+            vec![(system::PGD_SYSTEM_LIVE_PATH, Some("/custom/live"))],
             || {
                 let c = RuntimeConfig::from_settings().unwrap();
                 assert_eq!(c.system_live_path, "/custom/live");
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(config.system_host, DEFAULT_SYSTEM_HOST);
         assert_eq!(config.system_port, DEFAULT_SYSTEM_PORT);
         assert_eq!(config.starting_health_status, HealthStatus::NotReady);
-        assert!(config.use_endpoint_health_status.is_empty());
+        assert!(config.use_portname_health_status.is_empty());
         assert_eq!(config.system_health_path, DEFAULT_SYSTEM_HEALTH_PATH);
         assert_eq!(config.system_live_path, DEFAULT_SYSTEM_LIVE_PATH);
         assert_eq!(config.compute_threads, None);
@@ -768,7 +768,7 @@ mod tests {
         b.system_host("127.0.0.1".to_string());
         b.system_port(0);
         b.starting_health_status(HealthStatus::Ready);
-        b.use_endpoint_health_status(vec!["ready".to_string(), "live".to_string()]);
+        b.use_portname_health_status(vec!["ready".to_string(), "live".to_string()]);
         b.system_health_path("/healthz".to_string());
         b.system_live_path("/livez".to_string());
         b.compute_threads(Some(3));
@@ -788,7 +788,7 @@ mod tests {
             "max_blocking_threads=9",
             "system_host=127.0.0.1",
             "system_port=0",
-            "use_endpoint_health_status=[\"ready\", \"live\"]",
+            "use_portname_health_status=[\"ready\", \"live\"]",
             "starting_health_status=Ready",
             "system_health_path=/healthz",
             "system_live_path=/livez",
@@ -843,18 +843,18 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                (runtime::DYN_RUNTIME_NUM_WORKER_THREADS, Some("7")),
-                (runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS, Some("")),
-                (system::DYN_SYSTEM_HOST, Some("127.0.0.1")),
-                (system::DYN_SYSTEM_PORT, Some("0")),
-                (system::DYN_SYSTEM_HEALTH_PATH, Some("/healthz")),
-                (system::DYN_SYSTEM_LIVE_PATH, Some("")),
-                ("DYN_COMPUTE_THREADS", Some("6")),
-                ("DYN_COMPUTE_STACK_SIZE", Some("4096")),
-                ("DYN_COMPUTE_THREAD_PREFIX", Some("batch")),
-                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
-                ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("9")),
-                (canary::DYN_CANARY_WAIT_TIME, Some("12")),
+                (runtime::PGD_RUNTIME_NUM_WORKER_THREADS, Some("7")),
+                (runtime::PGD_RUNTIME_MAX_BLOCKING_THREADS, Some("")),
+                (system::PGD_SYSTEM_HOST, Some("127.0.0.1")),
+                (system::PGD_SYSTEM_PORT, Some("0")),
+                (system::PGD_SYSTEM_HEALTH_PATH, Some("/healthz")),
+                (system::PGD_SYSTEM_LIVE_PATH, Some("")),
+                ("PGD_COMPUTE_THREADS", Some("6")),
+                ("PGD_COMPUTE_STACK_SIZE", Some("4096")),
+                ("PGD_COMPUTE_THREAD_PREFIX", Some("batch")),
+                ("PGD_HEALTH_CHECK_ENABLED", Some("true")),
+                ("PGD_HEALTH_CHECK_REQUEST_TIMEOUT", Some("9")),
+                (canary::PGD_CANARY_WAIT_TIME, Some("12")),
             ],
             || {
                 let c = RuntimeConfig::figment().extract::<RuntimeConfig>().unwrap();
@@ -886,19 +886,19 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                (system::DYN_SYSTEM_ENABLED, Some("true")),
-                (system::DYN_SYSTEM_PORT, Some("0")),
-                (system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+                (system::PGD_SYSTEM_ENABLED, Some("true")),
+                (system::PGD_SYSTEM_PORT, Some("0")),
+                (system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
                 (
-                    system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+                    system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
                     Some("[\"ready\",\"live\"]"),
                 ),
-                ("DYN_COMPUTE_THREADS", Some("6")),
-                ("DYN_COMPUTE_STACK_SIZE", Some("1048576")),
-                ("DYN_COMPUTE_THREAD_PREFIX", Some("ray")),
-                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
-                ("DYN_HEALTH_CHECK_REQUEST_TIMEOUT", Some("9")),
-                (canary::DYN_CANARY_WAIT_TIME, Some("12")),
+                ("PGD_COMPUTE_THREADS", Some("6")),
+                ("PGD_COMPUTE_STACK_SIZE", Some("1048576")),
+                ("PGD_COMPUTE_THREAD_PREFIX", Some("ray")),
+                ("PGD_HEALTH_CHECK_ENABLED", Some("true")),
+                ("PGD_HEALTH_CHECK_REQUEST_TIMEOUT", Some("9")),
+                (canary::PGD_CANARY_WAIT_TIME, Some("12")),
             ],
             || {
                 let c = RuntimeConfig::from_settings()?;
@@ -906,7 +906,7 @@ mod tests {
                 assert_eq!(c.system_port, 0);
                 assert_eq!(c.starting_health_status, HealthStatus::Ready);
                 assert_eq!(
-                    c.use_endpoint_health_status,
+                    c.use_portname_health_status,
                     vec!["ready".to_string(), "live".to_string()]
                 );
                 assert_eq!(c.compute_threads, Some(6));
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn test_supplemental_system_server_enabled_zero_port() {
         use environment_names::runtime::system;
-        temp_env::with_vars(vec![(system::DYN_SYSTEM_PORT, Some("0"))], || {
+        temp_env::with_vars(vec![(system::PGD_SYSTEM_PORT, Some("0"))], || {
             let c = RuntimeConfig::from_settings().unwrap();
             assert!(c.system_server_enabled());
             assert_eq!(c.system_port, 0);
@@ -938,7 +938,7 @@ mod tests {
     fn test_supplemental_runtime_config_create_runtime_with_poll_histogram_variants() {
         use environment_names::runtime;
         temp_env::with_vars(
-            vec![(runtime::DYN_ENABLE_POLL_HISTOGRAM, None::<&str>)],
+            vec![(runtime::PGD_ENABLE_POLL_HISTOGRAM, None::<&str>)],
             || {
                 let rt = RuntimeConfig::single_threaded().create_runtime().unwrap();
                 let r = rt.block_on(async { tokio::spawn(async { 5usize }).await.unwrap() });
@@ -946,7 +946,7 @@ mod tests {
             },
         );
         temp_env::with_vars(
-            vec![(runtime::DYN_ENABLE_POLL_HISTOGRAM, Some("true"))],
+            vec![(runtime::PGD_ENABLE_POLL_HISTOGRAM, Some("true"))],
             || {
                 let rt = RuntimeConfig::single_threaded().create_runtime().unwrap();
                 let r = rt.block_on(async { tokio::spawn(async { 7usize }).await.unwrap() });
@@ -972,10 +972,10 @@ mod tests {
 
         temp_env::with_vars(
             vec![
-                (logging::DYN_LOGGING_JSONL, Some("yes")),
-                (logging::DYN_SDK_DISABLE_ANSI_LOGGING, Some("1")),
-                (logging::DYN_LOG_USE_LOCAL_TZ, Some("true")),
-                (logging::DYN_LOGGING_SPAN_EVENTS, Some("on")),
+                (logging::PGD_LOGGING_JSONL, Some("yes")),
+                (logging::PGD_SDK_DISABLE_ANSI_LOGGING, Some("1")),
+                (logging::PGD_LOG_USE_LOCAL_TZ, Some("true")),
+                (logging::PGD_LOGGING_SPAN_EVENTS, Some("on")),
             ],
             || {
                 assert!(jsonl_logging_enabled());
@@ -986,10 +986,10 @@ mod tests {
         );
         temp_env::with_vars(
             vec![
-                (logging::DYN_LOGGING_JSONL, Some("0")),
-                (logging::DYN_SDK_DISABLE_ANSI_LOGGING, Some("false")),
-                (logging::DYN_LOG_USE_LOCAL_TZ, None::<&str>),
-                (logging::DYN_LOGGING_SPAN_EVENTS, Some("no")),
+                (logging::PGD_LOGGING_JSONL, Some("0")),
+                (logging::PGD_SDK_DISABLE_ANSI_LOGGING, Some("false")),
+                (logging::PGD_LOG_USE_LOCAL_TZ, None::<&str>),
+                (logging::PGD_LOGGING_SPAN_EVENTS, Some("no")),
             ],
             || {
                 assert!(!jsonl_logging_enabled());
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(WorkerConfig::default().graceful_shutdown_timeout, expected);
 
         temp_env::with_vars(
-            vec![(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, None::<&str>)],
+            vec![(worker::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, None::<&str>)],
             || {
                 assert_eq!(
                     WorkerConfig::from_settings().graceful_shutdown_timeout,
@@ -1017,7 +1017,7 @@ mod tests {
             },
         );
         temp_env::with_vars(
-            vec![(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("42"))],
+            vec![(worker::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("42"))],
             || {
                 assert_eq!(WorkerConfig::from_settings().graceful_shutdown_timeout, 42);
             },
@@ -1029,7 +1029,7 @@ mod tests {
     fn test_supplemental_worker_config_panics_on_invalid_env() {
         use environment_names::worker;
         temp_env::with_vars(
-            vec![(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("invalid"))],
+            vec![(worker::PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT, Some("invalid"))],
             || {
                 let r = std::panic::catch_unwind(WorkerConfig::from_settings);
                 assert!(r.is_err());

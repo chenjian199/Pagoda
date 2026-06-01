@@ -4,7 +4,7 @@
 //! [`Runtime`] —— 本地进程内共享运行时资源的统一入口
 //!
 //! ## 设计意图
-//! 为 [`crate::component::Component`] 及其子对象提供一个集中化句柄，用于获取
+//! 为 [`crate::servicegroup::ServiceGroup`] 及其子对象提供一个集中化句柄，用于获取
 //! 运行时能力：主/次 Tokio runtime、优雅关闭令牌、端点关闭令牌、`compute_pool`
 //! （可选的 CPU 计算池）以及 `block_in_place` 信号量。内部持有主 `CancellationToken`，
 //! 上层代码调用 [`Runtime::shutdown`] 即可使所有挂接组件在有限窗口内接受取消信号。
@@ -14,7 +14,7 @@
 //! ## 外部契约
 //! - 公开结构体 `Runtime`（`Debug + Clone`）与重导出 `tokio_util::sync::CancellationToken`。
 //! - 公开方法集合 `from_current` / `from_handle` / `from_settings` / `single_threaded` /
-//!   `id` / `primary` / `secondary` / `primary_token` / `child_token` / `endpoint_shutdown_token` /
+//!   `id` / `primary` / `secondary` / `primary_token` / `child_token` / `portname_shutdown_token` /
 //!   `graceful_shutdown_tracker` / `compute_pool` / `block_in_place_permits` / `shutdown` 等签名不变。
 //! - `shutdown` 的终止语义（取消令牌传播、优雅窗口、最终需调者结束进程）保持不变。
 //! - 环境变量、`RuntimeConfig` 与 `RuntimeType`（`Shared` / `External`）内部构造逻辑保持不变。
@@ -57,7 +57,7 @@ pub struct Runtime {
     primary: RuntimeType,
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
-    endpoint_shutdown_token: CancellationToken,
+    portname_shutdown_token: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
@@ -69,7 +69,7 @@ impl Runtime {
     /// 处理流程为：初始化 timeline/NVTX、生成运行时 ID、创建根取消令牌，
     /// 并在未提供 secondary runtime 时自动补一个单线程后台运行时。
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
-        crate::nvtx::init();
+        crate::timeline::init();
 
         let runtime_id = Arc::new(uuid::Uuid::new_v4().to_string());
         let root_token = CancellationToken::new();
@@ -88,7 +88,7 @@ impl Runtime {
             primary: runtime,
             secondary: background_runtime,
             cancellation_token: root_token,
-            endpoint_shutdown_token: shutdown_token,
+            portname_shutdown_token: shutdown_token,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             compute_pool: None,
             block_in_place_permits: None,
@@ -171,7 +171,7 @@ impl Runtime {
             .name()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("tokio-worker-{:?}", current.id()));
-        crate::nvtx::name_current_thread_impl(&timeline_name);
+        crate::timeline::name_current_thread_impl(&timeline_name);
     }
 
     /// 使用 barrier 在所有 worker 线程上初始化线程本地计算上下文。
@@ -316,7 +316,7 @@ impl Runtime {
     /// 基于端点关闭令牌派生一个子 [`CancellationToken`]。
     /// 该令牌会先于主运行时取消，用于实现端点优先的优雅关闭流程。
     pub fn child_token(&self) -> CancellationToken {
-        self.endpoint_shutdown_token.child_token()
+        self.portname_shutdown_token.child_token()
     }
 
     /// 返回优雅关闭跟踪器的共享引用，用于登记和等待端点退出。
@@ -339,22 +339,22 @@ impl Runtime {
 
         let tracker = Arc::clone(&self.graceful_shutdown_tracker);
         let runtime_token = self.cancellation_token.clone();
-        let endpoint_token = self.endpoint_shutdown_token.clone();
+        let portname_token = self.portname_shutdown_token.clone();
 
         let shutdown_task = async move {
-            tracing::info!("Phase 1: Cancelling endpoint shutdown token");
-            endpoint_token.cancel();
+            tracing::info!("Phase 1: Cancelling portname shutdown token");
+            portname_token.cancel();
 
-            tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
-            let active_endpoints = tracker.get_count();
-            tracing::info!("Active graceful endpoints: {active_endpoints}");
+            tracing::info!("Phase 2: Waiting for graceful portnames to complete");
+            let active_portnames = tracker.get_count();
+            tracing::info!("Active graceful portnames: {active_portnames}");
 
-            if active_endpoints > 0 {
+            if active_portnames > 0 {
                 tracker.wait_for_completion().await;
             }
 
             tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
+                "Phase 3: All portnames ended gracefully. Connections to backend services will now be disconnected"
             );
             runtime_token.cancel();
         };
@@ -614,8 +614,8 @@ mod tests {
     fn test_from_settings_initializes_compute_pool() {
         with_vars(
             vec![
-                ("DYN_RUNTIME_NUM_WORKER_THREADS", Some("2")),
-                ("DYN_COMPUTE_THREADS", Some("1")),
+                ("PGD_RUNTIME_NUM_WORKER_THREADS", Some("2")),
+                ("PGD_COMPUTE_THREADS", Some("1")),
             ],
             || {
                 let runtime = Runtime::from_settings().unwrap();
@@ -649,10 +649,10 @@ mod tests {
         let tracker_a = runtime.graceful_shutdown_tracker();
         let tracker_b = runtime.graceful_shutdown_tracker();
 
-        tracker_a.register_endpoint();
+        tracker_a.register_portname();
         assert_eq!(tracker_b.get_count(), 1);
 
-        tracker_b.unregister_endpoint();
+        tracker_b.unregister_portname();
         assert_eq!(tracker_a.get_count(), 0);
     }
 
@@ -679,7 +679,7 @@ mod tests {
         let main_token = runtime.primary_token();
         let child_token = runtime.child_token();
 
-        tracker.register_endpoint();
+        tracker.register_portname();
         runtime.shutdown();
 
         timeout(Duration::from_secs(1), child_token.cancelled())
@@ -688,7 +688,7 @@ mod tests {
         assert!(child_token.is_cancelled());
         assert!(!main_token.is_cancelled());
 
-        tracker.unregister_endpoint();
+        tracker.unregister_portname();
 
         timeout(Duration::from_secs(1), main_token.cancelled())
             .await
@@ -698,7 +698,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     /// 测试：没有活跃端点时，关闭流程会直接取消全部令牌。
-    async fn test_shutdown_without_active_endpoints_cancels_all_tokens() {
+    async fn test_shutdown_without_active_portnames_cancels_all_tokens() {
         let runtime = Runtime::from_current().unwrap();
         let main_token = runtime.primary_token();
         let child_token = runtime.child_token();

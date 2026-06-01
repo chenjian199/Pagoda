@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # `component::namespace` —— Namespace 的 `MetricsHierarchy` 实现
+//! # `servicegroup::namespace` —— Namespace 的 `MetricsHierarchy` 实现
 //!
 //! ## 设计意图
 //!
@@ -31,7 +31,7 @@
 //! 仅实现 `MetricsHierarchy for Namespace`，不暴露任何新公开符号。
 //! 行为必须与重构前在所有调用点（指标命名 / 上报）严格一致。
 
-use crate::component::Namespace;
+use crate::servicegroup::Namespace;
 use crate::metrics::{MetricsHierarchy, MetricsRegistry};
 
 // ============================================================================

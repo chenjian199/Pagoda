@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Kube 发现子系统的工具函数集合
@@ -21,12 +21,12 @@
 //!   引入“不可逆但确定性”的去重后缀。
 //! - [`KubeDiscoveryMode`] / [`KubeDiscoveryTarget`] / [`PodInfo`]：仅在
 //!   `kube` 子模块内部使用，供 `daemon` / 入口客户端读取 Pod 自身身份。
-//! - 工具函数 [`extract_endpoint_info`] / [`extract_ready_containers`]：从
+//! - 工具函数 [`extract_portname_info`] / [`extract_ready_containers`]：从
 //!   `EndpointSlice` / `Pod` 抽取就绪条目，daemon 用其聚合快照。
 //!
 //! ## 实现要点
 //!
-//! - 所有公开 API 与历史版本完全一致；新增的 [`sanitize`] / [`short_hash`]
+//! - 所有公开 API 版本完全一致；新增的 [`sanitize`] / [`short_hash`]
 //!   以及 [`PodInfo::pod_ip`] 字段是为了支撑 K8s 原生注册路径
 //!   （`Service` + `EndpointSlice`）所需的命名 / 地址写入。
 //! - 53 位掩码 [`INSTANCE_ID_MASK`] 来源于 JavaScript Number 的安全整数范围，
@@ -68,7 +68,7 @@ const DEFAULT_PODINFO_PATH: &str = "/etc/podinfo";
 ///
 /// ## 为什么需要这个公开函数？
 ///
-/// C bindings（EPP，Endpoint Picker Plugin）会跨 FFI 边界访问 Pod 到 worker
+/// C bindings（EPP，PortName Picker Plugin）会跨 FFI 边界访问 Pod 到 worker
 /// 的映射，必须与 Rust 端使用**完全相同的算法**，否则前后端无法对齐。
 /// 抽出为单独函数确保两侧只有一处可信定义。
 pub fn hash_pod_name(pod_name: &str) -> u64 {
@@ -117,7 +117,7 @@ pub(super) fn sanitize(input: &str, max_len: usize) -> String {
 ///
 /// ## 用途
 ///
-/// 同一 Pod 上的多个 `(component, endpoint)` 二元组共享 Service，但每个
+/// 同一 Pod 上的多个 `(servicegroup, portname)` 二元组共享 Service，但每个
 /// 三元组 `(service, port, pod)` 都需要唯一的 EndpointSlice 名称。
 /// 在 sanitize 后的可读片段之后追加这 8 位 hash，可以在不增加显著长度的
 /// 前提下避免不同三元组的名称发生碰撞。
@@ -146,15 +146,15 @@ pub(super) enum KubeDiscoveryMode {
 }
 
 impl KubeDiscoveryMode {
-    /// 从环境变量 `DYN_KUBE_DISCOVERY_MODE` 解析模式。
+    /// 从环境变量 `PGD_KUBE_DISCOVERY_MODE` 解析模式。
     ///
     /// 缺省或非法值会回退到 `Pod`，避免在未配置环境变量的开发环境直接 panic。
     pub fn from_env() -> Result<Self> {
-        match std::env::var(discovery::DYN_KUBE_DISCOVERY_MODE).as_deref() {
+        match std::env::var(discovery::PGD_KUBE_DISCOVERY_MODE).as_deref() {
             Ok("container") => Ok(Self::Container),
             Ok("pod") | Err(_) => Ok(Self::Pod),
             Ok(other) => anyhow::bail!(
-                "Invalid DYN_KUBE_DISCOVERY_MODE value '{}'. Valid values: 'pod', 'container'",
+                "Invalid PGD_KUBE_DISCOVERY_MODE value '{}'. Valid values: 'pod', 'container'",
                 other
             ),
         }
@@ -163,7 +163,7 @@ impl KubeDiscoveryMode {
 
 /// 资源命名所依据的 Pod / Container 身份。
 ///
-/// 这是 daemon 聚合阶段把“原始 K8s 对象”映射回“Dynamo 实例”的核心键。
+/// 这是 daemon 聚合阶段把“原始 K8s 对象”映射回“Pagoda 实例”的核心键。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum KubeDiscoveryTarget {
     Pod(String),
@@ -196,7 +196,7 @@ impl KubeDiscoveryTarget {
 // === EndpointSlice / Pod -> 就绪条目 ==========================================
 
 /// 从一个 EndpointSlice 抽取 `(instance_id, key)` 二元组，仅保留 `ready=true`。
-pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)> {
+pub(super) fn extract_portname_info(slice: &EndpointSlice) -> Vec<(u64, String)> {
     slice
         .endpoints
         .iter()
@@ -240,7 +240,7 @@ pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
 /// 单个进程启动时从 Downward API / 环境变量加载到的 Pod 身份。
 ///
 /// 字段 `pod_ip` 是 K8s 原生注册路径新增的必需输入——`EndpointSlice` 的
-/// `endpoint.addresses[]` 不能为空，否则 kube-proxy 无法把流量路由到本 Pod。
+/// `portname.addresses[]` 不能为空，否则 kube-proxy 无法把流量路由到本 Pod。
 #[derive(Debug, Clone)]
 pub(super) struct PodInfo {
     pub pod_name: String,
@@ -291,7 +291,7 @@ impl PodInfo {
             KubeDiscoveryMode::Container => {
                 let cname = std::env::var("CONTAINER_NAME").map_err(|_| {
                     anyhow::anyhow!(
-                        "CONTAINER_NAME is required when DYN_KUBE_DISCOVERY_MODE=container"
+                        "CONTAINER_NAME is required when PGD_KUBE_DISCOVERY_MODE=container"
                     )
                 })?;
                 KubeDiscoveryTarget::Container(pod_name.clone(), cname)
@@ -414,7 +414,7 @@ mod tests {
     /// ## 意义
     /// daemon 聚合阶段只能纳入 ready 条目，过滤逻辑必须正确。
     #[test]
-    fn extract_endpoint_info_filters_unready() {
+    fn extract_portname_info_filters_unready() {
         let mk_ep = |name: &str, ready: bool, with_ref: bool| Endpoint {
             addresses: vec!["10.0.0.1".into()],
             conditions: Some(EndpointConditions {
@@ -441,7 +441,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let infos = extract_endpoint_info(&slice);
+        let infos = extract_portname_info(&slice);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].1, "ready-pod");
     }

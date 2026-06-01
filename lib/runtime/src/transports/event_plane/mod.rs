@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # 事件平面：与传输无关的 pub/sub 抽象
@@ -18,8 +18,8 @@
 //!   多 broker HA 时：DeduplicatingStream 按 (publisher_id, sequence) 去重
 //! ```
 //!
-//! - **Scope**：[`EventScope::Namespace`] / [`EventScope::Component`] 决定
-//!   subject 前缀（namespace.X / namespace.X.component.Y）。
+//! - **Scope**：[`EventScope::Namespace`] / [`EventScope::ServiceGroup`] 决定
+//!   subject 前缀（namespace.X / namespace.X.servicegroup.Y）。
 //! - **Discovery 注册**：Publisher 在 NATS 模式或 ZMQ 直连模式下会把自己注册到
 //!   discovery；broker 模式不需要（订阅侧通过 broker 找到 publisher）。
 //! - **Drop 反注册**：Publisher 在 Drop 时把 discovery 实例反注册掉 ——
@@ -27,8 +27,8 @@
 //!   上下文场景。
 //!
 //! ## 外部契约
-//! - [`EventScope`] + `subject_prefix / namespace / component`
-//! - [`EventPublisher`]：`for_component / for_component_with_transport /
+//! - [`EventScope`] + `subject_prefix / namespace / servicegroup`
+//! - [`EventPublisher`]：`for_servicegroup / for_servicegroup_with_transport /
 //!   for_namespace / for_namespace_with_transport / publish<T> / publish_bytes /
 //!   publisher_id / topic / transport_kind`
 //! - [`EventSubscriber`]：上述的对偶 + `next() / typed::<T>()`
@@ -86,7 +86,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::DistributedRuntime;
-use crate::component::{Component, Namespace};
+use crate::servicegroup::{ServiceGroup, Namespace};
 use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
@@ -97,15 +97,15 @@ use crate::utils::ip_resolver::get_local_ip_for_advertise;
 // === EventScope ==============================================================
 // =============================================================================
 
-/// 事件平面的"作用域"—— 决定 subject 前缀和发现层注册的 component 字段。
+/// 事件平面的"作用域"—— 决定 subject 前缀和发现层注册的 servicegroup 字段。
 #[derive(Debug, Clone)]
 pub enum EventScope {
     /// Namespace 级：`namespace.{name}`
     Namespace { name: String },
-    /// Component 级：`namespace.{namespace}.component.{component}`
-    Component {
+    /// ServiceGroup 级：`namespace.{namespace}.servicegroup.{servicegroup}`
+    ServiceGroup {
         namespace: String,
-        component: String,
+        servicegroup: String,
     },
 }
 
@@ -114,11 +114,11 @@ impl EventScope {
     pub fn subject_prefix(&self) -> String {
         match self {
             EventScope::Namespace { name } => format!("namespace.{}", name),
-            EventScope::Component {
+            EventScope::ServiceGroup {
                 namespace,
-                component,
+                servicegroup,
             } => {
-                format!("namespace.{}.component.{}", namespace, component)
+                format!("namespace.{}.servicegroup.{}", namespace, servicegroup)
             }
         }
     }
@@ -126,14 +126,14 @@ impl EventScope {
     pub fn namespace(&self) -> &str {
         match self {
             EventScope::Namespace { name } => name,
-            EventScope::Component { namespace, .. } => namespace,
+            EventScope::ServiceGroup { namespace, .. } => namespace,
         }
     }
 
-    pub fn component(&self) -> Option<&str> {
+    pub fn servicegroup(&self) -> Option<&str> {
         match self {
             EventScope::Namespace { .. } => None,
-            EventScope::Component { component, .. } => Some(component),
+            EventScope::ServiceGroup { servicegroup, .. } => Some(servicegroup),
         }
     }
 }
@@ -156,7 +156,7 @@ async fn resolve_zmq_broker(
 ) -> Result<Option<BrokerEndpoints>> {
     // 第 1 优先级：显式 URL
     if let Ok(broker_url) =
-        std::env::var(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_URL)
+        std::env::var(crate::config::environment_names::zmq_broker::PGD_ZMQ_BROKER_URL)
     {
         let (xsub_endpoints, xpub_endpoints) = parse_broker_url(&broker_url)?;
         tracing::info!(
@@ -171,11 +171,11 @@ async fn resolve_zmq_broker(
     }
 
     // 第 2 优先级：discovery 查找
-    if std::env::var(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED)
+    if std::env::var(crate::config::environment_names::zmq_broker::PGD_ZMQ_BROKER_ENABLED)
         .unwrap_or_default()
         == "true"
     {
-        let query = DiscoveryQuery::EventChannels(EventChannelQuery::component(
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::servicegroup(
             scope.namespace().to_string(),
             "zmq_broker".to_string(),
         ));
@@ -200,7 +200,7 @@ async fn resolve_zmq_broker(
 
         if xsub_endpoints.is_empty() {
             anyhow::bail!(
-                "DYN_ZMQ_BROKER_ENABLED=true but no broker found in discovery for namespace '{}'",
+                "PGD_ZMQ_BROKER_ENABLED=true but no broker found in discovery for namespace '{}'",
                 scope.namespace()
             );
         }
@@ -255,7 +255,7 @@ fn parse_broker_url(url: &str) -> Result<(Vec<String>, Vec<String>)> {
 
     if xsub_endpoints.is_empty() || xpub_endpoints.is_empty() {
         anyhow::bail!(
-            "Broker URL must contain at least one xsub and one xpub endpoint. Got xsub={:?}, xpub={:?}",
+            "Broker URL must contain at least one xsub and one xpub portname. Got xsub={:?}, xpub={:?}",
             xsub_endpoints,
             xpub_endpoints
         );
@@ -344,7 +344,7 @@ pub struct EventPublisher {
 /// 内部表示：根据 transport 类型构造出的"已就位"的 publisher 资源。
 enum PublisherSetup {
     Nats(Arc<dyn EventTransportTx>, Arc<Codec>),
-    /// 直连 ZMQ：需要把"对外可访问的 endpoint"注册进 discovery。
+    /// 直连 ZMQ：需要把"对外可访问的 portname"注册进 discovery。
     ZmqDirect(Arc<dyn EventTransportTx>, Arc<Codec>, String),
     /// Broker 模式：subscriber 通过 broker 自找 publisher，不必注册。
     ZmqBroker(Arc<dyn EventTransportTx>, Arc<Codec>),
@@ -383,7 +383,7 @@ async fn prepare_publisher_transport(
                     codec,
                 ))
             } else {
-                // 直连模式：先在 0.0.0.0:0 bind 一个 ZMQ socket，再把宣告 endpoint 算出来
+                // 直连模式：先在 0.0.0.0:0 bind 一个 ZMQ socket，再把宣告 portname 算出来
                 let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
                     let topic = topic.to_string();
                     move || {
@@ -406,7 +406,7 @@ async fn prepare_publisher_transport(
                     .rsplit(':')
                     .next()
                     .and_then(|s| s.parse().ok())
-                    .expect("Failed to parse port from bind endpoint");
+                    .expect("Failed to parse port from bind portname");
                 let local_ip = get_local_ip_for_advertise();
                 let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
 
@@ -439,7 +439,7 @@ async fn register_publisher_with_discovery(
             let transport_config = EventTransport::nats(scope.subject_prefix());
             let spec = DiscoverySpec::EventChannel {
                 namespace: scope.namespace().to_string(),
-                component: scope.component().unwrap_or("").to_string(),
+                servicegroup: scope.servicegroup().unwrap_or("").to_string(),
                 topic: topic.to_string(),
                 transport: transport_config,
             };
@@ -456,7 +456,7 @@ async fn register_publisher_with_discovery(
             let transport_config = EventTransport::zmq(public_endpoint);
             let spec = DiscoverySpec::EventChannel {
                 namespace: scope.namespace().to_string(),
-                component: scope.component().unwrap_or("").to_string(),
+                servicegroup: scope.servicegroup().unwrap_or("").to_string(),
                 topic: topic.to_string(),
                 transport: transport_config,
             };
@@ -482,20 +482,20 @@ async fn register_publisher_with_discovery(
 
 impl EventPublisher {
     /// 组件作用域 publisher，自动选 transport。
-    pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
+    pub async fn for_servicegroup(comp: &ServiceGroup, topic: impl Into<String>) -> Result<Self> {
         let transport_kind = comp.drt().default_event_transport_kind();
-        Self::for_component_with_transport(comp, topic, transport_kind).await
+        Self::for_servicegroup_with_transport(comp, topic, transport_kind).await
     }
 
-    pub async fn for_component_with_transport(
-        comp: &Component,
+    pub async fn for_servicegroup_with_transport(
+        comp: &ServiceGroup,
         topic: impl Into<String>,
         transport_kind: EventTransportKind,
     ) -> Result<Self> {
         let drt = comp.drt();
-        let scope = EventScope::Component {
+        let scope = EventScope::ServiceGroup {
             namespace: comp.namespace().name(),
-            component: comp.name().to_string(),
+            servicegroup: comp.name().to_string(),
         };
         Self::new_internal(drt, scope, topic.into(), transport_kind).await
     }
@@ -638,20 +638,20 @@ pub struct EventSubscriber {
 }
 
 impl EventSubscriber {
-    pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
+    pub async fn for_servicegroup(comp: &ServiceGroup, topic: impl Into<String>) -> Result<Self> {
         let transport_kind = comp.drt().default_event_transport_kind();
-        Self::for_component_with_transport(comp, topic, transport_kind).await
+        Self::for_servicegroup_with_transport(comp, topic, transport_kind).await
     }
 
-    pub async fn for_component_with_transport(
-        comp: &Component,
+    pub async fn for_servicegroup_with_transport(
+        comp: &ServiceGroup,
         topic: impl Into<String>,
         transport_kind: EventTransportKind,
     ) -> Result<Self> {
         let drt = comp.drt();
-        let scope = EventScope::Component {
+        let scope = EventScope::ServiceGroup {
             namespace: comp.namespace().name(),
-            component: comp.name().to_string(),
+            servicegroup: comp.name().to_string(),
         };
         Self::new_internal(drt, scope, topic.into(), transport_kind).await
     }
@@ -723,13 +723,13 @@ impl EventSubscriber {
                                 crate::discovery::EventChannelQuery::namespace(name.clone()),
                             )
                         }
-                        EventScope::Component {
+                        EventScope::ServiceGroup {
                             namespace,
-                            component,
+                            servicegroup,
                         } => crate::discovery::DiscoveryQuery::EventChannels(
                             crate::discovery::EventChannelQuery::topic(
                                 namespace.clone(),
-                                component.clone(),
+                                servicegroup.clone(),
                                 topic.clone(),
                             ),
                         ),
@@ -846,13 +846,13 @@ mod tests {
         };
         assert_eq!(ns_scope.subject_prefix(), "namespace.test-ns");
 
-        let comp_scope = EventScope::Component {
+        let comp_scope = EventScope::ServiceGroup {
             namespace: "test-ns".to_string(),
-            component: "test-comp".to_string(),
+            servicegroup: "test-comp".to_string(),
         };
         assert_eq!(
             comp_scope.subject_prefix(),
-            "namespace.test-ns.component.test-comp"
+            "namespace.test-ns.servicegroup.test-comp"
         );
     }
 
@@ -862,14 +862,14 @@ mod tests {
             name: "my-ns".to_string(),
         };
         assert_eq!(ns_scope.namespace(), "my-ns");
-        assert_eq!(ns_scope.component(), None);
+        assert_eq!(ns_scope.servicegroup(), None);
 
-        let comp_scope = EventScope::Component {
+        let comp_scope = EventScope::ServiceGroup {
             namespace: "my-ns".to_string(),
-            component: "my-comp".to_string(),
+            servicegroup: "my-comp".to_string(),
         };
         assert_eq!(comp_scope.namespace(), "my-ns");
-        assert_eq!(comp_scope.component(), Some("my-comp"));
+        assert_eq!(comp_scope.servicegroup(), Some("my-comp"));
     }
 
     #[test]
@@ -1004,10 +1004,10 @@ mod tests {
         temp_env::async_with_vars(
             vec![
                 (
-                    env_zmq_broker::DYN_ZMQ_BROKER_URL,
+                    env_zmq_broker::PGD_ZMQ_BROKER_URL,
                     Some("xsub=tcp://10.0.0.1:5555, xpub=tcp://10.0.0.1:5556"),
                 ),
-                (env_zmq_broker::DYN_ZMQ_BROKER_ENABLED, Some("true")),
+                (env_zmq_broker::PGD_ZMQ_BROKER_ENABLED, Some("true")),
             ],
             async {
                 let drt = create_process_local_drt().await;
@@ -1018,7 +1018,7 @@ mod tests {
                 let broker = resolve_zmq_broker(&drt, &scope)
                     .await
                     .expect("resolve should succeed")
-                    .expect("explicit URL should produce broker endpoints");
+                    .expect("explicit URL should produce broker portnames");
 
                 assert_eq!(broker.xsub_endpoints, vec!["tcp://10.0.0.1:5555"]);
                 assert_eq!(broker.xpub_endpoints, vec!["tcp://10.0.0.1:5556"]);
@@ -1032,8 +1032,8 @@ mod tests {
     async fn resolve_zmq_broker_discovers_from_registry_and_handles_missing() {
         temp_env::async_with_vars(
             vec![
-                (env_zmq_broker::DYN_ZMQ_BROKER_URL, None::<&str>),
-                (env_zmq_broker::DYN_ZMQ_BROKER_ENABLED, Some("true")),
+                (env_zmq_broker::PGD_ZMQ_BROKER_URL, None::<&str>),
+                (env_zmq_broker::PGD_ZMQ_BROKER_ENABLED, Some("true")),
             ],
             async {
                 let drt = create_process_local_drt().await;
@@ -1050,7 +1050,7 @@ mod tests {
                 drt.discovery()
                     .register(DiscoverySpec::EventChannel {
                         namespace: "ns-discovery".to_string(),
-                        component: "zmq_broker".to_string(),
+                        servicegroup: "zmq_broker".to_string(),
                         topic: "broker-channel".to_string(),
                         transport: EventTransport::ZmqBroker {
                             xsub_endpoints: vec![
@@ -1083,8 +1083,8 @@ mod tests {
     async fn resolve_zmq_broker_returns_none_when_not_configured() {
         temp_env::async_with_vars(
             vec![
-                (env_zmq_broker::DYN_ZMQ_BROKER_URL, None::<&str>),
-                (env_zmq_broker::DYN_ZMQ_BROKER_ENABLED, Some("false")),
+                (env_zmq_broker::PGD_ZMQ_BROKER_URL, None::<&str>),
+                (env_zmq_broker::PGD_ZMQ_BROKER_ENABLED, Some("false")),
             ],
             async {
                 let drt = create_process_local_drt().await;
@@ -1188,9 +1188,9 @@ mod tests {
 
         let publisher = EventPublisher {
             transport_kind: EventTransportKind::Zmq,
-            scope: EventScope::Component {
+            scope: EventScope::ServiceGroup {
                 namespace: "ns".to_string(),
-                component: "comp".to_string(),
+                servicegroup: "comp".to_string(),
             },
             topic: "topic-a".to_string(),
             publisher_id: 99,
@@ -1213,7 +1213,7 @@ mod tests {
 
         let calls = tx_impl.calls.lock().await;
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "namespace.ns.component.comp.topic-a");
+        assert_eq!(calls[0].0, "namespace.ns.servicegroup.comp.topic-a");
 
         let envelope = codec
             .decode_envelope(&calls[0].1)
@@ -1403,25 +1403,25 @@ mod tests {
     async fn event_publisher_and_subscriber_with_transport_zmq_construct() {
         temp_env::async_with_vars(
             vec![
-                (env_zmq_broker::DYN_ZMQ_BROKER_URL, None::<&str>),
-                (env_zmq_broker::DYN_ZMQ_BROKER_ENABLED, Some("false")),
+                (env_zmq_broker::PGD_ZMQ_BROKER_URL, None::<&str>),
+                (env_zmq_broker::PGD_ZMQ_BROKER_ENABLED, Some("false")),
             ],
             async {
                 let drt = create_process_local_drt().await;
                 let namespace = drt.namespace("ep-ns").expect("namespace should build");
-                let component = namespace
-                    .component("ep-comp")
-                    .expect("component should build");
+                let servicegroup = namespace
+                    .servicegroup("ep-comp")
+                    .expect("servicegroup should build");
 
-                let publisher_component = EventPublisher::for_component_with_transport(
-                    &component,
+                let publisher_servicegroup = EventPublisher::for_servicegroup_with_transport(
+                    &servicegroup,
                     "topic-c",
                     EventTransportKind::Zmq,
                 )
                 .await
-                .expect("component publisher should initialize");
-                assert_eq!(publisher_component.topic(), "topic-c");
-                assert_eq!(publisher_component.transport_kind(), EventTransportKind::Zmq);
+                .expect("servicegroup publisher should initialize");
+                assert_eq!(publisher_servicegroup.topic(), "topic-c");
+                assert_eq!(publisher_servicegroup.transport_kind(), EventTransportKind::Zmq);
 
                 let publisher_namespace = EventPublisher::for_namespace_with_transport(
                     &namespace,
@@ -1433,21 +1433,21 @@ mod tests {
                 assert_eq!(publisher_namespace.topic(), "topic-d");
                 assert_eq!(publisher_namespace.transport_kind(), EventTransportKind::Zmq);
 
-                let mut subscriber_component = EventSubscriber::for_component_with_transport(
-                    &component,
+                let mut subscriber_servicegroup = EventSubscriber::for_servicegroup_with_transport(
+                    &servicegroup,
                     "topic-c",
                     EventTransportKind::Zmq,
                 )
                 .await
-                .expect("component subscriber should initialize");
+                .expect("servicegroup subscriber should initialize");
 
-                let _typed_component = EventSubscriber::for_component_with_transport(
-                    &component,
+                let _typed_servicegroup = EventSubscriber::for_servicegroup_with_transport(
+                    &servicegroup,
                     "topic-c",
                     EventTransportKind::Zmq,
                 )
                 .await
-                .expect("component subscriber for typed conversion should initialize")
+                .expect("servicegroup subscriber for typed conversion should initialize")
                 .typed::<TestPayload>();
 
                 let _subscriber_namespace = EventSubscriber::for_namespace_with_transport(
@@ -1460,7 +1460,7 @@ mod tests {
 
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(50),
-                    subscriber_component.next(),
+                    subscriber_servicegroup.next(),
                 )
                 .await;
 
@@ -1474,30 +1474,30 @@ mod tests {
     async fn event_publisher_and_subscriber_auto_transport_paths_construct() {
         temp_env::async_with_vars(
             vec![
-                (env_zmq_broker::DYN_ZMQ_BROKER_URL, None::<&str>),
-                (env_zmq_broker::DYN_ZMQ_BROKER_ENABLED, Some("false")),
+                (env_zmq_broker::PGD_ZMQ_BROKER_URL, None::<&str>),
+                (env_zmq_broker::PGD_ZMQ_BROKER_ENABLED, Some("false")),
             ],
             async {
                 let drt = create_process_local_drt().await;
                 let namespace = drt.namespace("ep-auto-ns").expect("namespace should build");
-                let component = namespace
-                    .component("ep-auto-comp")
-                    .expect("component should build");
+                let servicegroup = namespace
+                    .servicegroup("ep-auto-comp")
+                    .expect("servicegroup should build");
 
-                let publisher_component = EventPublisher::for_component(&component, "topic-e")
+                let publisher_servicegroup = EventPublisher::for_servicegroup(&servicegroup, "topic-e")
                     .await
-                    .expect("auto component publisher should initialize");
-                assert_eq!(publisher_component.topic(), "topic-e");
+                    .expect("auto servicegroup publisher should initialize");
+                assert_eq!(publisher_servicegroup.topic(), "topic-e");
 
                 let publisher_namespace = EventPublisher::for_namespace(&namespace, "topic-f")
                     .await
                     .expect("auto namespace publisher should initialize");
                 assert_eq!(publisher_namespace.topic(), "topic-f");
 
-                let _subscriber_component =
-                    EventSubscriber::for_component(&component, "topic-e")
+                let _subscriber_servicegroup =
+                    EventSubscriber::for_servicegroup(&servicegroup, "topic-e")
                         .await
-                        .expect("auto component subscriber should initialize");
+                        .expect("auto servicegroup subscriber should initialize");
                 let _subscriber_namespace =
                     EventSubscriber::for_namespace(&namespace, "topic-f")
                         .await
