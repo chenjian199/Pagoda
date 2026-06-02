@@ -6,6 +6,7 @@ members = [
     "lib/config",
     "lib/runtime",
     "lib/tokens",
+    "lib/tokenizers",
 ]
 resolver = "3"
 
