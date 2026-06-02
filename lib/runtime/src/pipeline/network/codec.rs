@@ -32,7 +32,7 @@
 //!   - `TcpResponseMessage::decode(bytes: &Bytes) -> Result<Self, std::io::Error>`
 //!   - `TcpResponseCodec::new(max_message_size: Option<usize>) -> Self`
 //! - `pub headers: std::collections::HashMap<String, String>` —— 必须使用全路径
-//!   `std::collections::HashMap`，与 lib-copy 保持完全一致的 import 风格。
+//!   `std::collections::HashMap` 的 import 风格。
 //! - 二进制线协议字段顺序与字节序为跨进程契约：
 //!   `u16 BE portname_len | portname_bytes | u16 BE headers_len | headers_json |
 //!    u32 BE payload_len | payload_bytes`；
@@ -57,15 +57,14 @@
 //!   收敛 `std::io::Error` 创建，减少散落的 `format!("...")`。
 //! - **解码不消耗输入**：`TcpRequestMessage::decode` 与 `TcpResponseMessage::decode`
 //!   都接受 `&Bytes`，原地 `slice(range)` 共享底层 `Arc`，不拷贝负载。
-//! - **不**改变 lib-copy 已有的行为：例如响应帧 `decode` 不强制 `max_message_size`
-//!   —— 该检查只在 `TcpResponseCodec::decode/encode` 上做（lib-copy 原始语义保留）。
+//! - 响应帧 `decode` 不强制 `max_message_size`
+//!   —— 该检查只在 `TcpResponseCodec::decode/encode` 上做。
 
-//! Codec Module
+//! 编解码模块。
 //!
-//! Codec map structure into blobs of bytes and streams of bytes.
+//! 这个模块把结构化消息映射为字节 blob 和字节流。
 //!
-//! In this module, we define three primary codec used to issue single, two-part or multi-part messages,
-//! on a byte stream.
+//! 在这里我们定义了用于在字节流上发送单段、双段或多段消息的三类核心 codec。
 
 use bytes::Bytes;
 use tokio_util::{
@@ -158,7 +157,7 @@ impl<'a> FrameCursor<'a> {
         self.pos
     }
 
-    /// 确保剩余至少 `need` 字节，否则返回 truncation 错误。
+    /// 确保剩余至少 `need` 字节，否则返回截断错误。
     #[inline]
     fn require(&self, need: usize, reason: &'static str) -> Result<(), std::io::Error> {
         if self.buf.len().saturating_sub(self.pos) < need {
@@ -168,7 +167,7 @@ impl<'a> FrameCursor<'a> {
         }
     }
 
-    /// 读取一个 u16 BE 并推进 2 字节。
+    /// 读取一个 u16 大端值并推进 2 字节。
     #[inline]
     fn read_u16_be(&mut self, reason: &'static str) -> Result<u16, std::io::Error> {
         self.require(wire::ENDPOINT_LEN_WIDTH, reason)?;
@@ -177,7 +176,7 @@ impl<'a> FrameCursor<'a> {
         Ok(v)
     }
 
-    /// 读取一个 u32 BE 并推进 4 字节。
+    /// 读取一个 u32 大端值并推进 4 字节。
     #[inline]
     fn read_u32_be(&mut self, reason: &'static str) -> Result<u32, std::io::Error> {
         self.require(wire::PAYLOAD_LEN_WIDTH, reason)?;
@@ -192,7 +191,7 @@ impl<'a> FrameCursor<'a> {
     }
 
     /// 跳过 `len` 字节并返回对应的相对区间 `[start, end)`。
-    /// 区间用于后续 `Bytes::slice` 做 zero-copy 切片。
+    /// 这个区间会在后续交给 `Bytes::slice` 做零拷贝切片。
     #[inline]
     fn skip(
         &mut self,
@@ -216,7 +215,7 @@ struct TcpRequestLayout {
     total_len: usize,
 }
 
-/// 编码侧的"先检查再加和"：拒绝任何会被 `as u16 / as u32` 截断的字段。
+/// 编码侧的“先检查再加和”：拒绝任何会被 `as u16 / as u32` 截断的字段。
 ///
 /// 通过校验后返回最终序列化所需的总字节数，用于一次性 `BytesMut::with_capacity`。
 fn validate_request_encode_lengths(
@@ -281,15 +280,15 @@ fn parse_request_layout(bytes: &[u8]) -> Result<TcpRequestLayout, std::io::Error
 
 // === SECTION: TcpRequestMessage ===
 
-/// TCP request plane protocol message with portname routing and trace headers
+/// 带有端点路径路由和追踪头的 TCP 请求平面协议消息。
 ///
-/// Wire format:
-/// - portname_path_len: u16 (big-endian)
-/// - portname_path: UTF-8 string
-/// - headers_len: u16 (big-endian)
-/// - headers: JSON-encoded HashMap<String, String>
-/// - payload_len: u32 (big-endian)
-/// - payload: bytes
+/// 线格式：
+/// - portname_path_len：u16（大端）
+/// - portname_path：UTF-8 字符串
+/// - headers_len：u16（大端）
+/// - headers：JSON 编码的 `HashMap<String, String>`
+/// - payload_len：u32（大端）
+/// - payload：字节数据
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpRequestMessage {
     pub portname_path: String,
@@ -318,7 +317,7 @@ impl TcpRequestMessage {
         }
     }
 
-    /// Encode message to bytes
+    /// 将消息编码为字节。
     pub fn encode(&self) -> Result<Bytes, std::io::Error> {
         let portname_bytes = self.portname_path.as_bytes();
         let portname_len = portname_bytes.len();
@@ -346,7 +345,7 @@ impl TcpRequestMessage {
         Ok(buf.freeze())
     }
 
-    /// Decode message from bytes (for backward compatibility, zero-copy when possible)
+    /// 从字节解码消息（为兼容旧路径，尽可能保持零拷贝）。
     pub fn decode(bytes: &Bytes) -> Result<Self, std::io::Error> {
         let layout = parse_request_layout(bytes)?;
 
@@ -371,11 +370,11 @@ impl TcpRequestMessage {
 
 // === SECTION: TcpResponseMessage ===
 
-/// TCP response message (acknowledgment or error)
+/// TCP 响应消息（确认或错误）。
 ///
-/// Wire format:
-/// - length: u32 (big-endian)
-/// - data: bytes
+/// 线格式：
+/// - length：u32（大端）
+/// - data：字节数据
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpResponseMessage {
     pub data: Bytes,
@@ -390,7 +389,7 @@ impl TcpResponseMessage {
         Self { data: Bytes::new() }
     }
 
-    /// Encode response to bytes (for backward compatibility)
+    /// 将响应编码为字节（为兼容旧路径）。
     pub fn encode(&self) -> Result<Bytes, std::io::Error> {
         if self.data.len() > u32::MAX as usize {
             return Err(length_overflow("Response too large", self.data.len()));
@@ -402,7 +401,7 @@ impl TcpResponseMessage {
         Ok(buf.freeze())
     }
 
-    /// Decode response from bytes (for backward compatibility, zero-copy when possible)
+    /// 从字节解码响应（为兼容旧路径，尽可能保持零拷贝）。
     pub fn decode(bytes: &Bytes) -> Result<Self, std::io::Error> {
         let mut cur = FrameCursor::new(bytes);
         let len = cur.read_u32_be("Not enough bytes for response length")? as usize;
@@ -426,8 +425,8 @@ impl TcpResponseMessage {
 
 // === SECTION: TcpResponseCodec ===
 
-/// Codec for encoding/decoding TcpResponseMessage
-/// Supports max_message_size enforcement
+/// 用于编码和解码 TcpResponseMessage 的 codec。
+/// 支持 max_message_size 约束。
 #[derive(Clone, Default)]
 pub struct TcpResponseCodec {
     max_message_size: Option<usize>,
@@ -438,7 +437,7 @@ impl TcpResponseCodec {
         Self { max_message_size }
     }
 
-    /// 共享检查：拒绝总长 `total_len > max_message_size`（如果设了上限）。
+    /// 共享检查：若设置了上限，则拒绝 `total_len > max_message_size`。
     #[inline]
     fn enforce_max(&self, total_len: usize) -> Result<(), std::io::Error> {
         if let Some(max) = self.max_message_size
@@ -554,8 +553,8 @@ fn tcp_request_header_size(portname_len: usize, headers_len: usize) -> usize {
         + wire::PAYLOAD_LEN_WIDTH
 }
 
-/// 仅解析"帧头部"，不强制验证 payload 是否齐备 —— 给 zero_copy_decoder 在
-/// "增量读 + 判定何时再去 read 更多字节"路径使用。
+/// 仅解析“帧头部”，不强制验证 payload 是否齐备，供 zero_copy_decoder 在
+/// “增量读取 + 判断何时再读取更多字节”的路径中使用。
 fn parse_tcp_request_frame_header(
     bytes: &[u8],
 ) -> Result<TcpRequestWireHeader, std::io::Error> {
@@ -598,39 +597,39 @@ mod tests {
     //!
     //! | 用例 | 覆盖目标 |
     //! |------|----------|
-    //! | `test_tcp_request_encode_decode` | request 完整 round-trip |
-    //! | `test_tcp_request_empty_payload` | payload 长度=0 |
-    //! | `test_tcp_request_large_payload` | 1MB payload |
+    //! | `test_tcp_request_encode_decode` | request 完整往返 |
+    //! | `test_tcp_request_empty_payload` | payload 长度为 0 |
+    //! | `test_tcp_request_large_payload` | 1MB 负载 |
     //! | `test_tcp_request_decode_truncated` | 末尾截断 → UnexpectedEof |
     //! | `test_tcp_request_decode_invalid_portname_utf8` | UTF-8 错误 → InvalidData |
     //! | `test_tcp_request_decode_invalid_headers_json` | JSON 错误 → InvalidData |
-    //! | `test_tcp_request_empty_portname_path` | portname=""（lib-copy 名） |
-    //! | `test_tcp_response_encode_decode` | response round-trip（lib-copy 名） |
-    //! | `test_tcp_response_empty` | data=""（lib-copy 名） |
-    //! | `test_tcp_response_decode_truncated` | 4 字节长度都不够（lib-copy 名） |
-    //! | `test_tcp_request_unicode_portname` | portname 多字节字符（lib-copy 名） |
-    //! | `test_tcp_response_codec` | codec encode + decode（lib-copy 名） |
-    //! | `test_tcp_response_codec_partial` | 分片喂入返回 None（lib-copy 名） |
-    //! | `test_tcp_response_codec_max_size` | encode 端 max-size 拒绝（lib-copy 名） |
-    //! | `test_tcp_request_with_headers_round_trip` | 多 header 完整保留 |
-    //! | `test_tcp_request_portname_length_overflow` | portname > u16::MAX → InvalidInput |
-    //! | `test_tcp_request_headers_length_overflow` | headers > u16::MAX → InvalidInput |
-    //! | `test_tcp_request_decode_trailing_bytes_ignored` | 末尾多余字节不破坏 decode |
-    //! | `test_tcp_request_decode_byte_by_byte` | 流式逐字节，仅完整时才能 decode |
-    //! | `test_tcp_response_codec_round_trip_multiple` | 单 buffer 多帧顺序消费 |
-    //! | `test_tcp_response_codec_max_size_exact_boundary` | total_len == max 通过、+1 拒绝 |
+    //! | `test_tcp_request_empty_portname_path` | portname 为空字符串 |
+    //! | `test_tcp_response_encode_decode` | response 完整往返 |
+    //! | `test_tcp_response_empty` | data 为空字符串 |
+    //! | `test_tcp_response_decode_truncated` | 连 4 字节长度前缀都不够 |
+    //! | `test_tcp_request_unicode_portname` | portname 含多字节字符 |
+    //! | `test_tcp_response_codec` | codec 编码 + 解码 |
+    //! | `test_tcp_response_codec_partial` | 分片喂入时返回 None |
+    //! | `test_tcp_response_codec_max_size` | 编码端按 max-size 拒绝 |
+    //! | `test_tcp_request_with_headers_round_trip` | 多个 header 完整保留 |
+    //! | `test_tcp_request_portname_length_overflow` | portname 大于 u16::MAX → InvalidInput |
+    //! | `test_tcp_request_headers_length_overflow` | headers 大于 u16::MAX → InvalidInput |
+    //! | `test_tcp_request_decode_trailing_bytes_ignored` | 末尾多余字节不会破坏 decode |
+    //! | `test_tcp_request_decode_byte_by_byte` | 流式逐字节读取，仅完整时才能 decode |
+    //! | `test_tcp_response_codec_round_trip_multiple` | 单个 buffer 内多帧顺序消费 |
+    //! | `test_tcp_response_codec_max_size_exact_boundary` | total_len == max 通过，+1 拒绝 |
     //! | `test_tcp_response_codec_decode_max_size` | decoder 也强制 max-size |
-    //! | `test_tcp_response_decode_length_only` | 仅长度字段而无数据 → UnexpectedEof |
+    //! | `test_tcp_response_decode_length_only` | 仅有长度字段而无数据 → UnexpectedEof |
     //!
     //! ## 意义
-    //! 14 条 lib-copy 名锁定 P2 行为；9 条新增覆盖：长度字段宽度边界、多头部、
-    //! trailing bytes 兼容性、`Decoder` 状态机分片喂入、多帧 buffer 顺序消费、
+    //! 14 条基础用例锁定 P2 行为；9 条新增用例覆盖长度字段宽度边界、多头部、
+    //! 尾随字节兼容性、`Decoder` 状态机分片喂入、多帧 buffer 顺序消费、
     //! `max_message_size` 在双向（encode/decode）上的严格执行。
     //! 任何一条失败都意味着线协议或状态机被破坏。
 
     use super::*;
 
-    // -------- lib-copy 原 14 条（语义不变） --------
+    // -------- 基础 14 条（语义不变） --------
 
     #[test]
     fn test_tcp_request_encode_decode() {

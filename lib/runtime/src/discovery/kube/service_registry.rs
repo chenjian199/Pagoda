@@ -16,7 +16,7 @@
 //! |------|------|
 //! | Builder 模式 | [`Registration::builder`] 分阶段填充，防止参数顺序错误 |
 //! | `EndpointSliceName` newtype | 携带类型信息，避免裸 `String` 被误用 |
-//! | 去重 | 不再含 `sanitize_dns_label` / `short_hash`，统一从 [`super::utils`] 引用 |
+//! | 去重 | 统一从 [`super::utils`] 引用 `sanitize` / `short_hash`，避免重复实现 |
 //! | server-side apply | 所有写操作幂等，无需先 list 再判断 create/update |
 //!
 //! ## Label 最少原则
@@ -63,9 +63,9 @@ pub const MANAGED_BY_LABEL: &str = "endpointslice.kubernetes.io/managed-by";
 /// [`MANAGED_BY_LABEL`] 的具体值，标识 Pagoda worker 进程是此 slice 的管理者。
 pub const MANAGED_BY_VALUE: &str = "pagoda-worker";
 
-/// 可选的 Pagoda 发现模式 label，区分原生 Service 模式与旧 CRD 模式的对象。
+/// 可选的 Pagoda 发现模式 label，标识对象属于原生 Service 注册模式。
 ///
-/// 在 list/watch 时作为额外过滤条件，避免处理不属于原生模式的遗留对象。
+/// 在 list/watch 时作为额外过滤条件，避免处理不属于原生模式的对象。
 pub const REGISTRY_MODE_LABEL: &str = "bedicloud.com/pagoda-discovery-mode";
 
 /// [`REGISTRY_MODE_LABEL`] 的具体值，标识此对象属于原生 Service 注册模式。
@@ -77,7 +77,7 @@ pub const REGISTRY_MODE_VALUE: &str = "native-service";
 ///
 /// ## 命名格式
 ///
-/// `pag-<service>-<port>-<hash8>`
+/// `pgd-<service>-<port>-<hash8>`
 ///
 /// - `<service>`：Service 名称规范化后的前 20 字符
 /// - `<port>`：端口名称规范化后的前 15 字符
@@ -91,7 +91,7 @@ pub const REGISTRY_MODE_VALUE: &str = "native-service";
 /// ## 长度保证
 ///
 /// 格式设计确保总长度 ≤ 63 字符（K8s DNS label 上限）：
-/// - `"pag-"` = 4
+/// - `"pgd-"` = 4
 /// - service（≤20） + `"-"` = 21
 /// - port（≤15） + `"-"` = 16
 /// - hash = 8
@@ -110,7 +110,7 @@ impl EndpointSliceName {
         let svc = sanitize(service_name, 20);
         let port = sanitize(portname, 15);
         let digest = short_hash(&format!("{service_name}/{portname}/{pod_name}"));
-        Self(format!("pag-{svc}-{port}-{digest}"))
+        Self(format!("pgd-{svc}-{port}-{digest}"))
     }
 
     /// 返回内部字符串的引用。
@@ -150,7 +150,7 @@ impl From<EndpointSliceName> for String {
 ///
 /// ## 设计意图
 ///
-/// 原版 `NativeServiceRegistration::new` 接受 6 个位置参数，容易因顺序混淆产生 bug。
+/// 若直接接受 6 个位置参数构造 [`Registration`]，容易因顺序混淆产生 bug。
 /// Builder 模式通过命名方法明确每个参数的语义，并在 `build()` 统一校验。
 #[derive(Debug)]
 pub struct RegistrationBuilder {
@@ -315,8 +315,8 @@ impl Registration {
     /// - `portname`：端口名称（Pagoda portname 字符串）
     /// - `port`：端口号
     /// - `pod_name`：Pod 名称
-    /// - `pod_uid`：Pod UID
-    /// - `pod_ip`：Pod IP
+    /// - `pod_uid`：Pod 唯一标识（UID）
+    /// - `pod_ip`：Pod IP 地址
     pub fn builder(
         service_name: impl Into<String>,
         portname: impl Into<String>,
@@ -592,7 +592,7 @@ pub async fn delete_service(client: &KubeClient, namespace: &str, name: &str) ->
 /// ## 约束
 ///
 /// 同一 servicegroup 下的所有 portname 共用一个 Service，通过端口名区分。
-/// 使用 `"pag-comp-"` 前缀 + 规范化后的 servicegroup 名（最长 40 字符）。
+/// 使用 `"pgd-comp-"` 前缀 + 规范化后的 servicegroup 名（最长 40 字符）。
 ///
 /// # 参数
 /// - `servicegroup`：Pagoda servicegroup 字符串（可含任意字符）
@@ -600,7 +600,7 @@ pub async fn delete_service(client: &KubeClient, namespace: &str, name: &str) ->
 /// # 返回
 /// 符合 K8s Service 命名规范的字符串
 pub fn servicegroup_service_name(servicegroup: &str) -> String {
-    format!("pag-comp-{}", sanitize(servicegroup, 40))
+    format!("pgd-comp-{}", sanitize(servicegroup, 40))
 }
 
 // ─── 内部辅助 ─────────────────────────────────────────────────────────────────
@@ -684,11 +684,11 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// 名称以 "pag-" 开头。
+    /// 名称以 "pgd-" 开头。
     #[test]
     fn slice_name_has_prefix() {
         let name = EndpointSliceName::new("svc", "port", "pod");
-        assert!(name.as_str().starts_with("pag-"), "名称必须以 pag- 开头");
+        assert!(name.as_str().starts_with("pgd-"), "名称必须以 pgd- 开头");
     }
 
     /// 名称长度不超过 63 字符（K8s DNS label 上限）。
@@ -880,9 +880,9 @@ mod tests {
         assert_ne!(servicegroup_service_name("a"), servicegroup_service_name("b"));
     }
 
-    /// 名称以 "pag-comp-" 开头。
+    /// 名称以 "pgd-comp-" 开头。
     #[test]
     fn servicegroup_service_name_prefix() {
-        assert!(servicegroup_service_name("test").starts_with("pag-comp-"));
+        assert!(servicegroup_service_name("test").starts_with("pgd-comp-"));
     }
 }

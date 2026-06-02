@@ -5,14 +5,9 @@
 //!
 //! ## 设计意图
 //!
-//! 历史版本的 `KubeDiscoveryClient` 通过自定义资源 `PagodaWorkerMetadata`
-//! 在集群中**间接**发布发现状态，存在两个问题：
-//!
-//! 1. 需要预先安装 CRD，Helm chart 与控制面耦合；
-//! 2. 单 Pod 多 portname 时所有信息塞在一个 CR `data` 字段里，导致细粒度
-//!    增量更新（例如单独移除一个 LoRA）只能整段重写。
-//!
-//! 本次重写改为**直接使用 K8s 原生对象**作为信息载体：
+//! `KubeDiscoveryClient` **直接使用 K8s 原生对象**作为发现状态的信息载体，
+//! 无需安装任何自定义资源（CRD），从而避免 Helm chart 与控制面耦合，并支持
+//! 单 Pod 多 portname 下的细粒度增量更新（例如单独移除一个 LoRA）：
 //!
 //! | Pagoda 概念     | K8s 原生对象映射                |
 //! |----------------|-------------------------------|
@@ -31,10 +26,9 @@
 //!
 //! ## 外部契约
 //!
-//! - 公开符号 [`KubeDiscoveryClient`]、[`hash_pod_name`] 与历史版本签名一致；
+//! - 公开符号 [`KubeDiscoveryClient`]、[`hash_pod_name`] 的签名保持稳定；
 //!   `KubeDiscoveryClient::new(metadata, cancel_token)` 仍是唯一构造入口。
-//! - `Discovery` trait 的语义保持不变：上层调用方无需感知后端从 CRD
-//!   切换到原生对象。
+//! - `Discovery` trait 的语义保持不变：上层调用方无需感知后端的对象映射细节。
 //!
 //! ## 实现要点
 //!

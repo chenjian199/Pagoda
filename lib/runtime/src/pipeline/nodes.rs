@@ -69,8 +69,8 @@ mod private {
 
 // === SECTION: Source<T> ===
 
-// todo rename `ServicePipelineExt`
-/// A [`Source`] trait defines how data is emitted from a source to a downstream sink.
+// TODO：后续重命名 `ServicePipelineExt`。
+/// [`Source`] trait 定义了数据如何从源节点发向下游 sink。
 #[async_trait]
 pub trait Source<T: PipelineIO>: Data {
     async fn on_next(&self, data: T, _: private::Token) -> Result<(), Error>;
@@ -86,7 +86,7 @@ pub trait Source<T: PipelineIO>: Data {
 
 // === SECTION: Sink<T> ===
 
-/// A [`Sink`] trait defines how data is received from a source and processed.
+/// [`Sink`] trait 定义了数据如何从源节点接收并处理。
 #[async_trait]
 pub trait Sink<T: PipelineIO>: Data {
     async fn on_data(&self, data: T, _: private::Token) -> Result<(), Error>;
@@ -94,7 +94,7 @@ pub trait Sink<T: PipelineIO>: Data {
 
 // === SECTION: Edge<T> ===
 
-/// An [`Edge`] is a connection between a [`Source`] and a [`Sink`].
+/// [`Edge`] 是 [`Source`] 与 [`Sink`] 之间的连接。
 pub struct Edge<T: PipelineIO> {
     downstream: Arc<dyn Sink<T>>,
 }
@@ -113,16 +113,16 @@ type NodeFn<In, Out> = Box<dyn Fn(In) -> Result<Out, Error> + Send + Sync>;
 
 // === SECTION: Operator trait ===
 
-/// An [`Operator`] is a trait that defines the behavior of how two [`AsyncEngine`] can be chained together.
-/// An [`Operator`] is not quite an [`AsyncEngine`] because its generate method requires both the upstream
-/// request, but also the downstream [`AsyncEngine`] to which it will pass the transformed request.
-/// The [`Operator`] logic must transform the upstream request `UpIn` to the downstream request `DownIn`,
-/// then transform the downstream response `DownOut` to the upstream response `UpOut`.
+/// [`Operator`] trait 定义两个 [`AsyncEngine`] 如何串联时的行为。
+/// [`Operator`] 本身不完全等同于 [`AsyncEngine`]，因为它的 generate 方法既需要上游请求，
+/// 也需要被传入变换后请求的下游 [`AsyncEngine`]。
+/// [`Operator`] 的逻辑必须把上游请求 `UpIn` 变换为下游请求 `DownIn`，
+/// 再把下游响应 `DownOut` 变换回上游响应 `UpOut`。
 ///
-/// A [`PipelineOperator`] accepts an [`Operator`] and presents itself as an [`AsyncEngine`] for the upstream
-/// [`AsyncEngine<UpIn, UpOut, Error>`].
+/// [`PipelineOperator`] 接收一个 [`Operator`]，并以面向上游的 [`AsyncEngine`]
+/// [`AsyncEngine<UpIn, UpOut, Error>`] 形式呈现自己。
 ///
-/// ### Example of type transformation and data flow
+/// ### 类型变换与数据流示例
 /// ```text
 /// ... --> <UpIn> ---> [Operator] --> <DownIn> ---> ...
 /// ... <-- <UpOut> --> [Operator] <-- <DownOut> <-- ...
@@ -131,9 +131,9 @@ type NodeFn<In, Out> = Box<dyn Fn(In) -> Result<Out, Error> + Send + Sync>;
 pub trait Operator<UpIn: PipelineIO, UpOut: PipelineIO, DownIn: PipelineIO, DownOut: PipelineIO>:
     Data
 {
-    /// This method is expected to transform the upstream request `UpIn` to the downstream request `DownIn`,
-    /// call the next [`AsyncEngine`] with the transformed request, then transform the downstream response
-    /// `DownOut` to the upstream response `UpOut`.
+    /// 这个方法应当把上游请求 `UpIn` 变换为下游请求 `DownIn`，
+    /// 用变换后的请求调用下一个 [`AsyncEngine`]，再把下游响应 `DownOut`
+    /// 变换回上游响应 `UpOut`。
     async fn generate(
         &self,
         req: UpIn,
@@ -150,8 +150,8 @@ pub trait Operator<UpIn: PipelineIO, UpOut: PipelineIO, DownIn: PipelineIO, Down
 
 // === SECTION: PipelineOperator 与双向边句柄 ===
 
-/// A [`PipelineOperatorForwardEdge`] is [`Sink`] for the upstream request type `UpIn` and a [`Source`] for the
-/// downstream request type `DownIn`.
+/// [`PipelineOperatorForwardEdge`] 对上游请求类型 `UpIn` 是 [`Sink`]，
+/// 对下游请求类型 `DownIn` 是 [`Source`]。
 pub struct PipelineOperatorForwardEdge<
     UpIn: PipelineIO,
     UpOut: PipelineIO,
@@ -161,8 +161,8 @@ pub struct PipelineOperatorForwardEdge<
     parent: Arc<PipelineOperator<UpIn, UpOut, DownIn, DownOut>>,
 }
 
-/// A [`PipelineOperatorBackwardEdge`] is [`Sink`] for the downstream response type `DownOut` and a [`Source`] for the
-/// upstream response type `UpOut`.
+/// [`PipelineOperatorBackwardEdge`] 对下游响应类型 `DownOut` 是 [`Sink`]，
+/// 对上游响应类型 `UpOut` 是 [`Source`]。
 pub struct PipelineOperatorBackwardEdge<
     UpIn: PipelineIO,
     UpOut: PipelineIO,
@@ -172,23 +172,23 @@ pub struct PipelineOperatorBackwardEdge<
     parent: Arc<PipelineOperator<UpIn, UpOut, DownIn, DownOut>>,
 }
 
-/// A [`PipelineOperator`] is a node that can transform both the forward and backward paths using the logic defined
-/// by the implementation of an [`Operator`] trait.
+/// [`PipelineOperator`] 是一个节点，它可以使用 [`Operator`] trait 的逻辑同时变换
+/// 前向和后向两条路径。
 pub struct PipelineOperator<
     UpIn: PipelineIO,
     UpOut: PipelineIO,
     DownIn: PipelineIO,
     DownOut: PipelineIO,
 > {
-    // core business logic of this object
+    // 这个对象的核心业务逻辑
     operator: Arc<dyn Operator<UpIn, UpOut, DownIn, DownOut>>,
 
-    // this hold the downstream connections via the generic frontend
-    // frontends provide both a source and a sink interfaces
+    // 通过通用 frontend 持有下游连接
+    // frontend 同时提供 source 和 sink 两种接口
     downstream: Arc<sources::Frontend<DownIn, DownOut>>,
 
-    // this hold the connection to the previous/upstream response sink
-    // we are a source to that upstream's response sink
+    // 持有到前一个/上游响应 sink 的连接
+    // 我们是上游响应 sink 的一个 source
     upstream: sinks::SinkEdge<UpOut>,
 }
 
@@ -199,7 +199,7 @@ where
     DownIn: PipelineIO,
     DownOut: PipelineIO,
 {
-    /// Create a new [`PipelineOperator`] with the given [`Operator`] implementation.
+    /// 使用给定的 [`Operator`] 实现创建一个新的 [`PipelineOperator`]。
     pub fn new(operator: Arc<dyn Operator<UpIn, UpOut, DownIn, DownOut>>) -> Arc<Self> {
         Arc::new(PipelineOperator {
             operator,
@@ -208,7 +208,7 @@ where
         })
     }
 
-    /// Access the forward edge of the [`PipelineOperator`] allowing the forward/requests paths to be linked.
+    /// 访问 [`PipelineOperator`] 的前向边，用于连接请求路径。
     pub fn forward_edge(
         self: &Arc<Self>,
     ) -> Arc<PipelineOperatorForwardEdge<UpIn, UpOut, DownIn, DownOut>> {
@@ -217,7 +217,7 @@ where
         })
     }
 
-    /// Access the backward edge of the [`PipelineOperator`] allowing the backward/responses paths to be linked.
+    /// 访问 [`PipelineOperator`] 的后向边，用于连接响应路径。
     pub fn backward_edge(
         self: &Arc<Self>,
     ) -> Arc<PipelineOperatorBackwardEdge<UpIn, UpOut, DownIn, DownOut>> {
@@ -229,7 +229,8 @@ where
 
 // === SECTION: PipelineOperator 的 AsyncEngine / Sink / Source 实现 ===
 
-/// A [`PipelineOperator`] is an [`AsyncEngine`] for the upstream [`AsyncEngine<UpIn, UpOut, Error>`].
+/// [`PipelineOperator`] 作为一个面向上游的 [`AsyncEngine`] 使用，
+/// 对应 [`AsyncEngine<UpIn, UpOut, Error>`]。
 #[async_trait]
 impl<UpIn, UpOut, DownIn, DownOut> AsyncEngine<UpIn, UpOut, Error>
     for PipelineOperator<UpIn, UpOut, DownIn, DownOut>

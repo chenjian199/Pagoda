@@ -45,9 +45,9 @@ static TIMELINE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // === SECTION: 公开 API ===───────────────────
 
-/// Initialise the NVTX subsystem from the `PGD_ENABLE_RUST_TIMELINE` environment variable.
-/// Must be called once at runtime startup before any annotation macros fire.
-/// No-op when the `timeline` Cargo feature is off.
+/// 从 `PGD_ENABLE_RUST_TIMELINE` 环境变量初始化 NVTX 子系统。
+/// 必须在运行时启动阶段、任何标注宏触发之前调用一次。
+/// 当 `timeline` Cargo feature 关闭时，该函数无操作。
 pub fn init() {
     #[cfg(feature = "timeline")]
     {
@@ -61,7 +61,7 @@ pub fn init() {
     }
 }
 
-/// Returns `true` when the `timeline` feature is compiled in **and** `PGD_ENABLE_RUST_TIMELINE` is set.
+/// 当编译启用了 `timeline` feature 且设置了 `PGD_ENABLE_RUST_TIMELINE` 时返回 `true`。
 #[inline(always)]
 pub fn enabled() -> bool {
     #[cfg(feature = "timeline")]
@@ -72,8 +72,8 @@ pub fn enabled() -> bool {
     false
 }
 
-/// Push an NVTX range onto the calling thread's stack.
-/// No-op (compiled out) when the `timeline` feature is off.
+/// 将一个 NVTX range 压入当前线程的栈。
+/// 当 `timeline` feature 关闭时，该函数为无操作（会被编译掉）。
 #[inline(always)]
 pub fn push_impl(name: &str) {
     #[cfg(feature = "timeline")]
@@ -85,8 +85,8 @@ pub fn push_impl(name: &str) {
     let _ = name;
 }
 
-/// Pop the innermost NVTX range from the calling thread's stack.
-/// No-op (compiled out) when the `timeline` feature is off.
+/// 从当前线程的栈中弹出最内层的 NVTX range。
+/// 当 `timeline` feature 关闭时，该函数为无操作（会被编译掉）。
 #[inline(always)]
 pub fn pop_impl() {
     #[cfg(feature = "timeline")]
@@ -97,8 +97,8 @@ pub fn pop_impl() {
     }
 }
 
-/// Name the current OS thread in the Nsight Systems timeline.
-/// No-op (compiled out) when the `timeline` feature is off.
+/// 在 Nsight Systems 的 timeline 中为当前 OS 线程命名。
+/// 当 `timeline` feature 关闭时，该函数为无操作（会被编译掉）。
 #[inline(always)]
 pub fn name_current_thread_impl(name: &str) {
     #[cfg(feature = "timeline")]
@@ -116,14 +116,14 @@ pub fn name_current_thread_impl(name: &str) {
 
 // === SECTION: RAII guard ===──────────────────
 
-/// RAII guard that pops an NVTX range when dropped.
-/// Construct with [`pagoda_timeline_range!`].
+/// 在被 drop 时弹出一个 NVTX range 的 RAII 守卫。
+/// 使用 [`pagoda_timeline_range!`] 构造。
 #[cfg(feature = "timeline")]
 pub struct TimelineRangeGuard {
     active: bool,
 }
 
-/// Zero-sized no-op guard used when the `timeline` feature is off.
+/// 当 `timeline` feature 关闭时使用的零大小无操作守卫。
 #[cfg(not(feature = "timeline"))]
 pub struct TimelineRangeGuard;
 
@@ -162,8 +162,8 @@ impl Drop for TimelineRangeGuard {
 
 // === SECTION: 宏定义 ===───────────────────
 
-/// Push a named NVTX range onto the calling thread's stack.
-/// Zero-cost when the `timeline` Cargo feature is off.
+/// 将一个命名的 NVTX range 压入当前线程的栈。
+/// 当 `timeline` Cargo feature 关闭时，零开销。
 #[macro_export]
 macro_rules! pagoda_timeline_push {
     ($name:expr) => {
@@ -171,8 +171,8 @@ macro_rules! pagoda_timeline_push {
     };
 }
 
-/// Pop the innermost NVTX range from the calling thread's stack.
-/// Zero-cost when the `timeline` Cargo feature is off.
+/// 从当前线程的栈中弹出最内层的 NVTX range。
+/// 当 `timeline` Cargo feature 关闭时，零开销。
 #[macro_export]
 macro_rules! pagoda_timeline_pop {
     () => {
@@ -180,13 +180,13 @@ macro_rules! pagoda_timeline_pop {
     };
 }
 
-/// Open a named NVTX range that closes automatically at end of scope.
+/// 打开一个命名 NVTX range，并在作用域结束时自动关闭。
 ///
 /// ```rust,ignore
 /// let _r = pagoda_timeline_range!("preprocess.tokenize");
-/// // range closes here
+/// // range 在此关闭
 /// ```
-/// Zero-cost when the `timeline` Cargo feature is off.
+/// 当 `timeline` Cargo feature 关闭时，零开销。
 #[macro_export]
 macro_rules! pagoda_timeline_range {
     ($name:expr) => {
@@ -194,8 +194,8 @@ macro_rules! pagoda_timeline_range {
     };
 }
 
-/// Annotate the current OS thread in the Nsight Systems timeline.
-/// Zero-cost when the `timeline` Cargo feature is off.
+/// 在 Nsight Systems 的 timeline 中标注当前 OS 线程。
+/// 当 `timeline` Cargo feature 关闭时，零开销。
 #[macro_export]
 macro_rules! pagoda_timeline_name_thread {
     ($name:expr) => {

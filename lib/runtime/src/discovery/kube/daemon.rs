@@ -5,8 +5,7 @@
 //!
 //! ## 设计意图
 //!
-//! 旧版 daemon 把单个 Pod 的全部 portname / model / event channel 信息塞在
-//! 一个 `PagodaWorkerMetadata` CR 里聚合；新版改为**四路独立 reflector**：
+//! daemon 采用**四路独立 reflector** 分别监听四类原生对象：
 //!
 //! | reflector       | 监听对象                                | 用途                  |
 //! |-----------------|----------------------------------------|----------------------|
@@ -16,12 +15,11 @@
 //! | `lease_store`   | `Lease` (kind=event-channel)            | EventChannel 元数据   |
 //!
 //! 聚合阶段会按 `instance_id` 把跨对象的信息合并到一份
-//! `Arc<DiscoveryMetadata>`，从而保持 `MetadataSnapshot` 的字段结构与上层契约
-//! **完全不变**，只是底层数据来源由 CR 切换到了原生对象。
+//! `Arc<DiscoveryMetadata>`，从而保持 `MetadataSnapshot` 的字段结构与上层契约稳定。
 //!
 //! ## 外部契约
 //!
-//! - `pub(super) DiscoveryDaemon`：仅 `kube` 内部使用；签名与历史版本一致：
+//! - `pub(super) DiscoveryDaemon`：仅 `kube` 内部使用；稳定签名：
 //!   - `DiscoveryDaemon::new(client, namespace, cancel_token)`
 //!   - `DiscoveryDaemon::run(snapshot_tx)`
 //! - 输出 `tokio::sync::watch::Sender<Arc<MetadataSnapshot>>`：language-agnostic
@@ -227,11 +225,11 @@ where
 /// 3. 用 [`endpoint_instance_from_service_and_slice`] 复原每个 PortName 实例；
 /// 4. 用 [`model_instance_from_config_map`] / [`event_instance_from_lease`]
 ///    把每个 ConfigMap / Lease 复原为对应的 DiscoveryInstance；
-/// 5. 用 `pod_name → hash_pod_name → instance_id` 将所有实例分组到
-///    `HashMap<instance_id, DiscoveryMetadata>`；
+/// 5. 先按 `pod_name → hash_pod_name → instance_id` 分组，再汇总成
+///    以 `instance_id` 为键的 `DiscoveryMetadata` 映射；
 /// 6. 仅保留出现在 ready 列表中的 instance_id（“就绪门控”）。
 ///
-/// generation 由聚合后的 metadata JSON 哈希得出，跨任何对象变化都能反映。
+/// generation 由聚合后的 metadata JSON 哈希得出，因此任何对象变化都会反映到它上面。
 fn aggregate(
     eps_store: &reflector::Store<EndpointSlice>,
     svc_store: &reflector::Store<Service>,

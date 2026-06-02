@@ -1095,9 +1095,6 @@ mod tests {
         #[case] expected_num_tests: usize,
     ) {
         use std::sync::Arc;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
-
         // 这里需要显式调用闭包以适配 `async_with_vars`。
 
         crate::logging::init();
@@ -1299,8 +1296,8 @@ mod tests {
                 // 创建 ingress 并启动端点服务。
                 let ingress = Ingress::for_engine(std::sync::Arc::new(TestHandler)).unwrap();
 
-                // Start the service and portname with a health check payload
-                // This will automatically register the portname for health monitoring
+                // 使用健康检查负载启动服务并注册端点名称。
+                // 这样会自动把端点名称登记到健康监控中。
                 tokio::spawn(async move {
                     let _ = servicegroup.portname(ENDPOINT_NAME)
                         .portname_builder()
@@ -1312,7 +1309,7 @@ mod tests {
                         .await;
                 });
 
-                // Hit health portname 200 times to verify consistency
+                // 连续请求健康端点 200 次以验证一致性。
                 let mut success_count = 0;
                 let mut failures = Vec::new();
 
@@ -1325,7 +1322,7 @@ mod tests {
                         success_count += 1;
                     } else {
                         failures.push((i, status.as_u16(), body.clone()));
-                        if failures.len() <= 5 {  // Only log first 5 failures
+                        if failures.len() <= 5 {  // 只记录前 5 次失败。
                             tracing::warn!("Request {}: status={}, body={}", i, status, body);
                         }
                     }
@@ -1336,7 +1333,7 @@ mod tests {
                     tracing::warn!("Failed requests: {}", failures.len());
                 }
 
-                // Expect at least 150 out of 200 requests to be successful
+                // 期望 200 次请求里至少有 150 次成功。
                 assert!(success_count >= 150, "Expected at least 150 out of 200 requests to succeed, but only {} succeeded", success_count);
             },
         )
@@ -1387,7 +1384,7 @@ mod tests {
                         body
                     );
                 }
-                // DRT handles server cleanup automatically
+                // DRT 会自动处理服务端清理。
             },
         )
         .await;

@@ -17,17 +17,16 @@
 //! ## 实现要点
 //! - 本文件只承载"管理"职责，不做协议序列化；序列化在 `codec.rs` / `egress::*` / `ingress::*` 中。
 
-//! Network Manager - Single Source of Truth for Network Configuration
+//! 网络管理器 - 网络配置与创建逻辑的唯一来源
 //!
-//! This module consolidates ALL network-related configuration and creation logic.
-//! It is the ONLY place in the codebase that:
-//! - Reads environment variables for network configuration
-//! - Knows about transport-specific types (SharedHttpServer, TcpRequestClient, etc.)
-//! - Performs mode selection based on RequestPlaneMode
-//! - Creates servers and clients
+//! 这个模块汇总了所有与网络相关的配置和创建逻辑。
+//! 它是代码库里唯一负责以下事情的地方：
+//! - 读取网络配置所需的环境变量；
+//! - 了解各类传输专用类型（SharedHttpServer、TcpRequestClient 等）；
+//! - 根据 RequestPlaneMode 选择工作模式；
+//! - 创建服务端和客户端。
 //!
-//! The rest of the codebase works exclusively with trait objects and never
-//! directly accesses transport implementations or configuration.
+//! 代码库其余部分只与 trait object 交互，不直接访问任何传输实现或配置。
 
 use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::shared_tcp_endpoint::SharedTcpServer;
@@ -39,48 +38,48 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
 
-// === SECTION: Process-wide globals (ports, shared servers, cancellation) ===
-/// Global storage for the actual TCP RPC port after binding.
-/// Uses OnceLock since the port is set once when the server binds and never changes.
+// === SECTION: 进程范围全局状态（端口、共享服务端、取消令牌）===
+/// 绑定后实际 TCP RPC 端口的全局存储。
+/// 使用 OnceLock，因为服务端绑定后端口只会设置一次，之后不会再变。
 static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 
-/// Global storage for the actual HTTP RPC port after binding.
-/// Uses OnceLock since the port is set once when the server binds and never changes.
+/// 绑定后实际 HTTP RPC 端口的全局存储。
+/// 使用 OnceLock，因为服务端绑定后端口只会设置一次，之后不会再变。
 static ACTUAL_HTTP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 
-/// Global storage for the shared TCP server instance.
+/// 共享 TCP 服务端实例的全局存储。
 ///
-/// When multiple workers run in the same process, they must share a single TCP server
-/// to ensure all portnames are registered on the same server. Without this, each worker
-/// would create its own server on a different port, but all would publish the same port
-/// (from ACTUAL_TCP_RPC_PORT) to discovery, causing "No handler found" errors.
+/// 当多个 worker 运行在同一进程中时，它们必须共享同一个 TCP 服务端，
+/// 才能确保所有 portname 都注册到同一台服务端上。否则每个 worker 都会
+/// 在不同端口上创建自己的服务端，但 discovery 里发布的却仍然是同一个端口
+/// （来自 ACTUAL_TCP_RPC_PORT），最终会导致 "No handler found" 错误。
 ///
-/// Uses `tokio::sync::OnceCell` to support async initialization (binding the TCP socket).
+/// 使用 `tokio::sync::OnceCell` 以支持异步初始化（绑定 TCP socket）。
 static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
     tokio::sync::OnceCell::const_new();
 
-/// Global storage for the shared HTTP server instance.
+/// 共享 HTTP 服务端实例的全局存储。
 ///
-/// Same rationale as GLOBAL_TCP_SERVER: multiple workers in the same process must share
-/// a single HTTP server so that all portnames are registered on the same port.
+/// 原因与 GLOBAL_TCP_SERVER 相同：同一进程中的多个 worker 必须共享同一个 HTTP 服务端，
+/// 才能让所有 portname 注册到同一个端口上。
 static GLOBAL_HTTP_SERVER: tokio::sync::OnceCell<
     Arc<super::ingress::http_endpoint::SharedHttpServer>,
 > = tokio::sync::OnceCell::const_new();
 
-/// Process-wide cancellation token for the global TCP server.
+/// 全局 TCP 服务端使用的进程范围取消令牌。
 ///
-/// This token is independent of any individual runtime's cancellation token so that
-/// servicegroup Drop impls (e.g. KvRouter::drop → cancel) don't kill the shared accept
-/// loop while the OnceCell still hands out the (now-dead) server to later runtimes.
+/// 这个令牌独立于任何单个 runtime 的取消令牌，这样 servicegroup 的 Drop 实现
+/// （例如 KvRouter::drop → cancel）就不会在 OnceCell 仍向后续 runtime 返回
+/// （已经失效的）服务端时，把共享的 accept 循环提前杀掉。
 static GLOBAL_TCP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
     std::sync::LazyLock::new(CancellationToken::new);
 
-/// Process-wide cancellation token for the global HTTP server.
+/// 全局 HTTP 服务端使用的进程范围取消令牌。
 static GLOBAL_HTTP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
     std::sync::LazyLock::new(CancellationToken::new);
 
-// === SECTION: Public RPC port accessors ===
-/// Get the actual TCP RPC port that the server is listening on.
+// === SECTION: 公开 RPC 端口访问器 ===
+/// 获取服务端当前监听的真实 TCP RPC 端口。
 pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
     ACTUAL_TCP_RPC_PORT.get().copied().ok_or_else(|| {
         tracing::error!(
@@ -92,7 +91,7 @@ pub fn get_actual_tcp_rpc_port() -> anyhow::Result<u16> {
     })
 }
 
-/// Set the actual TCP RPC port (called internally after server binds).
+/// 设置真实 TCP RPC 端口（在服务端绑定后内部调用）。
 fn set_actual_tcp_rpc_port(port: u16) {
     if let Err(existing) = ACTUAL_TCP_RPC_PORT.set(port) {
         tracing::warn!(
@@ -103,7 +102,7 @@ fn set_actual_tcp_rpc_port(port: u16) {
     }
 }
 
-/// Get the actual HTTP RPC port that the server is listening on.
+/// 获取服务端当前监听的真实 HTTP RPC 端口。
 pub fn get_actual_http_rpc_port() -> anyhow::Result<u16> {
     ACTUAL_HTTP_RPC_PORT.get().copied().ok_or_else(|| {
         tracing::error!(
@@ -115,7 +114,7 @@ pub fn get_actual_http_rpc_port() -> anyhow::Result<u16> {
     })
 }
 
-/// Set the actual HTTP RPC port (called internally after server binds).
+/// 设置真实 HTTP RPC 端口（在服务端绑定后内部调用）。
 fn set_actual_http_rpc_port(port: u16) {
     if let Err(existing) = ACTUAL_HTTP_RPC_PORT.set(port) {
         tracing::warn!(
@@ -126,39 +125,39 @@ fn set_actual_http_rpc_port(port: u16) {
     }
 }
 
-// === SECTION: NetworkConfig (env-loaded) ===
-/// Network configuration loaded from environment variables
+// === SECTION: 网络配置（从环境变量加载）===
+/// 从环境变量加载的网络配置。
 #[derive(Clone)]
 struct NetworkConfig {
-    // HTTP server configuration
+    // HTTP 服务端配置
     http_host: String,
-    /// HTTP port to bind to. If None, the OS will assign a free port.
+    /// 要绑定的 HTTP 端口。如果为 None，则由操作系统分配空闲端口。
     http_port: Option<u16>,
     http_rpc_root: String,
 
-    // TCP server configuration
+    // TCP 服务端配置
     tcp_host: String,
-    /// TCP port to bind to. If None, the OS will assign a free port.
+    /// 要绑定的 TCP 端口。如果为 None，则由操作系统分配空闲端口。
     tcp_port: Option<u16>,
 
-    // HTTP client configuration
+    // HTTP 客户端配置
     http_client_config: super::egress::http_router::Http2Config,
 
-    // TCP client configuration
+    // TCP 客户端配置
     tcp_client_config: super::egress::tcp_client::TcpRequestConfig,
 
-    // NATS configuration (provided externally, not from env)
+    // NATS 配置（由外部提供，不从环境变量读取）
     nats_client: Option<async_nats::Client>,
 }
 
 impl NetworkConfig {
-    /// Load configuration from environment variables
+    /// 从环境变量加载配置。
     ///
-    /// This is the ONLY place where network-related environment variables are read.
+    /// 这里是唯一读取网络相关环境变量的地方。
     fn from_env(nats_client: Option<async_nats::Client>) -> Self {
         Self {
-            // HTTP server configuration
-            // If PGD_HTTP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
+            // HTTP 服务端配置
+            // 如果设置了 PGD_HTTP_RPC_PORT，就使用该端口；否则 None 表示由操作系统分配空闲端口。
             http_host: std::env::var("PGD_HTTP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
             http_port: std::env::var("PGD_HTTP_RPC_PORT")
@@ -167,57 +166,57 @@ impl NetworkConfig {
             http_rpc_root: std::env::var("PGD_HTTP_RPC_ROOT_PATH")
                 .unwrap_or_else(|_| "/v1/rpc".to_string()),
 
-            // TCP server configuration
-            // If PGD_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
+            // TCP 服务端配置
+            // 如果设置了 PGD_TCP_RPC_PORT，就使用该端口；否则 None 表示由操作系统分配空闲端口。
             tcp_host: std::env::var("PGD_TCP_RPC_HOST")
                 .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
             tcp_port: std::env::var("PGD_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),
 
-            // HTTP client configuration (reads PGD_HTTP2_* env vars)
+            // HTTP 客户端配置（读取 PGD_HTTP2_* 环境变量）
             http_client_config: super::egress::http_router::Http2Config::from_env(),
 
-            // TCP client configuration (reads PGD_TCP_* env vars)
+            // TCP 客户端配置（读取 PGD_TCP_* 环境变量）
             tcp_client_config: super::egress::tcp_client::TcpRequestConfig::from_env(),
 
-            // NATS (external)
+            // NATS（外部传入）
             nats_client,
         }
     }
 }
 
-/// Network Manager - Central coordinator for all network resources
+/// 网络管理器 - 所有网络资源的中心协调器
 ///
-/// # Responsibilities
+/// # 职责
 ///
-/// 1. **Configuration Management**: Reads and manages all network-related environment variables
-/// 2. **Server Creation**: Creates and starts request plane servers based on mode
-/// 3. **Client Creation**: Creates request plane clients on demand
-/// 4. **Abstraction**: Hides all transport-specific details from the rest of the codebase
+/// 1. **配置管理**：读取并管理所有网络相关环境变量
+/// 2. **服务端创建**：根据模式创建并启动 request plane 服务端
+/// 3. **客户端创建**：按需创建 request plane 客户端
+/// 4. **抽象隔离**：对代码库其余部分隐藏所有传输专用细节
 ///
-/// # Design Principles
+/// # 设计原则
 ///
-/// - **Single Source of Truth**: All network config and creation logic lives here
-/// - **Lazy Initialization**: Servers are created only when first accessed
-/// - **Transport Agnostic Interface**: Exposes only trait objects to callers
-/// - **No Leaky Abstractions**: Transport types never escape this module
+/// - **唯一事实来源**：所有网络配置和创建逻辑都放在这里
+/// - **懒加载初始化**：服务端只在首次访问时创建
+/// - **与传输无关的接口**：只向调用方暴露 trait object
+/// - **不泄漏抽象**：传输类型不会逃出这个模块
 ///
-/// # Example
+/// # 示例
 ///
 /// ```ignore
-/// // Create manager (typically done once in DistributedRuntime)
+/// // 创建管理器（通常只在 DistributedRuntime 中做一次）
 /// let manager = NetworkManager::new(cancel_token, nats_client, servicegroup_registry, request_plane_mode);
 ///
-/// // Get server (lazy init, cached)
+/// // 获取服务端（懒加载并缓存）
 /// let server = manager.server().await?;
 /// server.register_portname(...).await?;
 ///
-/// // Create client (not cached, lightweight)
+/// // 创建客户端（不缓存，开销较轻）
 /// let client = manager.create_client()?;
 /// client.send_request(...).await?;
 /// ```
-// === SECTION: NetworkManager (public coordinator) ===
+// === SECTION: 网络管理器（公开协调器）===
 pub struct NetworkManager {
     mode: RequestPlaneMode,
     config: NetworkConfig,
@@ -227,20 +226,19 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
-    /// Create a new network manager
+    /// 创建一个新的网络管理器。
     ///
-    /// This is the single constructor for NetworkManager. All configuration
-    /// is loaded from environment variables internally.
+    /// 这是 NetworkManager 的唯一构造入口。所有配置都在内部从环境变量加载。
     ///
-    /// # Arguments
+    /// # 参数
     ///
-    /// * `cancellation_token` - Token for graceful shutdown of servers
-    /// * `nats_client` - Optional NATS client (required only for NATS mode)
-    /// * `servicegroup_registry` - ServiceGroup registry to get NATS service groups from
+    /// * `cancellation_token` - 用于服务端优雅关闭的令牌
+    /// * `nats_client` - 可选的 NATS 客户端（仅在 NATS 模式下需要）
+    /// * `servicegroup_registry` - 用来获取 NATS servicegroup 的 ServiceGroup 注册表
     ///
-    /// # Returns
+    /// # 返回值
     ///
-    /// Returns an Arc-wrapped NetworkManager ready to create servers and clients.
+    /// 返回一个可用于创建服务端和客户端的 Arc 包裹 NetworkManager。
     pub fn new(
         cancellation_token: CancellationToken,
         nats_client: Option<async_nats::Client>,
@@ -292,21 +290,21 @@ impl NetworkManager {
         }
     }
 
-    /// Get or create the request plane server
+    /// 获取或创建 request plane 服务端。
     ///
-    /// The server is created lazily on first access and cached for subsequent calls.
-    /// The server is automatically started in the background.
+    /// 服务端会在首次访问时懒加载创建，并缓存供后续调用使用。
+    /// 服务端会自动在后台启动。
     ///
-    /// # Returns
+    /// # 返回值
     ///
-    /// Returns a trait object that abstracts over HTTP/TCP/NATS implementations.
+    /// 返回一个抽象 HTTP/TCP/NATS 实现的 trait object。
     ///
-    /// # Errors
+    /// # 错误
     ///
-    /// Returns an error if:
-    /// - Server creation fails (e.g., port already in use)
-    /// - NATS mode is selected but NATS client is not available
-    /// - Configuration is invalid (e.g., malformed bind address)
+    /// 可能返回错误的情况：
+    /// - 服务端创建失败（例如端口已被占用）
+    /// - 选择了 NATS 模式但没有可用的 NATS 客户端
+    /// - 配置无效（例如绑定地址格式错误）
     pub async fn server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         let server = self
             .server
@@ -316,19 +314,19 @@ impl NetworkManager {
         Ok(server.clone())
     }
 
-    /// Create a new request plane client
+    /// 创建一个新的 request plane 客户端。
     ///
-    /// Clients are lightweight and not cached. Each call creates a new client instance.
+    /// 客户端开销较轻且不会缓存，每次调用都会创建一个新的客户端实例。
     ///
-    /// # Returns
+    /// # 返回值
     ///
-    /// Returns a trait object that abstracts over HTTP/TCP/NATS implementations.
+    /// 返回一个抽象 HTTP/TCP/NATS 实现的 trait object。
     ///
-    /// # Errors
+    /// # 错误
     ///
-    /// Returns an error if:
-    /// - Client creation fails (e.g., invalid configuration)
-    /// - NATS mode is selected but NATS client is not available
+    /// 可能返回错误的情况：
+    /// - 客户端创建失败（例如配置无效）
+    /// - 选择了 NATS 模式但没有可用的 NATS 客户端
     pub fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         match self.mode {
             RequestPlaneMode::Http => self.create_http_client(),
@@ -337,10 +335,10 @@ impl NetworkManager {
         }
     }
 
-    /// Get the current request plane mode
+    /// 获取当前 request plane 模式。
     ///
-    /// This is provided primarily for logging and debugging purposes.
-    /// Application logic should not branch on mode - use trait objects instead.
+    /// 这个接口主要用于日志和调试。
+    /// 业务逻辑不应基于模式分支处理，而应使用 trait object。
     pub fn mode(&self) -> RequestPlaneMode {
         self.mode
     }
@@ -360,11 +358,11 @@ impl NetworkManager {
     async fn create_http_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         use super::ingress::http_endpoint::SharedHttpServer;
 
-        // Use the global HTTP server to ensure all workers in the same process share
-        // a single server. This is critical for correct portname routing.
+        // 使用全局 HTTP 服务端，确保同一进程中的所有 worker 共享同一个服务端。
+        // 这对正确的 portname 路由至关重要。
         let server = GLOBAL_HTTP_SERVER
             .get_or_try_init(|| async {
-                // Use configured port if specified, otherwise use port 0 (OS assigns free port)
+                // 如果指定了配置端口就使用它，否则使用 0（由操作系统分配空闲端口）。
                 let port = self.config.http_port.unwrap_or(0);
                 let bind_addr = format!("{}:{}", self.config.http_host, port)
                     .parse()
@@ -379,10 +377,10 @@ impl NetworkManager {
 
                 let server = SharedHttpServer::new(bind_addr, GLOBAL_HTTP_SERVER_TOKEN.clone());
 
-                // Bind and start server, getting the actual bound address
+                // 绑定并启动服务端，获取真实绑定地址。
                 let actual_addr = server.clone().bind_and_start().await?;
 
-                // Store the actual bound port globally so build_transport_type() can access it
+                // 将真实绑定端口存到全局，方便 build_transport_type() 读取。
                 set_actual_http_rpc_port(actual_addr.port());
 
                 tracing::info!(
@@ -399,11 +397,11 @@ impl NetworkManager {
     }
 
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
-        // Use the global TCP server to ensure all workers in the same process share
-        // a single server. This is critical for correct portname routing.
+        // 使用全局 TCP 服务端，确保同一进程中的所有 worker 共享同一个服务端。
+        // 这对正确的 portname 路由至关重要。
         let server = GLOBAL_TCP_SERVER
             .get_or_try_init(|| async {
-                // Use configured port if specified, otherwise use port 0 (OS assigns free port)
+                // 如果指定了配置端口就使用它，否则使用 0（由操作系统分配空闲端口）。
                 let port = self.config.tcp_port.unwrap_or(0);
                 let bind_addr = format!("{}:{}", self.config.tcp_host, port)
                     .parse()
@@ -417,10 +415,10 @@ impl NetworkManager {
 
                 let server = SharedTcpServer::new(bind_addr, GLOBAL_TCP_SERVER_TOKEN.clone());
 
-                // Bind and start server, getting the actual bound address
+                // 绑定并启动服务端，获取真实绑定地址。
                 let actual_addr = server.clone().bind_and_start().await?;
 
-                // Store the actual bound port globally so build_transport_type() can access it
+                // 将真实绑定端口存到全局，方便 build_transport_type() 读取。
                 set_actual_tcp_rpc_port(actual_addr.port());
 
                 tracing::info!(

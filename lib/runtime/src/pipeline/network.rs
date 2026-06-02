@@ -9,29 +9,29 @@
 //!
 //! ## 外部契约
 //! - `pub mod {codec, egress, ingress, manager, tcp}` 必须保留；
-//! - 顶层 `pub use` 列表与 lib-copy 完全一致；**不可** 额外 re-export
+//! - 顶层 `pub use` 列表为稳定契约；**不可** 额外 re-export
 //!   `codec::{TwoPartCodec, TwoPartMessage, TwoPartMessageType}` —— 这些类型应继续
 //!   通过 `codec::` 路径访问；
-//! - 所有公开结构体/枚举、字段与变体一比一对齐 lib-copy。
+//! - 所有公开结构体/枚举、字段与变体作为稳定对外契约。
 //!
 //! ## 实现要点
 //! - 文件本身不写业务逻辑，仅承担"模块根 + 公共数据类型 + re-export"职责。
 
-//! Network layer for distributed communication
+//! 分布式通信的网络层。
 //!
-//! Provides request distribution across multiple transport protocols:
-//! - HTTP/2 for standard deployments
-//! - TCP with length-prefixed protocol for high-performance scenarios
-//! - NATS for legacy/messaging-based deployments
+//! 它提供跨多种传输协议的请求分发：
+//! - HTTP/2，适用于标准部署；
+//! - 带长度前缀协议的 TCP，适用于高性能场景；
+//! - NATS，适用于遗留或消息驱动部署。
 
-// === SECTION: Submodule re-exports ===
+// === SECTION: 子模块 re-export ===
 pub mod codec;
 pub mod egress;
 pub mod ingress;
 pub mod manager;
 pub mod tcp;
 
-// === SECTION: Imports and TCP size config ===
+// === SECTION: 导入与 TCP 大小配置 ===
 use crate::SystemHealth;
 use std::sync::{Arc, OnceLock};
 
@@ -53,13 +53,12 @@ use crate::metrics::MetricsHierarchy;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
-/// Shared default maximum TCP message size across request-plane servicegroups.
+/// request-plane servicegroup 共享的默认 TCP 最大消息大小。
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// Read the configured TCP max message size once and share it across client,
-/// server, and zero-copy decoder code paths.
+/// 只读取一次配置好的 TCP 最大消息大小，并在客户端、服务端和零拷贝解码路径之间共享。
 pub(crate) fn get_tcp_max_message_size() -> usize {
     *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
         std::env::var("PGD_TCP_MAX_MESSAGE_SIZE")
@@ -69,11 +68,11 @@ pub(crate) fn get_tcp_max_message_size() -> usize {
     })
 }
 
-// === SECTION: Public traits / protocol enums ===
+// === SECTION: 公共 trait / 协议枚举 ===
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
 
-/// `WorkQueueConsumer` is a generic interface for a work queue that can be used to send and receive
+/// `WorkQueueConsumer` 是一个通用的工作队列接口，可用于发送和接收数据。
 #[async_trait]
 pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
@@ -94,12 +93,11 @@ pub enum ControlMessage {
     Sentinel,
 }
 
-/// This is the first message in a `ResponseStream`. This is not a message that gets process
-/// by the general pipeline, but is a control message that is awaited before the
-/// [`AsyncEngine::generate`] method is allowed to return.
+/// 这是 `ResponseStream` 中的第一条消息。
+/// 它不会被通用 pipeline 处理，而是一个控制消息，`AsyncEngine::generate`
+/// 只有在等到它之后才允许返回。
 ///
-/// If an error is present, the [`AsyncEngine::generate`] method will return the error instead
-/// of returning the `ResponseStream`.
+/// 如果其中包含错误，`AsyncEngine::generate` 会直接返回该错误，而不是返回 `ResponseStream`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseStreamPrologue {
     error: Option<String>,
@@ -107,9 +105,9 @@ pub struct ResponseStreamPrologue {
 
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 
-// === SECTION: RegisteredStream + PendingConnections + ResponseService ===
-/// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
-/// move the public fields out by plain destructure.
+// === SECTION: RegisteredStream + PendingConnections + 响应服务 ===
+/// 把 `Drop` 的拥有权放在这里，而不是放在 `RegisteredStream` 上，
+/// 这样 `into_parts()` 就能通过普通解构把公开字段移出。
 struct Cleanup(Option<Box<dyn FnOnce() + Send + 'static>>);
 
 impl Drop for Cleanup {
@@ -120,9 +118,8 @@ impl Drop for Cleanup {
     }
 }
 
-/// Awaitable handle for a stream sender or receiver. Drop without calling
-/// [`into_parts()`] runs the optional cleanup closure, removing the
-/// registration from the stream server's maps.
+/// 可等待的流发送端或接收端句柄。若在不调用 [`into_parts()`] 的情况下 drop，
+/// 会执行可选的清理闭包，把注册项从流服务端的映射中移除。
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
@@ -154,8 +151,7 @@ impl<T> RegisteredStream<T> {
         self
     }
 
-    /// Consume the registration, disarming the RAII cleanup. Caller takes
-    /// responsibility for cleanup if the stream provider is never awaited.
+    /// 消费这次注册并解除 RAII 清理。若调用方从未等待流提供者，就需要自行负责清理。
     pub fn into_parts(self) -> (ConnectionInfo, StreamProvider<T>) {
         let Self {
             connection_info,
@@ -167,8 +163,8 @@ impl<T> RegisteredStream<T> {
     }
 }
 
-/// After registering a stream, the [`PendingConnections`] object is returned to the caller. This
-/// object can be used to await the connection to be established.
+/// 注册流之后，会把 [`PendingConnections`] 对象返回给调用方。
+/// 这个对象可用于等待连接建立。
 pub struct PendingConnections {
     pub send_stream: Option<RegisteredStream<StreamSender>>,
     pub recv_stream: Option<RegisteredStream<StreamReceiver>>,
@@ -185,39 +181,13 @@ impl PendingConnections {
     }
 }
 
-/// A [`ResponseService`] implements a services in which a context a specific subject with will
-/// be associated with a stream of responses.
+/// `ResponseService` 实现的是一种服务：在特定上下文和主题下关联一条响应流。
 #[async_trait::async_trait]
 pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// struct Handshake {
-//     request_id: String,
-//     worker_id: Option<String>,
-//     error: Option<String>,
-// }
-
-// impl Handshake {
-//     pub fn validate(&self) -> Result<(), String> {
-//         if let Some(e) = &self.error {
-//             return Err(e.clone());
-//         }
-//         Ok(())
-//     }
-// }
-
-// this probably needs to be come a ResponseStreamSender
-// since the prologue in this scenario sender telling the receiver
-// that all is good and it's ready to send
-//
-// in the RequestStreamSender, the prologue would be coming from the
-// receiver, so the sender would have to await the prologue which if
-// was not an error, would indicate the RequestStreamReceiver is read
-// to receive data.
-
-// === SECTION: StreamSender / StreamReceiver / ConnectionInfo / StreamOptions ===
+// === SECTION: 流发送端 / 流接收端 / 连接信息 / 流选项 ===
 pub struct StreamSender {
     tx: tokio::sync::mpsc::Sender<TwoPartMessage>,
     prologue: Option<ResponseStreamPrologue>,
@@ -238,11 +208,7 @@ impl StreamSender {
 
     #[allow(clippy::needless_update)]
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
-        // leaving the original logic in place for now
-        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
-        // so the second argument can never be used, and the value of error passed by the caller would always be used
         if let Some(_prologue) = self.prologue.take() {
-            // let prologue = ResponseStreamPrologue { error, ..prologue };
             let prologue = ResponseStreamPrologue { error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
@@ -266,47 +232,44 @@ pub struct StreamReceiver {
     rx: tokio::sync::mpsc::Receiver<Bytes>,
 }
 
-/// Connection Info is encoded as JSON and then again serialized has part of the Transport
-/// Layer. The double serialization is not performance critical as it is only done once per
-/// connection. The primary reason storing the ConnecitonInfo has a JSON string is for type
-/// erasure. The Transport Layer will check the [`ConnectionInfo::transport`] type and then
-/// route it to the appropriate instance of the Transport, which will then deserialize the
-/// [`ConnectionInfo::info`] field to its internal connection info object.
+/// `ConnectionInfo` 先序列化成 JSON，再作为传输层的一部分再次序列化。
+/// 这种双重序列化不会成为性能瓶颈，因为它只会在每次连接建立时执行一次。
+/// 把 ConnectionInfo 存成 JSON 字符串的主要原因是为了做类型擦除：
+/// 传输层会先检查 [`ConnectionInfo::transport`]，再把 [`ConnectionInfo::info`]
+/// 反序列化成对应传输实现内部的连接信息对象。
 ///
-/// Optionally, this object could become strongly typed for which all possible combinations
-/// of transport and connection info would need to be enumerated.
+/// 另外一种可选方案是把这个对象改成强类型，但那样就必须枚举所有传输和连接信息的组合。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionInfo {
     pub transport: String,
     pub info: String,
 }
 
-/// When registering a new TransportStream on the server, the caller specifies if the
-/// stream is a sender, receiver or both.
+/// 在服务端注册新的 TransportStream 时，调用方需要指定该流是发送端、接收端，
+/// 还是两者兼有。
 ///
-/// Senders and Receivers are with share a Context, but result in separate tcp socket
-/// connections to the server. Internally, we may use bcast channels to coordinate the
-/// internal control messages between the sender and receiver socket connections.
+/// 发送端和接收端共享同一个 Context，但会分别对应到独立的 TCP socket 连接。
+/// 在内部，我们可能会用广播通道来协调发送端和接收端 socket 之间的控制消息。
 #[derive(Clone, Builder)]
 pub struct StreamOptions {
     /// Context
     pub context: Arc<dyn AsyncEngineContext>,
 
-    /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
+    /// 向服务端注册这条连接会有一个服务端侧 Sender，
+    /// 它会被 Request/Forward pipeline 接走。
     ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// 注意：这个选项当前尚未实现，调用会直接 panic。
     pub enable_request_stream: bool,
 
-    /// Register with the server that this connection will have a server-side Receiver
-    /// that can be picked up by the Response/Reverse pipeline
+    /// 向服务端注册这条连接会有一个服务端侧 Receiver，
+    /// 它会被 Response/Reverse pipeline 接走。
     pub enable_response_stream: bool,
 
-    /// The number of messages to buffer before blocking
+    /// 在阻塞前允许缓冲的消息数量。
     #[builder(default = "8")]
     pub send_buffer_count: usize,
 
-    /// The number of messages to buffer before blocking
+    /// 在阻塞前允许缓冲的消息数量。
     #[builder(default = "8")]
     pub recv_buffer_count: usize,
 }
@@ -317,7 +280,7 @@ impl StreamOptions {
     }
 }
 
-// === SECTION: Egress / Ingress engine adapters + PushWorkHandler ===
+// === SECTION: Egress / Ingress 引擎适配器 + PushWorkHandler ===
 pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
@@ -354,9 +317,9 @@ struct RequestControlMessage {
     request_type: RequestType,
     response_type: ResponseType,
     connection_info: ConnectionInfo,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    /// 发送时的墙钟时间戳（自 UNIX epoch 起的纳秒数），用于拆分传输延迟。
+    /// 这里使用 `SystemTime`，所以精度取决于前后端主机之间的 NTP 同步情况。
+    /// 适合单机性能分析；跨主机的数值应视为近似值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frontend_send_ts_ns: Option<u64>,
 }
@@ -364,7 +327,7 @@ struct RequestControlMessage {
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
-    /// PortName-specific notifier for health check timer resets
+    /// 仅对应 PortName 的健康检查计时器重置通知器。
     portname_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
@@ -391,14 +354,13 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         let metrics = WorkHandlerMetrics::from_portname(portname, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
-        // Register global transport breakdown metrics (idempotent)
+        // 注册全局传输延迟分解指标（幂等）。
         crate::metrics::work_handler_perf::ensure_work_handler_perf_metrics_registered(
             portname.get_metrics_registry(),
         );
 
-        // Register worker-pool saturation metrics (idempotent). These are
-        // process-global and shared across all portnames attached to the
-        // same shared TCP server.
+        // 注册 worker 池饱和度指标（幂等）。这些指标是进程全局的，
+        // 会被挂到同一共享 TCP 服务端上的所有 portname 共享。
         crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
             portname.get_metrics_registry(),
         );
@@ -424,7 +386,7 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         let frontend = SegmentSource::<Req, Resp>::new();
         let backend = ServiceBackend::from_engine(engine);
 
-        // create the pipeline
+        // 创建管线。
         let pipeline = frontend.link(backend)?.link(frontend)?;
 
         let ingress = Ingress::new();
@@ -433,7 +395,7 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Ok(ingress)
     }
 
-    /// Helper method to access metrics if available
+    /// 如可用，则返回 metrics 的辅助方法。
     fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
         self.metrics.get()
     }
@@ -447,68 +409,25 @@ pub trait PushWorkHandler: Send + Sync {
         request_id: Option<String>,
     ) -> Result<(), PipelineError>;
 
-    /// Add metrics to the handler
+    /// 为处理器添加 metrics。
     fn add_metrics(
         &self,
         portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
 
-    /// Set the portname-specific notifier for health check timer resets
+    /// 设置仅对应 PortName 的健康检查计时器重置通知器。
     fn set_portname_health_check_notifier(
         &self,
         _notifier: Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        // Default implementation for backwards compatibility
+        // 为兼容旧实现保留的默认实现。
         Ok(())
     }
 }
 
-/*
-/// `NetworkStreamWrapper` is a simple wrapper used to detect proper stream termination
-/// in network communication between ingress and egress servicegroups.
-///
-/// **Purpose**: This wrapper solves the problem of detecting whether a stream ended
-/// gracefully or was cut off prematurely (e.g., due to network issues).
-///
-/// **Design Rationale**:
-/// - Cannot use `Annotated` directly because the generic type `U` varies:
-///   - Sometimes `U = Annotated<...>`
-///   - Sometimes `U = LLMEngineOutput<...>`
-/// - Using `Annotated` would require double-wrapping like `Annotated<Annotated<...>>`
-/// - A simple wrapper is cleaner and more straightforward
-///
-/// **Stream Flow**:
-/// ```
-/// At AsyncEngine:
-///   response 1 -> response 2 -> response 3 -> <end>
-///
-/// Between ingress/egress:
-///   response 1 <end=false> -> response 2 <end=false> -> response 3 <end=false> -> (null) <end=true>
-///
-/// At client:
-///   response 1 -> response 2 -> response 3 -> <end>
-/// ```
-///
-/// **Error Handling**:
-/// If the stream is cut off before proper termination, the egress is responsible for
-/// injecting an error response to communicate the incomplete stream to the client:
-/// ```
-/// At AsyncEngine:
-///   response 1 -> ... <without end flag>
-///
-/// At egress:
-///   response 1 <end=false> -> <stream ended without end flag -> convert to error>
-///
-/// At client:
-///   response 1 -> error response
-/// ```
-///
-/// The detection must be done at egress level because premature stream termination
-/// can be due to network issues that only the egress servicegroup can detect.
-*/
-// === SECTION: Stream termination wrapper ===
-/// TODO: Detect end-of-stream using Server-Sent Events (SSE). This will be removed.
+    // === SECTION: 流结束包装器 ===
+    /// TODO：改用 Server-Sent Events（SSE）检测流结束，后续会移除。
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkStreamWrapper<U> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -516,7 +435,7 @@ pub struct NetworkStreamWrapper<U> {
     pub complete_final: bool,
 }
 
-// === SECTION: Tests — RegisteredStream cleanup semantics ===
+// === SECTION: 测试 - RegisteredStream 清理语义 ===
 #[cfg(test)]
 mod registered_stream_tests {
     //! ## 测试矩阵
@@ -536,7 +455,7 @@ mod registered_stream_tests {
         }
     }
 
-    /// Drop without `into_parts()` must run the cleanup closure.
+    /// 不调用 `into_parts()` 直接 drop 时，必须执行清理闭包。
     #[test]
     fn drop_runs_cleanup() {
         let flag = Arc::new(AtomicBool::new(false));
@@ -554,9 +473,8 @@ mod registered_stream_tests {
         );
     }
 
-    /// `into_parts()` must disarm the cleanup. After the call, dropping the
-    /// returned halves must NOT trigger the closure -- the caller has taken
-    /// ownership of cleanup responsibility.
+    /// `into_parts()` 必须解除清理。调用之后，再 drop 返回的各个部分时
+    /// 不能触发闭包——清理责任已经转交给调用方。
     #[test]
     fn into_parts_disarms_cleanup() {
         let flag = Arc::new(AtomicBool::new(false));
@@ -577,7 +495,7 @@ mod registered_stream_tests {
         );
     }
 
-    /// `RegisteredStream` with no cleanup configured must drop cleanly.
+    /// 没有配置清理的 `RegisteredStream` 必须能够平稳 drop。
     #[test]
     fn drop_without_cleanup_is_a_noop() {
         let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();

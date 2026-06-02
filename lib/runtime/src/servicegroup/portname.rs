@@ -146,21 +146,21 @@ pub struct PortNameConfig {
     #[builder(private)]
     portname: PortName,
 
-    /// PortName handler
+    /// portname 的请求 handler
     #[educe(Debug(ignore))]
     handler: Arc<dyn PushWorkHandler>,
 
-    /// Additional labels for metrics
+    /// 指标用的附加标签
     #[builder(default, setter(into))]
     metrics_labels: Option<Vec<(String, String)>>,
 
-    /// Whether to wait for inflight requests to complete during shutdown
+    /// 关闭过程中是否等待在途请求完成
     #[builder(default = "true")]
     graceful_shutdown: bool,
 
-    /// Health check payload for this portname
-    /// This payload will be sent to the portname during health checks
-    /// to verify it's responding properly
+    /// 本 portname 的健康检查负载。
+    /// 健康检查时会把该负载发送给 portname，
+    /// 以验证其能够正常响应。
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,

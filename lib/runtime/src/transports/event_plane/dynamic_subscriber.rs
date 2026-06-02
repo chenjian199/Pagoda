@@ -21,18 +21,14 @@
 //! - `Drop` 触发 cancel —— "丢一定停"。
 //!
 //! ## 实现要点
-//! 差异：
-//! 1. **存储结构**：active portname 表从 `RwLock<HashMap<String, (String, CancellationToken)>>`
-//!    换成 [`DashMap`]，去掉读写锁热路径。
-//! 2. **代码切分**：lib-copy 把整个 watch loop 塞进 `start_zmq` 一个超长 async
-//!    block 里；本实现拆成 [`Self::watch_loop`] / [`Self::handle_added`] /
+//! 1. **存储结构**：active portname 表使用 [`DashMap`]，去掉读写锁热路径。
+//! 2. **代码切分**：watch loop 拆成 [`Self::watch_loop`] / [`Self::handle_added`] /
 //!    [`Self::handle_removed`] / [`Self::cancel_all_portnames`] 四个小方法，
 //!    每个都不超过一屏 —— 测试和阅读都更友好。
-//! 3. **取消时清理**：lib-copy 在 watch loop 退出时**逐个 cancel** 然后让后台
-//!    任务自清理；本实现额外在 `cancel_all_portnames` 里 `clear()` 表，避免
-//!    被 cancel 后表项还短暂残留。
-//! 4. **错误传播**：consume 内部把 `Some(Err)` 视为致命退出 —— 与 lib-copy 一致；
-//!    但日志改为带 portname 字段，便于排查。
+//! 3. **取消时清理**：watch loop 退出时逐个 cancel 后管理的后台任务，
+//!    并在 `cancel_all_portnames` 里 `clear()` 表，避免被 cancel 后表项还短暂残留。
+//! 4. **错误传播**：consume 内部把 `Some(Err)` 视为致命退出，
+//!    日志带 portname 字段，便于排查。
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -332,7 +328,7 @@ impl Drop for DynamicSubscriber {
 }
 
 // =============================================================================
-// === 单元测试（保留 lib-copy 补充集，标注新增项）============================
+// === 单元测试 ============================
 // =============================================================================
 
 #[cfg(test)]

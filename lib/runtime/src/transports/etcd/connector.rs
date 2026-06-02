@@ -212,7 +212,7 @@ mod tests {
     //!
     //! ## 意义
     //! 这些测试既覆盖纯逻辑路径（退避计算），又通过 `PAGODA_TEST_ETCD_URL` 触发
-    //! 真实 etcd 路径（accessor / 过期 deadline 立即失败），确保重写不破坏现有契约。
+    //! 真实 etcd 路径（accessor / 过期 deadline 立即失败），验证连接器对现有契约的遵守。
 
     use super::*;
 
@@ -231,7 +231,7 @@ mod tests {
         let urls = vec!["bad://etcd-portname".to_string()];
         match Connector::connect(&urls, &None).await {
             Ok(_client) => {
-                // etcd-client may lazily connect and succeed immediately.
+                // etcd-client 可能采用惰性连接并立即返回成功.
             }
             Err(err) => {
                 let err = err.to_string();
@@ -246,7 +246,7 @@ mod tests {
         let urls = vec!["bad://etcd-portname".to_string()];
         match Connector::new(urls, None).await {
             Ok(_connector) => {
-                // etcd-client may lazily connect and succeed immediately.
+                // etcd-client 可能采用惰性连接并立即返回成功.
             }
             Err(err) => {
                 let err = err.to_string();

@@ -9,16 +9,16 @@
 //! - [`LeaseId`]：etcd 租约 id 的别名，让接口签名带出语义；
 //! - [`ServiceGroup`]：二段命名 (namespace, name) 的轻量值对象；
 //! - [`PortNameId`]：三段命名 (namespace, servicegroup, name) 的端点标识，
-//!   附带 `dyn://` URL 形式。
+//!   附带 `pgd://` URL 形式。
 //!
 //! 子模块 [`annotated`] / [`maybe_error`] 各自承载流式增量与错误投影。
 //!
 //! ## 外部契约
 //!
-//! - [`ENDPOINT_SCHEME`]：`"dyn://"` 字面量；
+//! - [`ENDPOINT_SCHEME`]：`"pgd://"` 字面量；
 //! - [`PortNameId`] 支持 `From<&str>` / `FromStr` / `Display`，以及与
 //!   `Vec<&str>` 和 `[&str; 3]` 的双向 `PartialEq`（用于测试断言）；
-//! - [`PortNameId::as_url`]：`dyn://ns.cp.ep` 风格 URL；
+//! - [`PortNameId::as_url`]：`pgd://namespace.servicegroup.name` 风格 URL；
 //! - 默认值 `(NS, C, E)` 通过模块私有常量定义。
 //!
 //! ## 实现要点
@@ -57,7 +57,7 @@ const DEFAULT_ENDPOINT: &str = "E";
 
 /// 端点 URL 的固定前缀。严格意义上 `://` 不是 scheme 的一部分，
 /// 但与前缀合并在一起可以减少字符串拼接次数。
-pub const ENDPOINT_SCHEME: &str = "pag://";
+pub const ENDPOINT_SCHEME: &str = "pgd://";
 
 // === STRUCT: ServiceGroup ======================================================
 
@@ -72,8 +72,8 @@ pub struct ServiceGroup {
 
 /// 三段命名的端点标识 (namespace / servicegroup / name)。
 ///
-/// 字符串形式支持 `/` 或 `.` 分隔，可选 `pag://` 前缀。例如：
-/// `"pag://ns/servicegroup/portname"` 与 `"ns.servicegroup.portname"` 等价。
+/// 字符串形式支持 `/` 或 `.` 分隔，可选 `pgd://` 前缀。例如：
+/// `"pgd://ns/servicegroup/portname"` 与 `"ns.servicegroup.portname"` 等价。
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct PortNameId {
     pub namespace: String,
@@ -163,7 +163,7 @@ impl From<&str> for PortNameId {
     /// 从字符串构造 [`PortNameId`]。
     ///
     /// 解析规则：
-    /// 1. 去掉可选 `pag://` 前缀；
+    /// 1. 去掉可选 `pgd://` 前缀；
     /// 2. 去掉首尾空白 / 斜杠 / 点号；
     /// 3. 按 `.` 或 `/` 分段；
     /// 4. 缺失段用 [`Default`] 占位符补齐；
@@ -227,7 +227,7 @@ impl FromStr for PortNameId {
     /// assert_eq!(portname.servicegroup, "servicegroup");
     /// assert_eq!(portname.name, "portname");
     ///
-    /// let portname: PortNameId = "pag://namespace/servicegroup/portname".parse().unwrap();
+    /// let portname: PortNameId = "pgd://namespace/servicegroup/portname".parse().unwrap();
     /// assert_eq!(portname.name, "portname");
     /// ```
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -238,7 +238,7 @@ impl FromStr for PortNameId {
 // === IMPL: URL 形式 =========================================================
 
 impl PortNameId {
-    /// 渲染为 `pag://namespace.servicegroup.name` 形式的 URL。
+    /// 渲染为 `pgd://namespace.servicegroup.name` 形式的 URL。
     ///
     /// 与 [`Display`](fmt::Display) 对称：后者用 `/`，本方法用 `.`。
     pub fn as_url(&self) -> String {
@@ -377,15 +377,15 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// 带 `pag://` 前缀的输入解析后再 `as_url`，验证去前缀与重编码闭环。
+    /// 带 `pgd://` 前缀的输入解析后再 `as_url`，验证去前缀与重编码闭环。
     /// ## 意义
     /// 守护“parse → as_url”往返一致性。
     #[test]
     fn test_parse_with_scheme_and_url_roundtrip() {
-        let input = "pag://ns/sg/pn";
+        let input = "pgd://ns/sg/pn";
         let portname: PortNameId = input.parse().unwrap();
         assert_eq!(portname, vec!["ns", "sg", "pn"]);
-        assert_eq!(portname.as_url(), "pag://ns.sg.pn");
+        assert_eq!(portname.as_url(), "pgd://ns.sg.pn");
     }
 
     /// ## 测试过程
@@ -433,7 +433,7 @@ mod tests {
     /// 把“前缀剥离 + 多段折叠”这两条路径在一个测试里联合校验。
     #[test]
     fn test_from_trims_prefix_and_collapses_extra_parts() {
-        let portname = PortNameId::from("pag://ns/servicegroup/name/extra.parts");
+        let portname = PortNameId::from("pgd://ns/servicegroup/name/extra.parts");
 
         assert_eq!(portname, vec!["ns", "servicegroup", "name_extra_parts"]);
     }

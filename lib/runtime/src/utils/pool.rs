@@ -460,7 +460,7 @@ mod tests {
         let pool = Pool::new(initial_elements);
 
         if let Some(mut item) = pool.try_acquire().await {
-            assert_eq!(*item, 1); // It should be the first element we put in
+            assert_eq!(*item, 1); // 应该是最先放入的第一个元素
 
             *item += 10;
             assert_eq!(*item, 11);
@@ -505,13 +505,11 @@ mod tests {
         // 测试共享池元素在多引用场景下的生命周期与归还行为。
         let initial_elements = vec![
             PoolValue::Direct(1),
-            // PoolValue::Direct(2),
-            // PoolValue::Direct(3),
         ];
         let pool = Pool::new(initial_elements);
 
         let mut item = pool.acquire().await;
-        *item += 10; // Modify before sharing
+        *item += 10; // 在共享之前修改
         let shared = item.into_shared();
         assert_eq!(*shared, 11);
 
@@ -525,7 +523,7 @@ mod tests {
         drop(shared_clone);
 
         let item = pool.acquire().await;
-        assert_eq!(*item, 0); // Value should be on_return
+        assert_eq!(*item, 0); // 值应被 on_return 重置
     }
 
     #[tokio::test]
@@ -533,8 +531,6 @@ mod tests {
         // 测试装箱元素在对象池中的获取与归还。
         let initial_elements = vec![
             PoolValue::Boxed(Box::new(1)),
-            // PoolValue::Boxed(Box::new(2)),
-            // PoolValue::Boxed(Box::new(3)),
         ];
         let pool = Pool::new(initial_elements);
 
@@ -555,12 +551,6 @@ mod tests {
 
         let item = pool.acquire().await;
         assert_eq!(*item, 1);
-
-        // let invalid_item = PoolItem {
-        //     value: Some(PoolValue::Direct(2)),
-        //     pool: pool.clone(),
-        //     _token: /* can't create this */
-        // };
     }
 
     #[tokio::test]
@@ -630,12 +620,12 @@ mod tests {
 
         assert!(pool.try_acquire().is_none());
 
-        drop(item1); // Returns 0 (after on_return)
-        drop(item2); // Returns 0 (after on_return)
-        drop(item3); // Returns 0 (after on_return)
+        drop(item1); // 归还后值被 on_return 重置为 0
+        drop(item2); // 归还后值被 on_return 重置为 0
+        drop(item3); // 归还后值被 on_return 重置为 0
 
         let item = pool.try_acquire().unwrap();
-        assert_eq!(*item, 0); // Value was reset by on_return
+        assert_eq!(*item, 0); // 值已被 on_return 重置
     }
 
     #[test]
@@ -651,19 +641,19 @@ mod tests {
         let counter_clone = counter.clone();
 
         let handle = thread::spawn(move || {
-            counter_clone.store(1, Ordering::SeqCst); // Mark that we're waiting
-            let waiting_item = pool_clone.acquire_blocking(); // This will block
-            counter_clone.store(2, Ordering::SeqCst); // Mark that we got it
-            assert_eq!(*waiting_item, 0); // Should be reset value
+            counter_clone.store(1, Ordering::SeqCst); // 标记正在等待
+            let waiting_item = pool_clone.acquire_blocking(); // 这里会阻塞
+            counter_clone.store(2, Ordering::SeqCst); // 标记已获取到
+            assert_eq!(*waiting_item, 0); // 应为重置后的值
         });
 
         thread::sleep(Duration::from_millis(10));
-        assert_eq!(counter.load(Ordering::SeqCst), 1); // Should be waiting
+        assert_eq!(counter.load(Ordering::SeqCst), 1); // 应处于等待状态
 
         drop(item);
 
         handle.join().unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 2); // Should have completed
+        assert_eq!(counter.load(Ordering::SeqCst), 2); // 应已完成
     }
 
     #[test]
@@ -680,19 +670,19 @@ mod tests {
         let completed2 = completed.clone();
 
         let handle1 = thread::spawn(move || {
-            let _item = pool_clone1.acquire_blocking(); // Will block
-            completed1.fetch_add(1, Ordering::SeqCst); // Mark completion
-            // Item drops here, potentially waking thread 2
+            let _item = pool_clone1.acquire_blocking(); // 会阻塞
+            completed1.fetch_add(1, Ordering::SeqCst); // 标记完成
+            // 元素在此处释放，可能唤醒线程 2
         });
 
         let handle2 = thread::spawn(move || {
-            let _item = pool_clone2.acquire_blocking(); // Will block
-            completed2.fetch_add(1, Ordering::SeqCst); // Mark completion
-            // Item drops here
+            let _item = pool_clone2.acquire_blocking(); // 会阻塞
+            completed2.fetch_add(1, Ordering::SeqCst); // 标记完成
+            // 元素在此处释放
         });
 
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(completed.load(Ordering::SeqCst), 0); // Both should be waiting
+        assert_eq!(completed.load(Ordering::SeqCst), 0); // 两个线程都应在等待
 
         drop(item);
 
@@ -715,8 +705,8 @@ mod tests {
         let sync_item = sync_pool.acquire_blocking();
         assert_eq!(*sync_item, 3);
 
-        drop(async_item); // Should reset to 0
-        drop(sync_item); // Should reset to 0
+        drop(async_item); // 应重置为 0
+        drop(sync_item); // 应重置为 0
     }
 
     #[test]

@@ -29,10 +29,10 @@ use std::{
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-/// Tombstone lifetime. Bridges the `register()` → `associate_instance()`
-/// window (sub-millisecond in practice); 5s bounds the set by recent worker
-/// churn rather than process lifetime, since etcd lease IDs are unique per
-/// restart and never get cleared by an `Added` event for the same identity.
+/// 墓碑（Tombstone）生命周期。用于弥合 `register()` → `associate_instance()`
+/// 之间的窗口（实践中为亚毫秒级）；5s 使该集合受近期 worker 变动而非进程
+/// 生命周期约束，因为 etcd lease ID 每次重启唯一，且不会被同一身份的
+/// `Added` 事件清除。
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 
 use bytes::Bytes;
@@ -64,14 +64,14 @@ use crate::pipeline::{
 };
 use anyhow::{Context, Result, anyhow as error};
 
-// === SECTION: IpResolver + ServerOptions (public types) ===
-// Trait for IP address resolution - allows dependency injection for testing
+// === SECTION: IpResolver + ServerOptions（公开类型）===
+// IP 地址解析 trait —— 允许在测试中注入依赖
 pub trait IpResolver {
     fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
     fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
 }
 
-// Default implementation using the real local_ip_address crate
+// 使用真实 local_ip_address crate 的默认实现
 pub struct DefaultIpResolver;
 
 impl IpResolver for DefaultIpResolver {
@@ -102,21 +102,14 @@ impl ServerOptions {
     }
 }
 
-/// A [`TcpStreamServer`] is a TCP service that listens on a port for incoming response connections.
-/// A Response connection is a connection that is established by a client with the intention of sending
-/// specific data back to the server.
-// === SECTION: TcpStreamServer + internal state types ===
+/// [`TcpStreamServer`] 是一个在端口上监听传入响应连接的 TCP 服务。
+/// 响应连接是由客户端建立、用于将特定数据回传给服务器的连接。
+// === SECTION: TcpStreamServer + 内部状态类型 ===
 pub struct TcpStreamServer {
     local_ip: String,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
-
-// pub struct TcpStreamReceiver {
-//     address: TcpStreamConnectionInfo,
-//     state: Arc<Mutex<State>>,
-//     rx: mpsc::Receiver<ResponseType>,
-// }
 
 #[allow(dead_code)]
 struct RequestedSendConnection {
@@ -129,45 +122,28 @@ struct RequestedRecvConnection {
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
 }
 
-// /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
-// /// This [`Connections`] object will have two [`oneshot::Receiver`] objects, one for the [`TcpStreamSender`] and one for the [`TcpStreamReceiver`].
-// /// The [`Connections`] object can be awaited to get the [`TcpStreamSender`] and [`TcpStreamReceiver`] objects; these objects will
-// /// be made available when the matching Client has connected to the server.
-// pub struct Connections {
-//     pub address: TcpStreamConnectionInfo,
-
-//     /// The [`oneshot::Receiver`] for the [`TcpStreamSender`]. Awaiting this object will return the [`TcpStreamSender`] object once
-//     /// the client has connected to the server.
-//     pub sender: Option<oneshot::Receiver<StreamSender>>,
-
-//     /// The [`oneshot::Receiver`] for the [`TcpStreamReceiver`]. Awaiting this object will return the [`TcpStreamReceiver`] object once
-//     /// the client has connected to the server.
-//     pub receiver: Option<oneshot::Receiver<StreamReceiver>>,
-// }
-
 #[derive(Default)]
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
-    /// subject UUID -> PortNameInstanceId. Full 4-field key isolates services
-    /// that share an portname name across namespaces/servicegroups.
+    /// subject UUID -> PortNameInstanceId。完整的 4 字段键可隔离跨
+    /// namespace/servicegroup 共享同一 portname 名称的服务。
     subject_instance: HashMap<String, PortNameInstanceId>,
-    /// PortNameInstanceId -> subject UUIDs, for batch cancellation on removal.
+    /// PortNameInstanceId -> subject UUID 集合，用于移除时批量取消。
     instance_subjects: HashMap<PortNameInstanceId, HashSet<String>>,
-    /// Tombstones (instance -> insertion time) close the
-    /// `cancel_instance_streams` vs `associate_instance` race; entries expire
-    /// after [`TOMBSTONE_TTL`].
+    /// 墓碑（instance -> 插入时间）用于消解 `cancel_instance_streams`
+    /// 与 `associate_instance` 之间的竞争；条目在 [`TOMBSTONE_TTL`] 后过期。
     removed_instances: HashMap<PortNameInstanceId, Instant>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
-/// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
-/// `associate_instance` / `cancel_instance_streams` to bound the set size.
+/// 丢弃早于 [`TOMBSTONE_TTL`] 的墓碑。在每次 `associate_instance` /
+/// `cancel_instance_streams` 时惰性调用，以限制集合大小。
 fn prune_tombstones(tombstones: &mut HashMap<PortNameInstanceId, Instant>, now: Instant) {
     tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
 }
 
-// === SECTION: TcpStreamServer impls (constructors + ResponseService) ===
+// === SECTION: TcpStreamServer 实现（构造函数 + ResponseService）===
 impl TcpStreamServer {
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
@@ -202,10 +178,9 @@ impl TcpStreamServer {
 
                 match resolved_ip {
                     Ok(addr) => addr,
-                    // Only fall back to loopback when no routable IP exists at all;
-                    // propagate other resolver errors (I/O, platform) so
-                    // misconfigured hosts fail fast instead of silently binding
-                    // to 127.0.0.1.
+                    // 仅在根本不存在可路由 IP 时才回退到回环地址；
+                    // 传播其他解析器错误（I/O、平台），使配置错误的
+                    // 主机快速失败，而不是静默地绑定到 127.0.0.1。
                     Err(Error::LocalIpAddressNotFound) => {
                         tracing::warn!(
                             "No routable local IP address found; falling back to 127.0.0.1"
@@ -239,17 +214,16 @@ impl TcpStreamServer {
         }))
     }
 
-    /// Associate a registered subject with a backend instance.
+    /// 将已注册的 subject 与后端实例关联。
     ///
-    /// Returns `false` if the instance is already tombstoned, in which case
-    /// the subject is cancelled immediately and the caller should skip
-    /// `send_request` and fail with a migratable `Disconnected` error.
+    /// 若实例已被墓碑化则返回 `false`，此时 subject 会被立即取消，
+    /// 调用方应跳过 `send_request` 并以可迁移的 `Disconnected` 错误失败。
     pub async fn associate_instance(&self, subject: &str, id: &PortNameInstanceId) -> bool {
         let mut state = self.state.lock().await;
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
         if state.removed_instances.contains_key(id) {
-            // Instance was already removed -- cancel immediately.
+            // 实例已被移除 —— 立即取消。
             tracing::warn!(
                 subject,
                 namespace = %id.namespace,
@@ -272,8 +246,8 @@ impl TcpStreamServer {
         true
     }
 
-    /// Cancel one pending response-stream registration. Drops the
-    /// `oneshot::Sender` so the waiting receiver resolves with `RecvError`.
+    /// 取消一个待处理的响应流注册。丢弃 `oneshot::Sender`，
+    /// 使等待中的接收者以 `RecvError` 解析。
     pub async fn cancel_recv_stream(&self, subject: &str) {
         let mut state = self.state.lock().await;
         state.rx_subjects.remove(subject);
@@ -287,9 +261,9 @@ impl TcpStreamServer {
         }
     }
 
-    /// Cancel all pending response streams for an instance and tombstone it
-    /// so any racing `associate_instance()` for the same id cancels too.
-    /// Returns the number of streams cancelled.
+    /// 取消某实例的所有待处理响应流并将其墓碑化，
+    /// 使任何针对同一 id 的竞争性 `associate_instance()` 也被取消。
+    /// 返回被取消的流数量。
     pub async fn cancel_instance_streams(&self, id: &PortNameInstanceId) -> usize {
         let mut state = self.state.lock().await;
         let now = Instant::now();
@@ -307,8 +281,8 @@ impl TcpStreamServer {
         count
     }
 
-    /// Drop the tombstone for an instance that has reappeared in discovery,
-    /// so future subjects for that identity are tracked normally.
+    /// 为在发现中重新出现的实例丢弃墓碑，
+    /// 使该身份未来的 subject 被正常跟踪。
     pub async fn clear_instance_tombstone(&self, id: &PortNameInstanceId) {
         let mut state = self.state.lock().await;
         state.removed_instances.remove(id);
@@ -331,31 +305,30 @@ impl TcpStreamServer {
     }
 }
 
-// todo - possible rename ResponseService to ResponseServer
+// todo - 可能将 ResponseService 重命名为 ResponseServer
 #[async_trait::async_trait]
 impl ResponseService for TcpStreamServer {
-    /// Register a new subject and sender with the response subscriber
-    /// Produces an RAII object that will deregister the subject when dropped
+    /// 向响应订阅者注册一个新的 subject 与 sender。
+    /// 生成一个 RAII 对象，在 drop 时注销该 subject。
     ///
-    /// we need to register both data in and data out entries
-    /// there might be forward pipeline that want to consume the data out stream
-    /// and there might be a response stream that wants to consume the data in stream
-    /// on registration, we need to specific if we want data-in, data-out or both
-    /// this will map to the type of service that is runniing, i.e. Single or Many In //
-    /// Single or Many Out
+    /// 需同时注册 data-in 与 data-out 两个条目：
+    /// 可能有前向 pipeline 想消费 data-out 流，
+    /// 也可能有响应流想消费 data-in 流。
+    /// 注册时需指定需要 data-in、data-out 还是两者，
+    /// 这将映射到运行的服务类型，即单/多输入与单/多输出。
     ///
-    /// todo(ryan) - return a connection object that can be awaited. when successfully connected,
-    /// can ask for the sender and receiver
+    /// todo(ryan) - 返回一个可 await 的连接对象；连接成功后
+    /// 可请求 sender 和 receiver。
     ///
-    /// OR
+    /// 或者
     ///
-    /// we make it into register sender and register receiver, both would return a connection object
-    /// and when a connection is established, we'd get the respective sender or receiver
+    /// 拆分为 register sender 和 register receiver，两者都返回连接对象，
+    /// 连接建立后得到各自的 sender 或 receiver。
     ///
-    /// the registration probably needs to be done in one-go, so we should use a builder object for
-    /// requesting a receiver and optional sender
+    /// 注册可能需要一次性完成，所以应使用 builder 对象来
+    /// 请求 receiver 与可选 sender。
     async fn register(&self, options: StreamOptions) -> PendingConnections {
-        // oneshot channels to pass back the sender and receiver objects
+        // 用 oneshot channel 回传 sender 和 receiver 对象
 
         let address = format!("{}:{}", self.local_ip, self.local_port);
         tracing::debug!("Registering new TcpStream on {address}");
@@ -388,7 +361,7 @@ impl ResponseService for TcpStreamServer {
                 pending_sender_rx,
             )
             .with_cleanup(move || {
-                // Drop is sync; fire-and-forget the lock acquisition.
+                // Drop 是同步的；发起后不管的锁获取。
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock().await;
                     state.tx_subjects.remove(&cleanup_subject);
@@ -427,7 +400,7 @@ impl ResponseService for TcpStreamServer {
                 pending_recver_rx,
             )
             .with_cleanup(move || {
-                // Drop is sync; fire-and-forget the lock acquisition.
+                // Drop 是同步的；发起后不管的锁获取。
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock().await;
                     state.rx_subjects.remove(&cleanup_subject);
@@ -454,13 +427,12 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
-// this method listens on a tcp port for incoming connections
-// new connections are expected to send a protocol specific handshake
-// for us to determine the subject they are interested in, in this case,
-// we expect the first message to be [`FirstMessage`] from which we find
-// the sender, then we spawn a task to forward all bytes from the tcp stream
-// to the sender
-// === SECTION: Accept loop + per-connection task + control-message decoder ===
+// 此方法在一个 tcp 端口上监听传入连接。
+// 新连接预期会发送协议特定的握手，
+// 供我们确定其关注的 subject；本例中
+// 首条消息应为 [`FirstMessage`]，据此找到 sender，
+// 然后生成一个任务将 tcp 流的所有字节转发给 sender。
+// === SECTION: 接受循环 + 逐连接任务 + 控制消息解码器 ===
 async fn tcp_listener(
     addr: String,
     state: Arc<Mutex<State>>,
@@ -490,15 +462,15 @@ async fn tcp_listener(
     };
 
     loop {
-        // todo - add instrumentation
-        // todo - add counter for all accepted connections
-        // todo - add gauge for all inflight connections
-        // todo - add counter for incoming bytes
-        // todo - add counter for outgoing bytes
+        // todo - 添加探针插点
+        // todo - 添加所有已接受连接的计数器
+        // todo - 添加所有在飞连接的仪表
+        // todo - 添加传入字节的计数器
+        // todo - 添加传出字节的计数器
         let (stream, _addr) = match listener.accept().await {
             Ok((stream, _addr)) => (stream, _addr),
             Err(e) => {
-                // the client should retry, so we don't need to abort
+                // 客户端应重试，因此无需中止
                 tracing::warn!("failed to accept tcp connection: {e}");
                 eprintln!("failed to accept tcp connection: {}", e);
                 continue;
@@ -522,8 +494,7 @@ async fn tcp_listener(
         tokio::spawn(handle_connection(stream, state.clone()));
     }
 
-    // #[instrument(level = "trace"), skip(state)]
-    // todo - clone before spawn and trace process_stream
+    // todo - 在 spawn 前克隆并跟踪 process_stream
     async fn handle_connection(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
         let result = process_stream(stream, state).await;
         match result {
@@ -536,25 +507,25 @@ async fn tcp_listener(
         }
     }
 
-    /// This method is responsible for the internal tcp stream handshake
-    /// The handshake will specialize the stream as a request/sender or response/receiver stream
+    /// 此方法负责内部 tcp 流握手。
+    /// 握手会将流特化为 request/sender 或 response/receiver 流。
     async fn process_stream(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
-        // split the socket in to a reader and writer
+        // 将 socket 拆分为 reader 和 writer
         let (read_half, write_half) = tokio::io::split(stream);
 
-        // attach the codec to the reader and writer to get framed readers and writers
+        // 将 codec 附加到 reader 和 writer 以获得帧化的读写器
         let mut framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
 
-        // the internal tcp [`CallHomeHandshake`] connects the socket to the requester
-        // here we await this first message as a raw bytes two part message
+        // 内部 tcp [`CallHomeHandshake`] 将 socket 连接到请求方；
+        // 这里我们以原始字节两部分消息的形式等待首条消息。
         let first_message = framed_reader
             .next()
             .await
             .ok_or(error!("Connection closed without a ControlMessage"))??;
 
-        // we await on the raw bytes which should come in as a header only message
-        // todo - improve error handling - check for no data
+        // 我们等待的原始字节应以仅包含 header 的消息形式到达
+        // todo - 改进错误处理 - 检查无数据情形
         let handshake: CallHomeHandshake = match first_message.header() {
             Some(header) => serde_json::from_slice(header).map_err(|e| {
                 error!(
@@ -566,7 +537,7 @@ async fn tcp_listener(
             }
         };
 
-        // branch here to handle sender stream or receiver stream
+        // 在此分支以处理 sender 流或 receiver 流
         match handshake.stream_type {
             StreamType::Request => process_request_stream().await,
             StreamType::Response => {
@@ -603,20 +574,20 @@ async fn tcp_listener(
             conn
         };
 
-        // unwrap response_stream
+        // 解包 response_stream
         let RequestedRecvConnection {
             context,
             connection,
         } = response_stream;
 
-        // the [`Prologue`]
-        // there must be a second control message it indicate the other segment's generate method was successful
+        // [`Prologue`]
+        // 必须有第二条控制消息，表明另一段的 generate 方法成功
         let prologue = reader
             .next()
             .await
             .ok_or(error!("Connection closed without a ControlMessge"))??;
 
-        // deserialize prologue
+        // 反序列化 prologue
         let prologue = match prologue.into_message_type() {
             TwoPartMessageType::HeaderOnly(header) => {
                 let prologue: ResponseStreamPrologue = serde_json::from_slice(&header)
@@ -624,28 +595,28 @@ async fn tcp_listener(
                 prologue
             }
             _ => {
-                // Worker sent a non-HeaderOnly frame in the prologue slot
-                // (protocol violation, version skew, corruption). Notify the
-                // requester so the generate call chain fails cleanly, then
-                // return Err so the connection task ends without panicking.
+                // Worker 在 prologue 位置发送了非 HeaderOnly 帧
+                // （协议违反、版本偏差、损坏）。通知请求方，
+                // 使 generate 调用链干净失败，然后返回 Err，
+                // 使连接任务结束而不 panic。
                 let msg = "malformed prologue: expected HeaderOnly ControlMessage";
                 let _ = connection.send(Err(msg.to_string()));
                 return Err(error!(msg));
             }
         };
 
-        // await the control message of GTG or Error, if error, then connection.send(Err(String)), which should fail the
-        // generate call chain
+        // 等待 GTG 或 Error 控制消息；若为 error 则 connection.send(Err(String))，
+        // 该调用应使 generate 调用链失败。
         //
-        // note: this second control message might be delayed, but the expensive part of setting up the connection
-        // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
-        // us to trace the initial setup time vs the time to prologue
+        // 注：这条第二控制消息可能延迟，但建立连接的昂贵部分已
+        // 完成且准备好数据流动；在此等待不会带来性能损失或问题，
+        // 且允许我们跟踪初始建立时间与到达 prologue 的时间。
         if let Some(error) = &prologue.error {
             let _ = connection.send(Err(error.clone()));
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // we need to know the buffer size from the registration options; add this to the RequestRecvConnection object
+        // 需要从注册选项中获知缓冲区大小；将其加到 RequestRecvConnection 对象中
         let (response_tx, response_rx) = mpsc::channel(64);
 
         if connection
@@ -661,12 +632,12 @@ async fn tcp_listener(
 
         let (control_tx, control_rx) = mpsc::channel::<ControlMessage>(1);
 
-        // sender task
-        // issues control messages to the sender and when finished shuts down the socket
-        // this should be the last task to finish and must
+        // sender 任务
+        // 向 sender 发出控制消息，完成后关闭 socket。
+        // 这应是最后完成的任务，且必须如此。
         let send_task = tokio::spawn(network_send_handler(writer, control_rx));
 
-        // forward task
+        // 转发任务
         let recv_task = tokio::spawn(network_receive_handler(
             reader,
             response_tx,
@@ -674,7 +645,7 @@ async fn tcp_listener(
             context.clone(),
         ));
 
-        // check the results of each of the tasks
+        // 检查每个任务的结果
         let (monitor_result, forward_result) = tokio::join!(send_task, recv_task);
 
         monitor_result?;
@@ -689,7 +660,7 @@ async fn tcp_listener(
         control_tx: mpsc::Sender<ControlMessage>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
-        // loop over reading the tcp stream and checking if the writer is closed
+        // 循环读取 tcp 流并检查 writer 是否已关闭
         let mut can_stop = true;
         loop {
             tokio::select! {
@@ -718,15 +689,14 @@ async fn tcp_listener(
                         Some(Ok(msg)) => {
                             let (header, data) = msg.into_parts();
 
-                            // received a control message
+                            // 收到控制消息
                             if !header.is_empty() {
                                 match process_control_message(header) {
                                     Ok(ControlAction::Continue) => {}
                                     Ok(ControlAction::Shutdown) => {
                                         if !data.is_empty() {
-                                            // Sentinel-with-data is a protocol
-                                            // violation; kill this stream, don't
-                                            // assert!() the process down.
+                                            // 哨兵带数据属于协议违反；
+                                            // 杀掉此流，不要 assert!() 拖垮进程。
                                             tracing::warn!(
                                                 data_len = data.len(),
                                                 "client sent Sentinel with data (protocol violation); killing stream"
@@ -738,8 +708,7 @@ async fn tcp_listener(
                                         break;
                                     }
                                     Err(e) => {
-                                        // Malformed control message — kill only
-                                        // this stream.
+                                        // 控制消息格式错误 —— 仅杀掉此流。
                                         tracing::warn!(err = ?e, "malformed control message, closing connection");
                                         let _ = control_tx.send(ControlMessage::Kill).await;
                                         break;
@@ -755,18 +724,16 @@ async fn tcp_listener(
                                 };
                         }
                         Some(Err(e)) => {
-                            // TCP RST or decode error from worker — kill only
-                            // this stream.
+                            // 来自 worker 的 TCP RST 或解码错误 —— 仅杀掉此流。
                             tracing::warn!(err = ?e, "tcp stream read error from worker, closing connection");
                             let _ = control_tx.send(ControlMessage::Kill).await;
                             break;
                         }
                         None => {
-                            // this is allowed but we try to avoid it
-                            // the logic is that the client will tell us when its is done and the server
-                            // will close the connection naturally when the sentinel message is received
-                            // the client closing early represents a transport error outside the control of the
-                            // transport library
+                            // 这是允许的但我们尽量避免：
+                            // 逻辑上客户端会告知我们它已完成，服务器在收到
+                            // 哨兵消息时自然关闭连接。客户端提前关闭表示
+                            // 传输层库控制之外的传输错误。
                             tracing::trace!("tcp stream was closed by client");
                             break;
                         }
@@ -785,9 +752,9 @@ async fn tcp_listener(
         let mut control_rx = control_rx;
 
         while let Some(control_msg) = control_rx.recv().await {
-            // Sentinel is a worker→frontend message; receiving one here means
-            // a producer is buggy. Skip rather than asserting — a stream-level
-            // bug must not panic the worker.
+            // Sentinel 是 worker→frontend 消息；在此处收到说明
+            // 生产者存在缺陷。跳过而不是断言 —— 流级别的
+            // 缺陷不得使 worker panic。
             if matches!(control_msg, ControlMessage::Sentinel) {
                 tracing::warn!("received sentinel on send-side control channel; dropping");
                 continue;
@@ -795,8 +762,8 @@ async fn tcp_listener(
             let bytes = match serde_json::to_vec(&control_msg) {
                 Ok(b) => b,
                 Err(e) => {
-                    // Closed enum of small variants; serialization shouldn't
-                    // fail. If it ever does, log and skip rather than panic.
+                    // 小型变体的封闭枚举；序列化不应失败。
+                    // 如果真发生，记录并跳过而非 panic。
                     tracing::warn!(err = ?e, ?control_msg, "failed to serialize control message");
                     continue;
                 }
@@ -828,21 +795,21 @@ enum ControlAction {
 fn process_control_message(message: Bytes) -> Result<ControlAction> {
     match serde_json::from_slice::<ControlMessage>(&message)? {
         ControlMessage::Sentinel => {
-            // the client issued a sentinel message
-            // it has finished writing data and is now awaiting the server to close the connection
+            // 客户端发出了哨兵消息：
+            // 它已完成写数据，正等待服务器关闭连接。
             tracing::trace!("sentinel received; shutting down");
             Ok(ControlAction::Shutdown)
         }
         ControlMessage::Kill | ControlMessage::Stop => {
-            // Worker→frontend control direction only carries Sentinel. Kill/Stop
-            // here is a protocol violation; the caller turns this Err into a
-            // stream-local Kill rather than a process-fatal event.
+            // Worker→frontend 控制方向仅携带 Sentinel。此处的 Kill/Stop
+            // 是协议违反；调用方将该 Err 转为流局部的 Kill
+            // 而非进程致命事件。
             anyhow::bail!("unexpected control message on response stream");
         }
     }
 }
 
-// === SECTION: Tests — server bind, registration, tombstones, kill paths ===
+// === SECTION: 测试 —— server 绑定、注册、墓碑、kill 路径 ===
 #[cfg(test)]
 mod tests {
     //! ## 测试矩阵
@@ -878,7 +845,7 @@ mod tests {
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
 
-    // Mock resolver that always fails to simulate the fallback scenario
+    // 总是失败的模拟解析器，用于模拟回退场景
     struct FailingIpResolver;
 
     impl IpResolver for FailingIpResolver {
@@ -893,8 +860,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_stream_server_default_behavior() {
-        // Test that TcpStreamServer::new works with default options
-        // This verifies normal operation when IP detection succeeds
+        // 测试 TcpStreamServer::new 在默认选项下可用
+        // 验证 IP 检测成功时的正常运作
         let options = ServerOptions::default();
         let result = TcpStreamServer::new(options).await;
 
@@ -905,7 +872,7 @@ mod tests {
 
         let server = result.unwrap();
 
-        // Verify the server can be used by registering a stream
+        // 通过注册一个流验证服务器可用
         let context = Context::new(());
         let stream_options = StreamOptions::builder()
             .context(context.context())
@@ -916,7 +883,7 @@ mod tests {
 
         let pending_connection = server.register(stream_options).await;
 
-        // Verify connection info is available and valid
+        // 验证连接信息可用且有效
         let connection_info = pending_connection
             .recv_stream
             .as_ref()
@@ -927,7 +894,7 @@ mod tests {
         let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
-        // Should have a valid port assigned
+        // 应分配到一个有效端口
         assert!(
             socket_addr.port() > 0,
             "Server should be assigned a valid port number"
@@ -941,12 +908,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tcp_stream_server_fallback_to_loopback() {
-        // Test fallback behavior using a mock resolver that always fails
-        // This guarantees the fallback logic is triggered
+        // 使用总是失败的模拟解析器测试回退行为
+        // 这保证回退逻辑被触发
 
         let options = ServerOptions::builder().port(0).build().unwrap();
 
-        // Use the failing resolver to force the fallback
+        // 使用失败解析器迫使回退
         let result = TcpStreamServer::new_with_resolver(options, FailingIpResolver).await;
         assert!(
             result.is_ok(),
@@ -955,7 +922,7 @@ mod tests {
 
         let server = result.unwrap();
 
-        // Get the actual bound address by registering a stream
+        // 通过注册一个流获取实际绑定地址
         let context = Context::new(());
         let stream_options = StreamOptions::builder()
             .context(context.context())
@@ -975,14 +942,14 @@ mod tests {
         let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
         let socket_addr = tcp_info.address.parse::<std::net::SocketAddr>().unwrap();
 
-        // With the failing resolver, fallback should ALWAYS be used
+        // 使用失败解析器时，应始终使用回退
         let ip = socket_addr.ip();
         assert!(
             ip.is_loopback(),
             "Should use loopback when IP detection fails"
         );
 
-        // Verify it's specifically 127.0.0.1 (the fallback value from the patch)
+        // 验证其具体为 127.0.0.1（补丁中的回退值）
         assert_eq!(
             ip,
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
@@ -992,11 +959,11 @@ mod tests {
 
         println!("SUCCESS: Fallback to 127.0.0.1 was confirmed: {}", ip);
 
-        // The server should work with the fallback IP
+        // 服务器应能使用回退 IP 正常工作
         assert!(socket_addr.port() > 0, "Server should have a valid port");
     }
 
-    /// Create a test server using the failing IP resolver (falls back to loopback).
+    /// 使用失败 IP 解析器创建测试服务器（回退到 loopback）。
     async fn test_server() -> Arc<TcpStreamServer> {
         TcpStreamServer::new_with_resolver(
             ServerOptions::builder().port(0).build().unwrap(),
@@ -1006,7 +973,7 @@ mod tests {
         .unwrap()
     }
 
-    /// Helper: register a response stream and extract its subject string.
+    /// 辅助函数：注册一个响应流并提取其 subject 字符串。
     async fn register_and_get_subject(
         server: &TcpStreamServer,
     ) -> (
@@ -1028,7 +995,7 @@ mod tests {
         (tcp_info.subject, provider)
     }
 
-    /// Convenience constructor so tests don't repeat the struct literal.
+    /// 便捷构造函数，避免测试重复结构体字面量。
     fn make_eid(
         namespace: &str,
         servicegroup: &str,
@@ -1049,13 +1016,13 @@ mod tests {
 
         let (subject, provider) = register_and_get_subject(&server).await;
 
-        let id = make_eid("ns", "comp", "generate", 42);
+        let id = make_eid("ns", "sg", "generate", 42);
         assert!(server.associate_instance(&subject, &id).await);
 
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 1);
 
-        // The oneshot receiver should now resolve with an error (sender dropped)
+        // oneshot 接收端现在应以错误解析（sender 已 drop）
         let result = provider.await;
         assert!(result.is_err(), "Expected RecvError after cancellation");
     }
@@ -1068,22 +1035,22 @@ mod tests {
         let (subj2, prov2) = register_and_get_subject(&server).await;
         let (subj3, prov3) = register_and_get_subject(&server).await;
 
-        let id10 = make_eid("ns", "comp", "generate", 10);
-        let id20 = make_eid("ns", "comp", "generate", 20);
+        let id10 = make_eid("ns", "sg", "generate", 10);
+        let id20 = make_eid("ns", "sg", "generate", 20);
 
-        // Associate first two with instance 10, third with instance 20
+        // 前两个关联到实例 10，第三个关联到实例 20
         assert!(server.associate_instance(&subj1, &id10).await);
         assert!(server.associate_instance(&subj2, &id10).await);
         assert!(server.associate_instance(&subj3, &id20).await);
 
-        // Cancel instance 10 -- should cancel 2 subjects
+        // 取消实例 10 —— 应取消 2 个 subject
         let cancelled = server.cancel_instance_streams(&id10).await;
         assert_eq!(cancelled, 2);
 
         assert!(prov1.await.is_err());
         assert!(prov2.await.is_err());
 
-        // Instance 20 should be unaffected -- cancel it separately
+        // 实例 20 应不受影响 —— 单独取消
         let cancelled = server.cancel_instance_streams(&id20).await;
         assert_eq!(cancelled, 1);
         assert!(prov3.await.is_err());
@@ -1093,7 +1060,7 @@ mod tests {
     async fn test_cancel_instance_streams_nonexistent_instance() {
         let server = test_server().await;
 
-        let id = make_eid("ns", "comp", "generate", 999);
+        let id = make_eid("ns", "sg", "generate", 999);
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 0);
     }
@@ -1103,13 +1070,13 @@ mod tests {
         let server = test_server().await;
 
         let (subject, _provider) = register_and_get_subject(&server).await;
-        let id = make_eid("ns", "comp", "generate", 42);
+        let id = make_eid("ns", "sg", "generate", 42);
         assert!(server.associate_instance(&subject, &id).await);
 
-        // Cancel the individual subject
+        // 取消单个 subject
         server.cancel_recv_stream(&subject).await;
 
-        // Instance should have no remaining subjects
+        // 实例应无剩余 subject
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(
             cancelled, 0,
@@ -1121,7 +1088,7 @@ mod tests {
     async fn test_registered_stream_drop_runs_cleanup() {
         let server = test_server().await;
 
-        // Register a response stream but DON'T call into_parts -- just drop it
+        // 注册一个响应流但不调用 into_parts —— 直接 drop
         let context = Context::new(());
         let options = StreamOptions::builder()
             .context(context.context())
@@ -1133,24 +1100,24 @@ mod tests {
         let pending = server.register(options).await;
         let recv_stream = pending.recv_stream.unwrap();
 
-        // Get the subject before dropping
+        // drop 前获取 subject
         let tcp_info: TcpStreamConnectionInfo =
             recv_stream.connection_info.clone().try_into().unwrap();
         let subject = tcp_info.subject.clone();
 
-        // Verify it's in rx_subjects
+        // 验证其在 rx_subjects 中
         {
             let state = server.state.lock().await;
             assert!(state.rx_subjects.contains_key(&subject));
         }
 
-        // Drop the RegisteredStream -- RAII cleanup should fire
+        // drop RegisteredStream —— RAII cleanup 应触发
         drop(recv_stream);
 
-        // Give the spawned cleanup task a moment to run
+        // 给生成的 cleanup 任务片刻运行
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Verify it's been removed from rx_subjects
+        // 验证其已从 rx_subjects 移除
         {
             let state = server.state.lock().await;
             assert!(
@@ -1179,13 +1146,13 @@ mod tests {
             recv_stream.connection_info.clone().try_into().unwrap();
         let subject = tcp_info.subject.clone();
 
-        // Call into_parts to disarm the cleanup
+        // 调用 into_parts 以解除 cleanup
         let (_conn_info, _provider) = recv_stream.into_parts();
 
-        // Give any potential cleanup a moment to run
+        // 给任何潜在的 cleanup 片刻运行
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // The entry should still be in rx_subjects (cleanup was disarmed)
+        // 该条目应仍在 rx_subjects 中（cleanup 已被解除）
         {
             let state = server.state.lock().await;
             assert!(
@@ -1197,27 +1164,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_associate_after_cancel_is_immediately_cancelled() {
-        // Simulates the race: cancel_instance_streams fires before associate_instance.
+        // 模拟竞争：cancel_instance_streams 在 associate_instance 之前触发。
         let server = test_server().await;
 
-        let id = make_eid("ns", "comp", "generate", 42);
+        let id = make_eid("ns", "sg", "generate", 42);
 
-        // Cancel BEFORE any subject is registered (tombstone).
+        // 在任何 subject 注册前取消（墓碑）。
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 0);
 
-        // Now register a subject and try to associate it with the tombstoned instance.
+        // 现在注册一个 subject 并尝试将其关联到已墓碑化的实例。
         let (subject, provider) = register_and_get_subject(&server).await;
         let associated = server.associate_instance(&subject, &id).await;
 
-        // associate_instance should return false when the instance is tombstoned.
+        // 实例已墓碑化时 associate_instance 应返回 false。
         assert!(
             !associated,
             "associate_instance on a tombstoned instance should return false"
         );
 
-        // The provider should resolve with an error because associate_instance
-        // found the tombstone and immediately cancelled the subject.
+        // provider 应以错误解析，因为 associate_instance 发现墓碑
+        // 并立即取消了 subject。
         let result = provider.await;
         assert!(
             result.is_err(),
@@ -1229,16 +1196,16 @@ mod tests {
     async fn test_clear_tombstone_allows_new_associations() {
         let server = test_server().await;
 
-        let id = make_eid("ns", "comp", "generate", 42);
+        let id = make_eid("ns", "sg", "generate", 42);
 
         server.cancel_instance_streams(&id).await;
         server.clear_instance_tombstone(&id).await;
 
-        // Now associate should work normally (subject NOT cancelled).
+        // 现在 associate 应正常工作（subject 未被取消）。
         let (subject, _provider) = register_and_get_subject(&server).await;
         assert!(server.associate_instance(&subject, &id).await);
 
-        // Subject should be tracked, not cancelled.
+        // subject 应被跟踪，未被取消。
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(
             cancelled, 1,
@@ -1248,20 +1215,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_does_not_affect_sibling_portname() {
-        // Regression: cancelling "generate" must not cancel "prefill" subjects
-        // that share the same instance_id (same backend runtime).
+        // 回归：取消 "generate" 不得取消共享同一 instance_id
+        // （同一后端运行时）的 "prefill" subject。
         let server = test_server().await;
 
         let (gen_subj, gen_prov) = register_and_get_subject(&server).await;
         let (pre_subj, pre_prov) = register_and_get_subject(&server).await;
 
-        let gen_id = make_eid("ns", "comp", "generate", 42);
-        let pre_id = make_eid("ns", "comp", "prefill", 42);
+        let gen_id = make_eid("ns", "sg", "generate", 42);
+        let pre_id = make_eid("ns", "sg", "prefill", 42);
 
         assert!(server.associate_instance(&gen_subj, &gen_id).await);
         assert!(server.associate_instance(&pre_subj, &pre_id).await);
 
-        // Cancel only the "generate" portname's subjects.
+        // 仅取消 "generate" portname 的 subject。
         let cancelled = server.cancel_instance_streams(&gen_id).await;
         assert_eq!(
             cancelled, 1,
@@ -1269,7 +1236,7 @@ mod tests {
         );
         assert!(gen_prov.await.is_err());
 
-        // prefill must still be tracked.
+        // prefill 必须仍被跟踪。
         let still_pending = server.cancel_instance_streams(&pre_id).await;
         assert_eq!(still_pending, 1, "prefill subject should still be tracked");
         assert!(pre_prov.await.is_err());
@@ -1277,16 +1244,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_tombstone_is_portname_scoped() {
-        // Tombstoning "generate" must not prevent new associations on "prefill"
-        // for the same instance_id.
+        // 墓碑化 "generate" 不得阻止同一 instance_id 下 "prefill"
+        // 的新关联。
         let server = test_server().await;
 
-        let gen_id = make_eid("ns", "comp", "generate", 42);
-        let pre_id = make_eid("ns", "comp", "prefill", 42);
+        let gen_id = make_eid("ns", "sg", "generate", 42);
+        let pre_id = make_eid("ns", "sg", "prefill", 42);
 
         server.cancel_instance_streams(&gen_id).await;
 
-        // A new subject for "generate" should be rejected.
+        // "generate" 的新 subject 应被拒绝。
         let (gen_subj, gen_prov) = register_and_get_subject(&server).await;
         assert!(
             !server.associate_instance(&gen_subj, &gen_id).await,
@@ -1294,7 +1261,7 @@ mod tests {
         );
         assert!(gen_prov.await.is_err());
 
-        // A new subject for "prefill" with the same instance_id should be accepted.
+        // 相同 instance_id 下 "prefill" 的新 subject 应被接受。
         let (pre_subj, _pre_prov) = register_and_get_subject(&server).await;
         assert!(
             server.associate_instance(&pre_subj, &pre_id).await,
@@ -1306,27 +1273,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_does_not_affect_different_servicegroup() {
-        // Regression: two services with different (namespace, servicegroup) but the
-        // same portname name and the same pod-backed instance_id must not interfere,
-        // even though they share a single TcpStreamServer runtime.
+        // 回归：两个 (namespace, servicegroup) 不同但 portname 名称相同、
+        // 且同一 pod 支撑 instance_id 的服务不得相互干扰，
+        // 即使它们共享同一个 TcpStreamServer 运行时。
         let server = test_server().await;
 
         let (subj_a, prov_a) = register_and_get_subject(&server).await;
         let (subj_b, prov_b) = register_and_get_subject(&server).await;
 
-        // Same portname name + instance_id, different namespace/servicegroup.
-        let id_a = make_eid("ns-a", "comp-a", "generate", 42);
-        let id_b = make_eid("ns-b", "comp-b", "generate", 42);
+        // portname 名称 + instance_id 相同，namespace/servicegroup 不同。
+        let id_a = make_eid("ns-a", "sg-a", "generate", 42);
+        let id_b = make_eid("ns-b", "sg-b", "generate", 42);
 
         assert!(server.associate_instance(&subj_a, &id_a).await);
         assert!(server.associate_instance(&subj_b, &id_b).await);
 
-        // Cancel service A -- only subj_a should be affected.
+        // 取消服务 A —— 仅 subj_a 应受影响。
         let cancelled = server.cancel_instance_streams(&id_a).await;
         assert_eq!(cancelled, 1, "Only service-A subject should be cancelled");
         assert!(prov_a.await.is_err());
 
-        // Service B subject must still be pending.
+        // 服务 B 的 subject 必须仍处于待处理。
         let still_tracked = server.cancel_instance_streams(&id_b).await;
         assert_eq!(still_tracked, 1, "Service-B subject should be unaffected");
         assert!(prov_b.await.is_err());
@@ -1334,33 +1301,33 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_tombstone_expires_after_ttl() {
-        // After TOMBSTONE_TTL elapses, a previously-tombstoned identity must
-        // accept new associations again, AND the entry must be physically
-        // pruned from `removed_instances` so the set remains bounded.
+        // TOMBSTONE_TTL 过去后，之前已墓碑化的身份必须再次接受
+        // 新关联，且该条目必须从 `removed_instances` 中物理剔除，
+        // 使集合保持有界。
         let server = test_server().await;
 
-        let id = make_eid("ns", "comp", "generate", 42);
+        let id = make_eid("ns", "sg", "generate", 42);
 
-        // Tombstone the identity.
+        // 墓碑化该身份。
         server.cancel_instance_streams(&id).await;
         {
             let state = server.state.lock().await;
             assert!(state.removed_instances.contains_key(&id));
         }
 
-        // Advance past the TTL.
+        // 推进超过 TTL。
         tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
 
-        // associate_instance for the same identity should now succeed (no
-        // longer tombstoned). Any new subject must be tracked normally.
+        // 同一身份的 associate_instance 现在应成功（不再被墓碑化）。
+        // 任何新 subject 必须被正常跟踪。
         let (subject, _provider) = register_and_get_subject(&server).await;
         assert!(
             server.associate_instance(&subject, &id).await,
             "tombstone older than TTL should not block association"
         );
 
-        // The expired tombstone must have been pruned (lazy pruning fires on
-        // every associate_instance/cancel_instance_streams call).
+        // 过期墓碑必须已被剔除（每次 associate_instance/
+        // cancel_instance_streams 调用都会触发懒惰剔除）。
         {
             let state = server.state.lock().await;
             assert!(
@@ -1372,14 +1339,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_tombstone_within_ttl_blocks_associate() {
-        // Regression net for the original tombstone fix: a tombstone younger
-        // than TTL must still cancel late-arriving associate_instance() calls.
+        // 原墓碑修复的回归保障：年龄小于 TTL 的墓碑
+        // 必须仍取消迟到的 associate_instance() 调用。
         let server = test_server().await;
 
-        let id = make_eid("ns", "comp", "generate", 42);
+        let id = make_eid("ns", "sg", "generate", 42);
         server.cancel_instance_streams(&id).await;
 
-        // Advance only a small fraction of the TTL.
+        // 仅推进 TTL 的一小部分。
         tokio::time::advance(Duration::from_secs(1)).await;
 
         let (subject, provider) = register_and_get_subject(&server).await;
@@ -1392,12 +1359,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_tombstone_lazy_prune_on_cancel() {
-        // Old tombstones must be pruned on the next cancel_instance_streams
-        // call, regardless of which identity is being tombstoned.
+        // 旧墓碑必须在下一次 cancel_instance_streams 调用时被剔除，
+        // 无论正在墓碑化哪个身份。
         let server = test_server().await;
 
-        let id_old = make_eid("ns", "comp", "generate", 1);
-        let id_new = make_eid("ns", "comp", "generate", 2);
+        let id_old = make_eid("ns", "sg", "generate", 1);
+        let id_new = make_eid("ns", "sg", "generate", 2);
 
         server.cancel_instance_streams(&id_old).await;
         tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
@@ -1417,14 +1384,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_tombstone_only_affects_named_identity() {
-        // Documents the monotonic-lease invariant: `clear_instance_tombstone`
-        // for one PortNameInstanceId must not touch a sibling entry. With etcd
-        // lease IDs this defensive code rarely fires (new lease = new
-        // PortNameInstanceId), but the per-key scope must hold.
+        // 记录单调租约不变量：对某个 PortNameInstanceId 的
+        // `clear_instance_tombstone` 不得触及同级条目。使用 etcd
+        // 租约 ID 时这段防御性代码很少触发（新租约 = 新
+        // PortNameInstanceId），但按键作用域必须成立。
         let server = test_server().await;
 
-        let id_a = make_eid("ns", "comp", "generate", 1);
-        let id_b = make_eid("ns", "comp", "generate", 2);
+        let id_a = make_eid("ns", "sg", "generate", 1);
+        let id_b = make_eid("ns", "sg", "generate", 2);
 
         server.cancel_instance_streams(&id_a).await;
         server.clear_instance_tombstone(&id_b).await;
@@ -1438,22 +1405,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_tombstone_scoped_to_full_identity() {
-        // A tombstone on (ns-a, comp-a, generate, 42) must not block
-        // associations on (ns-b, comp-b, generate, 42).
+        // 对 (ns-a, sg-a, generate, 42) 的墓碑不得阻止
+        // (ns-b, sg-b, generate, 42) 上的关联。
         let server = test_server().await;
 
-        let id_a = make_eid("ns-a", "comp-a", "generate", 42);
-        let id_b = make_eid("ns-b", "comp-b", "generate", 42);
+        let id_a = make_eid("ns-a", "sg-a", "generate", 42);
+        let id_b = make_eid("ns-b", "sg-b", "generate", 42);
 
-        // Tombstone only service A.
+        // 仅墓碑化服务 A。
         server.cancel_instance_streams(&id_a).await;
 
-        // Service A is tombstoned — new association is rejected.
+        // 服务 A 已墓碑化 —— 新关联被拒绝。
         let (subj_a, prov_a) = register_and_get_subject(&server).await;
         assert!(!server.associate_instance(&subj_a, &id_a).await);
         assert!(prov_a.await.is_err());
 
-        // Service B with same portname name + instance_id must be accepted.
+        // 服务 B 使用相同 portname 名称 + instance_id 必须被接受。
         let (subj_b, _prov_b) = register_and_get_subject(&server).await;
         assert!(
             server.associate_instance(&subj_b, &id_b).await,
@@ -1466,9 +1433,9 @@ mod tests {
     type TestFramedWrite = FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>;
     type TestResponseStream = (TestFramedRead, TestFramedWrite, StreamReceiver);
 
-    /// Stand up a TcpStreamServer, register a response stream, connect a
-    /// client, drive the handshake + prologue, and return the client-side
-    /// framed reader/writer along with the receiver.
+    /// 启动一个 TcpStreamServer，注册一个响应流，连接一个
+    /// 客户端，驱动握手 + 序幕，并返回客户端的帧化
+    /// 读/写器以及接收器。
     async fn open_registered_response_stream() -> TestResponseStream {
         let options = ServerOptions::builder().port(0).build().unwrap();
         let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
@@ -1510,8 +1477,8 @@ mod tests {
             .await
             .unwrap();
 
-        // SAFETY (test-only): healthy localhost handshake always resolves all
-        // three layers; a panic here means the harness is broken.
+        // SAFETY（仅测试）：健康的 localhost 握手总能解析出全部
+        // 三层；此处 panic 意味着测试脚手架已损坏。
         let receiver = tokio::time::timeout(std::time::Duration::from_secs(1), stream_provider)
             .await
             .expect("server should establish response stream within timeout")
@@ -1522,8 +1489,8 @@ mod tests {
     }
 
     async fn recv_control_message(framed_reader: &mut TestFramedRead) -> ControlMessage {
-        // SAFETY (test-only): a misbehaving server in any of these layers is
-        // exactly the harness failure we want surfaced as a test panic.
+        // SAFETY（仅测试）：这些层中任一层出现行为异常的服务器
+        // 正是我们希望以测试 panic 形式暴露的测试脚手架故障。
         let message = tokio::time::timeout(std::time::Duration::from_secs(1), framed_reader.next())
             .await
             .expect("server should send a control message within timeout")
@@ -1534,10 +1501,9 @@ mod tests {
         serde_json::from_slice(header.expect("control header missing").as_ref()).unwrap()
     }
 
-    /// Sending an unexpected control message (Stop or Kill from the data
-    /// direction) is a protocol violation. The server's
-    /// network_receive_handler must reply with ControlMessage::Kill on
-    /// that stream alone, not panic.
+    /// 发送意外的控制消息（来自数据方向的 Stop 或 Kill）
+    /// 是协议违规。服务器的 network_receive_handler 必须仅在
+    /// 该流上以 ControlMessage::Kill 回复，而不是 panic。
     #[tokio::test]
     async fn test_tcp_stream_server_sends_kill_on_unexpected_control_message() {
         let (mut framed_reader, mut framed_writer, _receiver) =
@@ -1557,9 +1523,9 @@ mod tests {
         );
     }
 
-    /// A framing/decode error from the worker side is unrecoverable for
-    /// this stream but must not panic the worker. Server should send Kill
-    /// and tear down only this connection.
+    /// 来自 worker 侧的帧化/解码错误对该流不可恢复，
+    /// 但不得使 worker panic。服务器应发送 Kill 并仅
+    /// 拆除该连接。
     #[tokio::test]
     async fn test_tcp_stream_server_sends_kill_on_read_error() {
         let (mut framed_reader, framed_writer, _receiver) = open_registered_response_stream().await;
@@ -1575,8 +1541,8 @@ mod tests {
         );
     }
 
-    /// Sentinel is supposed to be header-only. A misbehaving client that
-    /// attaches a data payload must not panic the worker via assert!().
+    /// Sentinel 应为仅含报头。附加数据负载的行为异常客户端
+    /// 不得通过 assert!() 使 worker panic。
     #[tokio::test]
     async fn test_tcp_stream_server_sends_kill_on_sentinel_with_data() {
         let (mut framed_reader, mut framed_writer, _receiver) =
@@ -1600,9 +1566,9 @@ mod tests {
         );
     }
 
-    /// The prologue must be a HeaderOnly frame. A non-HeaderOnly prologue
-    /// (data-only or mixed) must surface as Err to the requester rather
-    /// than panic the worker.
+    /// 序幕必须是 HeaderOnly 帧。非 HeaderOnly 的序幕
+    /// （仅数据或混合）必须以 Err 向请求方暴露，
+    /// 而不是使 worker panic。
     #[tokio::test]
     async fn test_tcp_stream_server_returns_error_on_invalid_prologue() {
         let options = ServerOptions::builder().port(0).build().unwrap();
@@ -1636,7 +1602,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Send a data-only frame in the prologue slot.
+        // 在序幕位置发送一个仅数据帧。
         framed_writer
             .send(TwoPartMessage::from_data(Bytes::from_static(
                 b"not a prologue",
@@ -1648,7 +1614,7 @@ mod tests {
             .await
             .expect("stream provider should resolve quickly")
             .expect("stream provider channel should not be dropped");
-        // StreamReceiver doesn't impl Debug, so we can't use `.expect_err`.
+        // StreamReceiver 未实现 Debug，因此无法使用 `.expect_err`。
         match outcome {
             Err(err) => assert!(
                 err.contains("malformed prologue"),

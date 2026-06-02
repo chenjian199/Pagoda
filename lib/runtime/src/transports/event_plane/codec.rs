@@ -11,7 +11,7 @@
 //! - 对热路径几乎零开销：内部 `match` 在常量分支上会被编译器 devirtualize。
 //!
 //! 选择 MessagePack 而非 JSON / bincode：
-//! - 比 JSON 小、比 bincode 兼容性好（带字段名版本 evolutoin 友好）；
+//! - 比 JSON 小、比 bincode 兼容性好（带字段名版本演进友好）；
 //! - rmp-serde 与本仓库已有依赖一致。
 //!
 //! ## 外部契约
@@ -20,11 +20,10 @@
 //! - [`MsgpackCodec`]：上述方法的具体实现；`name() == "msgpack"`。
 //!
 //! ## 实现要点
-//! - 用 `rmp_serde::to_vec_named` 编码（带字段名）—— 便于跨版本 evolution；
+//! - 用 `rmp_serde::to_vec_named` 编码（带字段名）—— 便于跨版本演进；
 //!   解码侧用 `from_slice`，rmp_serde 同时支持带名 / 不带名两种 wire 格式。
-//! - lib-copy 把 `encode/decode_envelope` 在 `Codec` 上做 match，又在
-//!   `MsgpackCodec` 上**重复**写一遍。本实现把所有"实际编解码"集中在
-//!   `MsgpackCodec` 里，`Codec` 上的方法直接 delegate；逻辑等价、消除重复。
+//! - 所有"实际编解码"集中在 `MsgpackCodec` 里，`Codec` 上的方法直接
+//!   delegate，避免重复实现。
 
 use anyhow::Result;
 use bytes::Bytes;

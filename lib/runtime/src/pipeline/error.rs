@@ -4,30 +4,30 @@
 //! # `pipeline::error` —— pipeline 错误类型与下转扩展
 //!
 //! ## 设计意图
-//! pipeline 的错误路径跨多个概念层（本地 graph / 远程 NATS / TCP 传输 /
-//! 序列化），需要一个 "万能错误类型" 能被制造为 `anyhow::Error` 在 trait 边界上
-//! 那传，同时上层调用者仍能 "取出原始类型" 以做细化处理。本文件提供：
-//! ¹ 枪纹枚举 `PipelineError`；² `PipelineErrorExt` 扩展 trait 把 `anyhow::Error`
-//! 下转为 `PipelineError`；³ `TwoPartCodec` 代码所需的 `TwoPartCodecError` 枚举。
+//! pipeline 的错误路径跨多个概念层（本地图 / 远程 NATS / TCP 传输 / 序列化），
+//! 需要一种“通用错误类型”能够在 trait 边界上被封装为 `anyhow::Error` 传递，
+//! 同时上层调用者仍能“取出原始类型”做细化处理。本文件提供：
+//! ¹ `PipelineError` 枚举；² `PipelineErrorExt` 扩展 trait，把 `anyhow::Error`
+//! 下转为 `PipelineError`；³ `TwoPartCodec` 所需的 `TwoPartCodecError` 枚举。
 //!
 //! ## 外部契约
 //! - `pub use anyhow::{Context, Error, Result, anyhow, anyhow as error, bail, ensure}`：
-//!   重导出 anyhow 公共名称，pipeline 下游可直接从本模块拿到完整错误反应面。
+//!   重导出 anyhow 的公共名称，pipeline 下游可直接从本模块拿到完整错误面。
 //! - `trait PipelineErrorExt for Error`：
-//!   - `try_into_pipeline_error(self) -> Result<PipelineError, Error>` 返回 `Ok` 均表示
+//!   - `try_into_pipeline_error(self) -> Result<PipelineError, Error>` 返回 `Ok` 表示
 //!     原始错误是 `PipelineError`。
 //!   - `either_pipeline_error(self) -> either::Either<PipelineError, Error>` 提供双分支取回。
-//! - `enum PipelineError`：全部变体与其 `#[error("...")]` 消息作为契约；
-//!   什么场景会给出什么错误变体是契约的一部分。
+//! - `enum PipelineError`：全部变体与其 `#[error("...")]` 消息都属于契约；
+//!   不同场景返回哪个错误变体也是契约的一部分。
 //! - `enum TwoPartCodecError`：仅供 TwoPartCodec 传输业务使用。
 //!
 //! ## 实现要点
 //! - `try_into_pipeline_error` 直接委托给 `self.downcast::<PipelineError>()`，
-//!   不帕生中间变量；保持与基线严格一致。
-//! - `either_pipeline_error` 复用 `self.downcast::<PipelineError>()` 而非再委托一次
-//!   `try_into_pipeline_error()`，避免某些未来修改意外引入的间接调用。
-//! - `PipelineError` 中各个 `#[from]` 转接 NATS / IO / Prometheus / IP 等错误类型，
-//!   让业务代码可以直接用 `?` 上传，避免手写 `map_err`。
+//!   不额外生成中间变量，保持稳定。
+//! - `either_pipeline_error` 复用 `self.downcast::<PipelineError>()`，而不是再转一层
+//!   `try_into_pipeline_error()`，避免未来修改引入不必要的间接调用。
+//! - `PipelineError` 中各个 `#[from]` 会转接 NATS / IO / Prometheus / IP 等错误类型，
+//!   让业务代码可以直接用 `?` 向上抛，避免手写 `map_err`。
 
 use async_nats::error::Error as NatsError;
 
@@ -36,11 +36,11 @@ pub use anyhow::{Context, Error, Result, anyhow, anyhow as error, bail, ensure};
 // === SECTION: PipelineErrorExt 下转扩展 ===
 
 pub trait PipelineErrorExt {
-    /// Downcast the [`Error`] to a [`PipelineError`]
+    /// 将 [`Error`] 下转为 [`PipelineError`]。
     fn try_into_pipeline_error(self) -> Result<PipelineError, Error>;
 
-    /// If the [`Error`] can be downcast to a [`PipelineError`], then the left variant is returned,
-    /// otherwise the right variant is returned.
+    /// 如果 [`Error`] 能下转为 [`PipelineError`]，则返回左分支；
+    /// 否则返回右分支。
     fn either_pipeline_error(self) -> either::Either<PipelineError, Error>;
 }
 
@@ -61,32 +61,30 @@ impl PipelineErrorExt for Error {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
-    /// For starter, to remove as code matures.
+    /// 起始占位，待代码成熟后移除。
     #[error("Generic error: {0}")]
     Generic(String),
 
-    /// Edges can only be set once. This error is thrown on subsequent attempts to set an edge.s
+    /// 边只能设置一次。后续再次设置时会抛出该错误。
     #[error("Link failed: Edge already set")]
     EdgeAlreadySet,
 
-    /// The source node is not connected to an edge.
+    /// 源节点没有连接到任何边。
     #[error("Disconnected source; no edge on which to send data")]
     NoEdge,
 
     #[error("SegmentSink is not connected to an EgressPort")]
     NoNetworkEdge,
 
-    /// In the interim between when a request was made and when the stream was received, the
-    /// requesting task was dropped. This maybe a logic error in the pipeline; and become a
-    /// panic/fatal error in the future. This error is thrown when the `on_data` method of a
-    /// terminating sink either cannot find the `oneshot` channel sender or the corresponding
-    /// receiver was dropped
+    /// 在请求发出到流收到之间，请求任务被丢弃。
+    /// 这可能是 pipeline 的逻辑错误；未来可能升级为 panic / 致命错误。
+    /// 当终止型 sink 的 `on_data` 无法找到 `oneshot` 发送端，或对应接收端已被丢弃时，
+    /// 就会抛出这个错误。
     #[error("Unlinked request; initiating request task was dropped or cancelled")]
     DetachedStreamReceiver,
 
-    // In the interim between when a response was made and when the stream was received, the
-    // Sender for the stream was dropped. This maybe a logic error in the pipeline; and become a
-    // panic/fatal error in the future.
+    // 在响应产生到流收到之间，流的 Sender 被丢弃。
+    // 这可能是 pipeline 的逻辑错误；未来可能升级为 panic / 致命错误。
     #[error("Unlinked response; response task was dropped or cancelled")]
     DetachedStreamSender,
 
@@ -150,7 +148,7 @@ pub enum PipelineError {
     #[error("NATS KV Err: {0} for bucket '{1}")]
     KeyValueError(String, String),
 
-    /// All instances are busy and cannot handle new requests
+    /// 所有实例都很忙，无法处理新请求。
     #[error("Service temporarily unavailable: {0}")]
     ServiceOverloaded(String),
 }

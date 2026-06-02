@@ -40,20 +40,19 @@ use bytes::Bytes;
 
 // === SECTION: NatsRequestClient 结构与私有 helper ===
 
-/// NATS implementation of RequestPlaneClient
+/// `RequestPlaneClient` 的 NATS 实现。
 ///
-/// This client wraps the async_nats::Client and adapts it to the
-/// unified RequestPlaneClient interface.
+/// 该客户端包装 `async_nats::Client`，把它适配到统一的 `RequestPlaneClient` 接口。
 pub struct NatsRequestClient {
     client: async_nats::Client,
 }
 
 impl NatsRequestClient {
-    /// Create a new NATS request client
+    /// 创建一个新的 NATS 请求客户端。
     ///
-    /// # Arguments
+    /// # 参数
     ///
-    /// * `client` - The underlying NATS client
+    /// * `client` —— 底层 NATS 客户端
     pub fn new(client: async_nats::Client) -> Self {
         Self { client }
     }
@@ -113,8 +112,8 @@ impl RequestPlaneClient for NatsRequestClient {
     }
 
     fn is_healthy(&self) -> bool {
-        // Check if NATS client is connected
-        // NATS client doesn't expose connection state directly, assume healthy
+        // 检查 NATS 客户端是否已连接；
+        // NATS 客户端不直接暴露连接状态，这里默认乐观地认为健康。
         true
     }
 
@@ -132,8 +131,8 @@ impl RequestPlaneClient for NatsRequestClient {
     }
 
     async fn close(&self) -> Result<()> {
-        // NATS client doesn't have an explicit close method
-        // Connection is managed by the client lifecycle
+        // NATS 客户端没有显式的 close 方法；
+        // 连接由客户端自身的生命周期负责管理。
         Ok(())
     }
 }

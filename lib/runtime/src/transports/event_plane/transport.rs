@@ -16,7 +16,7 @@
 //! - [`EventTransportRx`]：`async fn subscribe(&self, &str) -> Result<WireStream>` + `kind()`
 //!
 //! ## 实现要点
-//! 完全相同的对外签名；本文件没有任何运行时逻辑可发散。文档采用
+//! 本文件只定义对外签名，没有任何运行时逻辑。文档采用
 //! 统一的"## 设计意图 / 外部契约"格式以与本仓库其它模块对齐。
 
 use anyhow::Result;

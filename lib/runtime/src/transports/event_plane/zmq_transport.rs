@@ -34,8 +34,8 @@
 //!    早返回点从 `start_socket_pump` 的主循环里挪出来，作为 `Result<Bytes,
 //!    PumpDecodeError>`；主循环变成"recv → decode → broadcast"三步直叙。
 //! 2. **常量 `EXPECTED_FRAME_COUNT = 4`**，告别裸 4。
-//! 3. **空 portname 列表错误信息**与 lib-copy 完全一致（"Cannot connect to
-//!    zero portnames"）—— 补充测试在断言该字符串，不能动。
+//! 3. **空 portname 列表错误信息**为固定字面值（"Cannot connect to
+//!    zero portnames"）—— 补充测试在断言该字符串，不能改动。
 //! 4. publisher 的 `Mutex<Publish>` 保留 —— ZMQ socket 对 send 不是 Sync 安全，
 //!    必须串行化。这是 ZMQ 协议本身的约束，无法发散。
 
@@ -528,7 +528,7 @@ mod tests {
         }
     }
 
-    // === SECTION: 合并自原 mod supplemental_tests ===
+    // === SECTION: 合并自 supplemental_tests 模块 ===
 
     async fn reserve_tcp_endpoint() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -594,7 +594,7 @@ mod tests {
     /// ## 测试过程
     /// 空 portname 列表传给 connect_multiple，断言报特定字符串错误。
     /// ## 意义
-    /// 锁定错误信息字面值（与 lib-copy 一致）。
+    /// 锁定错误信息字面值。
     #[tokio::test]
     async fn zmq_pub_connect_multiple_rejects_empty_input() {
         let err = ZmqPubTransport::connect_multiple(&[], "topic")

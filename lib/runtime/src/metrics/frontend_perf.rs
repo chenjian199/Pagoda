@@ -161,7 +161,7 @@ impl StageGuard {
 
 impl Drop for StageGuard {
     fn drop(&mut self) {
-        // 保留独立的 `gauge` 局部以匹配旧实现的结构，便于 hot-path 调试断点。
+        // 单独提取 `gauge` 局部变量，便于在 hot-path 上设置调试断点。
         let gauge = &self.gauge;
         gauge.dec();
     }

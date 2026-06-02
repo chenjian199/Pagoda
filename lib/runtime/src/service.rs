@@ -32,8 +32,8 @@
 //!     `try_parse_service_info` 助手负责“空 payload 跳过 + 解析失败记日志 + 返回 Option”；
 //!     主环只需 `if let Some(info) = ...` 推入 `Vec`；
 //!   * `into_portnames` 由 `.map(...).flatten()` 改为 `.flat_map(...)`，仅为习惯性表达。
-//! - **不**变动任何错误文本、`try_stream!` 框架、NATS 财产调用路径与日志级别，
-//!   以保证对外可观察行为与基线完全一致。
+//! - **不**变动任何错误文本、`try_stream!` 框架、NATS 调用路径与日志级别，
+//!   以保证对外可观察行为保持稳定。
 
 // TODO: 整个模块后续仍需重构。
 //

@@ -9,7 +9,7 @@
 //! 对应的 `PushWorkHandler`。
 //!
 //! ## 外部契约
-//! - 公开类型与方法完全一致；`address() -> tcp://host:port` /
+//! - 公开类型与方法是稳定契约；`address() -> tcp://host:port` /
 //!   `transport_name() -> "tcp"` / `is_healthy()` 是契约。
 //! - portname path 路由表与错误响应格式不可改，跨语言客户端依赖。
 //!
@@ -19,10 +19,10 @@
 //! - 过载控制：有插入 admission controller 接点，限流拒绝转化为
 //!   `"Server overloaded"` 错误帧发回。
 
-//! Shared TCP Server with PortName Multiplexing
+//! 带 portname 复用的共享 TCP 服务器
 //!
-//! Provides a shared TCP server that can handle multiple portnames on a single port
-//! by adding portname routing to the TCP wire protocol.
+//! 通过在 TCP wire protocol 中加入 portname 路由，
+//! 提供一个可在单个端口上处理多个 portname 的共享 TCP 服务器。
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
@@ -46,16 +46,16 @@ use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-/// Default worker pool size for TCP request handling
+/// TCP 请求处理的默认 worker 池大小
 const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
-/// Default work queue size for TCP request handling
-/// this is 4X the worker pool size to handle burst traffic
+/// TCP 请求处理的默认工作队列大小
+/// 这是 worker 池大小的 4 倍，用于承接突发流量。
 const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
 
 // === SECTION: [1] 工作池规模环境配置 ===
 
-/// Get worker pool size from environment or use default
+/// 从环境变量读取 worker 池大小，或使用默认值。
 fn get_worker_pool_size() -> usize {
     std::env::var("PGD_TCP_WORKER_POOL_SIZE")
         .ok()
@@ -63,7 +63,7 @@ fn get_worker_pool_size() -> usize {
         .unwrap_or(DEFAULT_WORKER_POOL_SIZE)
 }
 
-/// Get work queue size from environment or use default
+/// 从环境变量读取工作队列大小，或使用默认值。
 fn get_work_queue_size() -> usize {
     std::env::var("PGD_TCP_WORK_QUEUE_SIZE")
         .ok()
@@ -73,12 +73,12 @@ fn get_work_queue_size() -> usize {
 
 // === SECTION: [2] 在飞任务 RAII 计数守卫 ===
 
-/// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
-/// `Drop` decrements, so a single owner expresses the "task is active" interval.
-/// Constructed in the dispatcher *before* `tokio::spawn` and moved into the
-/// future, the gauge is incremented before any worker thread can poll the task,
-/// and the decrement runs on every exit path — normal return, panic, or
-/// cancellation.
+/// `WORK_HANDLER_POOL_ACTIVE_TASKS` 的 RAII 守卫。`new()` 负责递增，
+/// `Drop` 负责递减，因此单一所有者即可表达“任务处于活跃状态”的区间。
+/// 它在 dispatcher 中、`tokio::spawn` 之前构造并移动进 future，
+/// 因而在任何 worker 线程轮询该任务之前，仪表值就已递增，
+/// 且递减会在每条退出路径上执行——正常返回、panic，或
+/// 取消。
 struct ActiveTaskGuard;
 
 impl ActiveTaskGuard {
@@ -96,7 +96,7 @@ impl Drop for ActiveTaskGuard {
 
 // === SECTION: [3] 工作队列项 ===
 
-/// Work item for the worker pool
+/// worker 池中的工作项
 struct WorkItem {
     service_handler: Arc<dyn PushWorkHandler>,
     payload: Bytes,
@@ -111,15 +111,15 @@ struct WorkItem {
 
 // === SECTION: [4] 共享 TCP 服务器与处理器 ===
 
-/// Shared TCP server that handles multiple portnames on a single port
+/// 在单个端口上处理多个 portname 的共享 TCP 服务器
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<PortNameHandler>>>,
-    /// The address to bind to (may have port 0 for OS-assigned port)
+    /// 要绑定的地址（端口可为 0，由操作系统分配）
     bind_addr: SocketAddr,
-    /// The actual bound address (populated after bind_and_start, contains actual port)
+    /// 实际绑定地址（在 bind_and_start 后填充，包含实际端口）
     actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
-    /// Channel for sending work to the worker pool
+    /// 向 worker 池发送工作项的通道
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
 }
 
@@ -145,9 +145,9 @@ impl SharedTcpServer {
             work_queue_size
         );
 
-        // Publish static capacities so dashboards can compute saturation ratios.
-        // These gauges are process-global and harmless to re-set if multiple TCP
-        // servers are spun up in the same process (tests).
+        // 发布静态容量，方便仪表板计算饱和率。
+        // 这些 gauge 是进程全局的；如果同一进程里启动多个 TCP
+        // server，重复设置它们也没有问题（测试场景）。
         WORK_HANDLER_POOL_CAPACITY.set(crate::metrics::prometheus_names::clamp_u64_to_i64(
             worker_pool_size as u64,
         ));
@@ -155,27 +155,27 @@ impl SharedTcpServer {
             work_queue_size as u64,
         ));
 
-        // Create bounded channel for work items
+        // 为工作项创建有界通道。
         let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
 
-        // Start worker pool
+        // 启动工作池。
         Self::start_worker_pool(worker_pool_size, work_rx, cancellation_token.clone());
 
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
-            // address we requested to bind to.
+            // 我们请求绑定的地址。
             bind_addr,
-            // actual address after free port assignment (if PGD_TCP_RPC_PORT is not specified)
+            // 若未指定 PGD_TCP_RPC_PORT，这里保存的是端口自动分配后的实际地址。
             actual_addr: RwLock::new(None),
             cancellation_token,
             work_tx,
         })
     }
 
-    /// Start the worker pool dispatcher that processes requests with bounded concurrency
+    /// 启动 worker 池调度器，以有界并发处理请求。
     ///
-    /// Uses a single receiver with a semaphore to bound concurrent execution,
-    /// avoiding mutex contention that would serialize all workers.
+    /// 使用单个 receiver 配合 semaphore 限制并发执行，
+    /// 避免 mutex 争用把所有 worker 串行化。
     fn start_worker_pool(
         pool_size: usize,
         mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
@@ -203,14 +203,14 @@ impl SharedTcpServer {
                             tracing::trace!("TCP worker dispatcher shutting down: channel closed");
                             break;
                         };
-                        // Item is out of the mpsc channel — drop queue_depth now so the
-                        // gauge strictly reflects channel occupancy. Permit-acquire wait is
-                        // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
+                        // 项已经离开 mpsc 通道——此时就减少 queue_depth，
+                        // 让 gauge 严格反映通道占用。等待获取 permit 的时间
+                        // 由 WORK_HANDLER_PERMIT_WAIT_SECONDS 单独跟踪。
                         WORK_HANDLER_QUEUE_DEPTH.dec();
 
-                        // Acquire permit before spawning (bounds concurrency). Time the wait so
-                        // pool starvation (permit exhaustion) shows up as rising p99 in
-                        // `pagoda_work_handler_permit_wait_seconds`.
+                        // 在 spawn 前获取 permit（限制并发）。同时记录等待时间，
+                        // 让池饥饿（permit 耗尽）体现在 `pagoda_work_handler_permit_wait_seconds`
+                        // 的 p99 上升中。
                         let permit_wait_start = Instant::now();
                         let permit = match semaphore.clone().acquire_owned().await {
                             Ok(p) => p,
@@ -222,11 +222,10 @@ impl SharedTcpServer {
                         WORK_HANDLER_PERMIT_WAIT_SECONDS
                             .observe(permit_wait_start.elapsed().as_secs_f64());
 
-                        // Construct the guard before spawn (inc runs synchronously
-                        // here, so the gauge is never observed negative even if
-                        // the future completes on another worker first), then
-                        // move ownership into the future — Drop handles dec on
-                        // every exit path.
+                        // 在 spawn 前构造守卫（这里 inc 是同步执行的，
+                        // 因此即使 future 先在另一个 worker 上完成，
+                        // gauge 也不会被观察到为负），然后再把所有权移入 future——
+                        // Drop 负责 dec。
                         let active_guard = ActiveTaskGuard::new();
                         tokio::spawn(async move {
                             let _active_guard = active_guard;
@@ -246,15 +245,14 @@ impl SharedTcpServer {
         );
     }
 
-    /// Handle a single work item
+    /// 处理单个工作项。
     async fn handle_work_item(work_item: WorkItem) {
         tracing::trace!(
             instance_id = work_item.instance_id,
             "TCP worker processing request"
         );
 
-        // Compute network transit time from the transport header stamped right
-        // before the TCP write on the frontend side.
+        // 根据前端侧在 TCP 写入前打上的 transport header 计算网络传输时间。
         if let Some(t1_str) = work_item.headers.get("x-frontend-send-ts-ns")
             && let Ok(t1_ns) = t1_str.parse::<u64>()
         {
@@ -267,7 +265,7 @@ impl SharedTcpServer {
                 .observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // Create span with trace context from headers
+        // 使用头部中的 trace 上下文创建 span。
         let span = crate::logging::make_handle_payload_span_from_tcp_headers(
             &work_item.headers,
             &work_item.servicegroup_name,
@@ -300,13 +298,13 @@ impl SharedTcpServer {
         work_item.notify.notify_one();
     }
 
-    /// Bind the server and start accepting connections.
+    /// 绑定 server 并开始接受连接。
     ///
-    /// This method binds to the configured address first, then starts the accept loop.
-    /// If the configured port is 0, the OS will assign a free port.
-    /// The actual bound address is stored and can be retrieved via `actual_address()`.
+    /// 此方法会先绑定到配置的地址，然后启动 accept 循环。
+    /// 如果配置端口为 0，操作系统会分配一个空闲端口。
+    /// 实际绑定地址会被保存，并可通过 `actual_address()` 获取。
     ///
-    /// Returns the actual bound address (useful when port 0 was specified).
+    /// 返回实际绑定地址（当端口为 0 时尤其有用）。
     pub async fn bind_and_start(self: Arc<Self>) -> Result<SocketAddr> {
         tracing::info!("Binding TCP server to {}", self.bind_addr);
 
@@ -319,10 +317,10 @@ impl SharedTcpServer {
             "TCP server bound successfully"
         );
 
-        // Store the actual bound address
+        // 保存实际绑定地址。
         *self.actual_addr.write() = Some(actual_addr);
 
-        // Start accepting connections in a background task
+        // 在后台任务中开始接受连接。
         let server = self.clone();
         tokio::spawn(async move {
             server.accept_loop(listener).await;
@@ -331,14 +329,14 @@ impl SharedTcpServer {
         Ok(actual_addr)
     }
 
-    /// Get the actual bound address (after bind_and_start has been called).
+    /// 获取实际绑定地址（在调用 bind_and_start 之后）。
     ///
-    /// Returns None if the server hasn't been started yet.
+    /// 如果 server 尚未启动，则返回 None。
     pub fn actual_address(&self) -> Option<SocketAddr> {
         *self.actual_addr.read()
     }
 
-    /// Internal accept loop - runs after binding
+    /// 内部 accept 循环 - 在绑定后运行。
     async fn accept_loop(self: Arc<Self>, listener: TcpListener) {
         let cancellation_token = self.cancellation_token.clone();
 
@@ -394,7 +392,7 @@ impl SharedTcpServer {
             notify: Arc::new(Notify::new()),
         });
 
-        // Insert handler FIRST to ensure it's ready to receive requests
+        // 先插入 handler，确保它已准备好接收请求。
         self.handlers.insert(portname_path, handler);
 
         system_health.lock().set_portname_registered(&portname_name);
@@ -437,14 +435,14 @@ impl SharedTcpServer {
         }
     }
 
-    /// Start the server (legacy method - prefer bind_and_start for new code).
+    /// 启动 server（旧方法 - 新代码优先使用 bind_and_start）。
     ///
-    /// This method is kept for backwards compatibility. It binds and starts
-    /// the server but doesn't return the actual bound address.
+    /// 该方法保留用于向后兼容。它会绑定并启动 server，
+    /// 但不会返回实际绑定地址。
     pub async fn start(self: Arc<Self>) -> Result<()> {
         let cancel_token = self.cancellation_token.clone();
         self.bind_and_start().await?;
-        // Wait for cancellation (the accept loop runs in background)
+        // 等待取消（accept 循环在后台运行）。
         cancel_token.cancelled().await;
         Ok(())
     }
@@ -456,19 +454,19 @@ impl SharedTcpServer {
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
-        // Split stream into read and write halves for concurrent operations
+        // 将 stream 拆成读/写两半，以便并发操作。
         let (read_half, write_half) = tokio::io::split(stream);
 
-        // Channel for sending responses to the write task (zero-copy Bytes)
+        // 向写任务发送响应的通道（zero-copy Bytes）。
         let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
 
-        // Spawn write task
+        // 派发写任务。
         let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
 
-        // Run read task in current context
+        // 在当前上下文中运行读任务。
         let read_result = Self::read_loop(read_half, handlers, response_tx, work_tx).await;
 
-        // Write task will end when response_tx is dropped
+        // 当 response_tx 被 drop 时，写任务会结束。
         write_task.await??;
 
         read_result
@@ -482,11 +480,11 @@ impl SharedTcpServer {
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpResponseMessage, ZeroCopyTcpDecoder};
 
-        // Create zero-copy decoder with optimized buffer size
+        // 创建带优化缓冲区大小的 zero-copy 解码器。
         let mut decoder = ZeroCopyTcpDecoder::new();
 
         loop {
-            // Read one complete message with ZERO copies!
+            // 以零拷贝方式读取一条完整消息！
             let request_msg = match decoder.read_message(&mut read_half).await {
                 Ok(msg) => msg,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -495,7 +493,7 @@ impl SharedTcpServer {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to read TCP request: {e}");
-                    // Send error response
+                    // 发送错误响应。
                     let error_response =
                         TcpResponseMessage::new(Bytes::from(format!("Read error: {}", e)));
                     if let Ok(encoded) = error_response.encode() {
@@ -505,7 +503,7 @@ impl SharedTcpServer {
                 }
             };
 
-            // Get portname path (zero-copy string slice)
+            // 获取 portname 路径（零拷贝字符串切片）。
             let portname_path = match request_msg.portname_path() {
                 Ok(path) => path,
                 Err(e) => {
@@ -519,10 +517,10 @@ impl SharedTcpServer {
                 }
             };
 
-            // Get headers (parsed from message)
+            // 获取头部（从消息中解析）。
             let headers = request_msg.headers();
 
-            // Get payload (zero-copy Bytes - just Arc clone!)
+            // 获取负载（zero-copy Bytes - 只是 Arc clone！）。
             let payload = request_msg.payload();
 
             tracing::trace!(
@@ -532,14 +530,14 @@ impl SharedTcpServer {
                 "Received TCP request"
             );
 
-            // Look up handler (lock-free read with DashMap)
+            // 查找 handler（使用 DashMap 做无锁读取）。
             let handler = handlers.get(portname_path).map(|h| h.clone());
 
             let handler = match handler {
                 Some(h) => h,
                 None => {
                     tracing::warn!("No handler found for portname: {portname_path}");
-                    // Send error response
+                    // 发送错误响应。
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
                         "Unknown portname: {}",
                         portname_path
@@ -553,8 +551,8 @@ impl SharedTcpServer {
 
             handler.inflight.fetch_add(1, Ordering::SeqCst);
 
-            // Build work item
-            // NOTE: payload is Bytes (Arc-counted), so cloning is extremely cheap
+            // 构造工作项。
+            // 注意：payload 是 Bytes（Arc 计数），因此克隆非常便宜。
             let work_item = WorkItem {
                 service_handler: handler.service_handler.clone(),
                 payload,
@@ -567,26 +565,23 @@ impl SharedTcpServer {
                 portname_name: handler.portname_name.clone(),
             };
 
-            // Reserve a slot in the bounded channel BEFORE incrementing the
-            // queue-depth gauge. Senders parked in `send().await` waiting for
-            // capacity would otherwise count as queue occupancy, letting the
-            // gauge exceed `queue_capacity` under saturation — exactly the
-            // regime this metric exists to surface. `reserve()` waits for
-            // capacity, then `Permit::send` is non-blocking and infallible,
-            // providing the same happens-before edge to the dispatcher's
-            // `recv()` as `send().await` did.
+            // 在递增 queue-depth gauge 之前，先在有界通道中预留一个槽位。
+            // 否则，停在 `send().await` 等待容量的发送方会被算作队列占用，
+            // 使 gauge 在饱和时超过 `queue_capacity`——而这正是该指标要暴露的状态。
+            // `reserve()` 会等待容量，然后 `Permit::send` 是非阻塞且不可失败的，
+            // 其对 dispatcher 的 `recv()` 提供与 `send().await` 相同的 happens-before 关系。
             match work_tx.reserve().await {
                 Ok(permit) => {
                     WORK_HANDLER_QUEUE_DEPTH.inc();
                     permit.send(work_item);
 
-                    // Send acknowledgment ONLY after successful queuing
+                    // 仅在成功入队后发送确认。
                     let ack_response = TcpResponseMessage::empty();
                     if let Ok(encoded_ack) = ack_response.encode()
                         && response_tx.send(encoded_ack).is_err()
                     {
                         tracing::debug!("Write task closed, ending read loop");
-                        // Clean up inflight counter since work was queued but ACK failed
+                        // 由于工作项已入队但 ACK 失败，因此清理 inflight 计数。
                         handler.inflight.fetch_sub(1, Ordering::SeqCst);
                         handler.notify.notify_one();
                         break;
@@ -599,9 +594,8 @@ impl SharedTcpServer {
                     );
                 }
                 Err(e) => {
-                    // `reserve()` only errors when the receiver has been
-                    // dropped (channel closed) — the dispatcher is gone, so
-                    // the read loop must terminate.
+                    // `reserve()` 只有在 receiver 已被 drop（通道关闭）时才会报错——
+                    // dispatcher 已不存在，因此读循环必须终止。
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         portname = handler.portname_name.as_str(),
@@ -610,14 +604,14 @@ impl SharedTcpServer {
                         "Failed to reserve worker pool slot, sending error response"
                     );
 
-                    // Send error response to client instead of ACK
+                    // 向客户端发送错误响应，而不是 ACK。
                     let error_response =
                         TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
 
-                    // Clean up inflight counter
+                    // 清理 inflight 计数。
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
 
@@ -644,7 +638,7 @@ impl SharedTcpServer {
 
 // === SECTION: [5] RequestPlaneServer trait 实现 ===
 
-// Implement RequestPlaneServer trait for SharedTcpServer
+// 为 SharedTcpServer 实现 RequestPlaneServer trait。
 #[async_trait::async_trait]
 impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     async fn register_portname(
@@ -656,8 +650,8 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         servicegroup_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // Include instance_id in the routing key to avoid collisions when multiple workers
-        // share the same TCP server (e.g., --num-workers > 1 in tests)
+        // 在路由键中加入 instance_id，以避免多个 worker 共享同一 TCP server 时发生冲突。
+        // 例如测试里 `--num-workers > 1` 的情况。
         let portname_path = format!("{instance_id:x}/{portname_name}");
         self.register_portname(
             portname_path,
@@ -672,8 +666,8 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     async fn unregister_portname(&self, portname_name: &str) -> Result<()> {
-        // With multiple workers per process, each registers with a unique key
-        // "{instance_id}/{portname_name}". Find and remove all matching entries.
+        // 在同一进程里有多个 worker 时，每个 worker 都会用唯一键
+        // "{instance_id}/{portname_name}" 注册。找到并移除所有匹配条目。
         let suffix = format!("/{portname_name}");
         let keys_to_remove: Vec<String> = self
             .handlers
@@ -689,8 +683,8 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     fn address(&self) -> String {
-        // Return actual bound address if available (after bind_and_start),
-        // otherwise fall back to configured bind address
+        // 若有实际绑定地址（在 bind_and_start 之后），则返回它；
+        // 否则回退到配置的绑定地址。
         let addr = self.actual_address().unwrap_or(self.bind_addr);
         format!("tcp://{}:{}", addr.ip(), addr.port())
     }
@@ -700,8 +694,8 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     fn is_healthy(&self) -> bool {
-        // Server is healthy if it has been created
-        // TODO: Add more sophisticated health checks (e.g., check if listener is active)
+        // 只要 server 已创建，就视为健康。
+        // TODO：增加更复杂的健康检查（例如检查 listener 是否活跃）。
         true
     }
 }
@@ -726,15 +720,15 @@ mod tests {
     use std::time::Duration;
     use tokio::time::Instant;
 
-    /// Mock handler that simulates slow request processing for testing
+    /// 模拟慢速请求处理的测试用 mock handler。
     struct SlowMockHandler {
-        /// Tracks if a request is currently being processed
+        /// 记录请求当前是否正在处理。
         request_in_flight: Arc<AtomicBool>,
-        /// Notifies when request processing starts
+        /// 在请求处理开始时通知。
         request_started: Arc<Notify>,
-        /// Notifies when request processing completes
+        /// 在请求处理完成时通知。
         request_completed: Arc<Notify>,
-        /// Duration to simulate request processing
+        /// 用于模拟请求处理的持续时间。
         processing_duration: Duration,
     }
 
@@ -764,7 +758,7 @@ mod tests {
                 self.processing_duration
             );
 
-            // Simulate slow request processing
+            // 模拟慢速请求处理。
             tokio::time::sleep(self.processing_duration).await;
 
             tracing::debug!("SlowMockHandler: Request completed");
@@ -785,22 +779,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
-        // Initialize tracing for test debugging
+        // 初始化 tracing，便于测试调试。
         crate::logging::init();
 
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-        // Create SharedTcpServer
+        // 创建 SharedTcpServer。
         let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
 
-        // Create a handler that takes 1s to process requests
+        // 创建一个处理请求需要 1 秒的 handler。
         let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
         let request_started = handler.request_started.clone();
         let request_completed = handler.request_completed.clone();
         let request_in_flight = handler.request_in_flight.clone();
 
-        // Register portname
+        // 注册 portname。
         let portname_path = "test_portname".to_string();
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             crate::HealthStatus::Ready,
@@ -825,14 +819,14 @@ mod tests {
 
         tracing::debug!("PortName registered");
 
-        // Get the portname handler to simulate request processing
+        // 获取 portname handler，以便模拟请求处理。
         let portname_handler = server
             .handlers
             .get(&portname_path)
             .expect("Handler should be registered")
             .clone();
 
-        // Spawn a task that simulates an inflight request
+        // 派发一个模拟在途请求的任务。
         let request_task = tokio::spawn({
             let handler = handler.clone();
             async move {
@@ -841,10 +835,10 @@ mod tests {
             }
         });
 
-        // Increment inflight counter manually to simulate the request being tracked
+        // 手动递增 inflight 计数，以模拟该请求被跟踪。
         portname_handler.inflight.fetch_add(1, Ordering::SeqCst);
 
-        // Wait for request to start processing
+        // 等待请求开始处理。
         tokio::select! {
             _ = request_started.notified() => {
                 tracing::debug!("Request processing started");
@@ -854,17 +848,17 @@ mod tests {
             }
         }
 
-        // Verify request is in flight
+        // 验证请求处于在途状态。
         assert!(
             request_in_flight.load(Ordering::SeqCst),
             "Request should be in flight"
         );
 
-        // Now unregister the portname while request is inflight
+        // 现在在请求在途时注销该 portname。
         let unregister_start = Instant::now();
         tracing::debug!("Starting unregister_portname with inflight request");
 
-        // Spawn unregister in a separate task so we can monitor its behavior
+        // 在单独任务中执行注销，以便监控其行为。
         let unregister_task = tokio::spawn({
             let server = server.clone();
             let portname_path = portname_path.clone();
@@ -876,10 +870,10 @@ mod tests {
             }
         });
 
-        // Give unregister a moment to remove handler and start waiting
+        // 让注销动作有一点时间移除 handler 并开始等待。
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Verify that unregister_portname hasn't returned yet (it should be waiting)
+        // 验证 unregister_portname 还没有返回（它应处于等待中）。
         assert!(
             !unregister_task.is_finished(),
             "unregister_portname should still be waiting for inflight request"
@@ -887,7 +881,7 @@ mod tests {
 
         tracing::debug!("Verified unregister is waiting, now waiting for request to complete");
 
-        // Wait for the request to complete
+        // 等待请求完成。
         tokio::select! {
             _ = request_completed.notified() => {
                 tracing::debug!("Request completed");
@@ -897,11 +891,11 @@ mod tests {
             }
         }
 
-        // Decrement inflight counter and notify (simulating what the real code does)
+        // 递减 inflight 计数并发送通知（模拟真实代码的行为）。
         portname_handler.inflight.fetch_sub(1, Ordering::SeqCst);
         portname_handler.notify.notify_one();
 
-        // Now wait for unregister to complete
+        // 现在等待注销完成。
         let unregister_end = tokio::time::timeout(Duration::from_secs(2), unregister_task)
             .await
             .expect("unregister_portname should complete after inflight request finishes")
@@ -911,20 +905,20 @@ mod tests {
 
         tracing::debug!("unregister_portname completed in {:?}", unregister_duration);
 
-        // Verify unregister_portname waited for the inflight request
+        // 验证 unregister_portname 确实等待了在途请求。
         assert!(
             unregister_duration >= Duration::from_secs(1),
             "unregister_portname should have waited ~1s for inflight request, but only took {:?}",
             unregister_duration
         );
 
-        // Verify request completed successfully
+        // 验证请求已成功完成。
         assert!(
             !request_in_flight.load(Ordering::SeqCst),
             "Request should have completed"
         );
 
-        // Wait for request task to finish
+        // 等待请求任务结束。
         request_task
             .await
             .expect("Request task should complete")
@@ -933,17 +927,17 @@ mod tests {
         tracing::info!("Test passed: unregister_portname properly waited for inflight TCP request");
     }
 
-    ///////////////////// TESTS FOR CONCURRENCY BOUNDING /////////////////////
+    ///////////////////// 并发上限测试 /////////////////////
 
-    /// Mock handler that tracks concurrent execution count
+    /// 记录并发执行计数的测试用 mock handler。
     struct ConcurrencyTrackingHandler {
-        /// Current number of concurrent requests being processed
+        /// 当前正在处理的并发请求数。
         concurrent_count: Arc<AtomicU64>,
-        /// Maximum concurrent count observed
+        /// 观察到的最大并发数。
         max_concurrent: Arc<AtomicU64>,
-        /// Duration to simulate request processing
+        /// 用于模拟请求处理的持续时间。
         processing_duration: Duration,
-        /// Notifies when a request completes
+        /// 在请求完成时通知。
         completed: Arc<Notify>,
     }
 
@@ -965,16 +959,16 @@ mod tests {
             _payload: Bytes,
             _request_id: Option<String>,
         ) -> Result<(), PipelineError> {
-            // Increment concurrent count
+            // 递增并发计数。
             let current = self.concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
 
-            // Update max if this is higher
+            // 如果更高，则更新最大值。
             self.max_concurrent.fetch_max(current, Ordering::SeqCst);
 
-            // Simulate work
+            // 模拟工作。
             tokio::time::sleep(self.processing_duration).await;
 
-            // Decrement concurrent count
+            // 递减并发计数。
             self.concurrent_count.fetch_sub(1, Ordering::SeqCst);
             self.completed.notify_one();
 
@@ -994,27 +988,27 @@ mod tests {
     async fn test_worker_pool_bounds_concurrency() {
         crate::logging::init();
 
-        // Use a small pool size for testing
+        // 测试时使用较小的池大小。
         let pool_size = 3;
         let total_requests = 10;
 
-        // Create bounded channel and dispatcher directly
+        // 直接创建有界通道和 dispatcher。
         let (work_tx, work_rx) = tokio::sync::mpsc::channel::<WorkItem>(total_requests);
         let cancellation_token = CancellationToken::new();
 
-        // Start worker pool with small concurrency limit
+        // 以较小的并发上限启动 worker 池。
         SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
 
-        // Create tracking handler
+        // 创建跟踪 handler。
         let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(50)));
 
-        // Create dummy inflight/notify for work items
+        // 为工作项创建虚拟的 inflight/notify。
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
 
-        // Send more work items than pool size. Mirror the production read_loop's
-        // queue-depth accounting so `handle_work_item`'s decrement has a matching
-        // increment and the global gauge stays consistent for other tests.
+        // 发送比池大小更多的工作项。这里要模拟生产 read_loop 的
+        // queue-depth 记账，让 `handle_work_item` 的递减能对应上
+        // 递增，并使全局 gauge 对其他测试保持一致。
         for i in 0..total_requests {
             inflight.fetch_add(1, Ordering::SeqCst);
             WORK_HANDLER_QUEUE_DEPTH.inc();
@@ -1032,7 +1026,7 @@ mod tests {
             work_tx.send(work_item).await.expect("send should succeed");
         }
 
-        // Wait for all requests to complete
+        // 等待所有请求完成。
         let timeout = tokio::time::timeout(Duration::from_secs(5), async {
             while inflight.load(Ordering::SeqCst) > 0 {
                 notify.notified().await;
@@ -1045,7 +1039,7 @@ mod tests {
             "All requests should complete within timeout"
         );
 
-        // Verify concurrency was bounded
+        // 验证并发确实被限制住了。
         let max_observed = handler.max_concurrent.load(Ordering::SeqCst);
         assert!(
             max_observed <= pool_size as u64,
@@ -1054,7 +1048,7 @@ mod tests {
             pool_size
         );
 
-        // Verify all requests completed
+        // 验证所有请求都已完成。
         assert_eq!(
             inflight.load(Ordering::SeqCst),
             0,
@@ -1067,7 +1061,7 @@ mod tests {
             pool_size
         );
 
-        // Cleanup
+        // 清理。
         cancellation_token.cancel();
     }
 
@@ -1075,8 +1069,7 @@ mod tests {
     async fn test_worker_pool_metrics_are_observed() {
         crate::logging::init();
 
-        // Monotonic histogram counters: safe to assert even with parallel tests
-        // moving the gauges.
+        // 直方图计数是单调递增的：即使并行测试在移动 gauge，也可以安全断言。
         let permit_observations_before = WORK_HANDLER_PERMIT_WAIT_SECONDS.get_sample_count();
 
         let pool_size = 2;
@@ -1091,7 +1084,7 @@ mod tests {
 
         for i in 0..total_requests {
             inflight.fetch_add(1, Ordering::SeqCst);
-            // Mirror the production read_loop's inc so handle_work_item's dec has a pair.
+            // 模拟生产 read_loop 的 inc，让 handle_work_item 的 dec 有对应项。
             WORK_HANDLER_QUEUE_DEPTH.inc();
             let work_item = WorkItem {
                 service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
@@ -1107,7 +1100,7 @@ mod tests {
             work_tx.send(work_item).await.expect("send should succeed");
         }
 
-        // Wait for all work to drain
+        // 等待所有工作项被处理完。
         tokio::time::timeout(Duration::from_secs(5), async {
             while inflight.load(Ordering::SeqCst) > 0 {
                 notify.notified().await;
@@ -1116,8 +1109,8 @@ mod tests {
         .await
         .expect("all requests should complete");
 
-        // permit_wait histogram is monotonic and records one sample per dispatched
-        // work item — reliable across parallel test threads.
+        // permit_wait 直方图是单调的，并且每个已派发工作项都会记录一条样本——
+        // 在并行测试线程下也可靠。
         assert!(
             WORK_HANDLER_PERMIT_WAIT_SECONDS.get_sample_count()
                 >= permit_observations_before + total_requests as u64,
@@ -1131,8 +1124,8 @@ mod tests {
     async fn test_capacities_published_on_server_init() {
         crate::logging::init();
 
-        // SharedTcpServer::new publishes static capacities. Any test that instantiates
-        // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
+        // SharedTcpServer::new 会发布静态容量。任何实例化 SharedTcpServer 的测试
+        // 都已经填充了这些 gauge；我们这里只需断言它们大于 0。
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());

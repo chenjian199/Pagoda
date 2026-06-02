@@ -4,47 +4,47 @@
 //! # `pipeline::network::codec::zero_copy_decoder` —— TCP 请求帧的零拷贝解码器
 //!
 //! ## 设计意图
-//! - 与 [`super::TcpRequest`] / [`super::TwoPartCodec`] 走的"拥有式"路径互补：本模块持有
-//!   一个 **可重用** 的 [`BytesMut`] 读缓冲，通过 `split_to(n).freeze()` 将完整帧切出为
-//!   `Bytes`（Arc 引用计数），然后用 **借用切片** 形式（`&[u8]` / `Bytes::slice(..)`)
-//!   暴露 portname / headers / payload。整条路径 **0 次内存拷贝**，clone 也仅是 Arc 增引。
-//! - 缓冲在 **空且容量过大** 时主动收缩回 [`INITIAL_BUFFER_SIZE`]，避免长尾大消息把缓冲
-//!   永久撑大；收缩阈值可通过环境变量 `PGD_TCP_SHRINK_MESSAGE_SIZE` 调整。
+//! - 这条路径与 [`super::TcpRequest`] / [`super::TwoPartCodec`] 的“拥有式”方案互补：本模块
+//!   持有一个 **可重用** 的 [`BytesMut`] 读缓冲，通过 `split_to(n).freeze()` 将完整帧切出为
+//!   `Bytes`（Arc 引用计数），再用 **借用切片** 形式（`&[u8]` / `Bytes::slice(..)`）
+//!   暴露 portname / headers / payload。整条路径 **零内存拷贝**，clone 也只是 Arc 增引。
+//! - 缓冲在 **为空且容量过大** 时会主动收缩回 [`INITIAL_BUFFER_SIZE`]，避免长尾大消息把缓冲
+//!   永久撑大；收缩阈值可以通过环境变量 `PGD_TCP_SHRINK_MESSAGE_SIZE` 调整。
 //!
 //! ## 外部契约
 //! - `pub struct ZeroCopyTcpDecoder` + `new() / with_capacity(usize) / read_message<R> /
 //!   buffer_capacity() / buffered_len() / Default`
 //! - `pub struct TcpRequestMessageZeroCopy: Clone + Debug` + `portname_path() ->
 //!   Result<&str, Utf8Error> / portname_path_bytes() / headers_bytes() / headers() /
-//!   payload() -> Bytes / total_size() / raw_bytes() -> &Bytes`
+//!   payload() -> Bytes / total_size() / raw_bytes() -> &Bytes`。
 //! - 错误语义：
-//!   - 连接尚未发出任何字节就关闭 → [`io::ErrorKind::UnexpectedEof`] + `"connection closed"`
-//!   - 已读了部分字节但帧未拼完 → `UnexpectedEof` + `"incomplete message header"` /
-//!     `"incomplete message: expected … got …"`
-//!   - 帧声明长度超过 `max_message_size` → 沿用 [`super::check_tcp_request_max_message_size`]
-//!     给出的 `InvalidData + "message too large"`
-//! - `headers()` 在 JSON 解析失败时返回空 `HashMap`（`unwrap_or_default()`），不抛错。
+//!   - 连接尚未发出任何字节就关闭时，返回 [`io::ErrorKind::UnexpectedEof`] 和 `"connection closed"`；
+//!   - 已读到部分字节但帧还没拼完时，返回 `UnexpectedEof` 和 `"incomplete message header"` /
+//!     `"incomplete message: expected … got …"`；
+//!   - 帧声明长度超过 `max_message_size` 时，沿用 [`super::check_tcp_request_max_message_size`]
+//!     给出的 `InvalidData + "message too large"`；
+//! - `headers()` 在 JSON 解析失败时返回空 `HashMap`（`unwrap_or_default()`），不会抛错。
 //!
 //! ## 实现要点
-//! - 旧实现把"等够 N 字节，否则继续 `read_buf`，遇到 0 即报错"的循环写了 **4 次**：
-//!   现统一收敛到私有 helper [`ZeroCopyTcpDecoder::fill_at_least`]，由 [`FillStage`] 决定
-//!   不同阶段的 EOF 错误消息，状态机更易审计。
+//! - 旧实现把“等够 N 字节，否则继续 `read_buf`，遇到 0 就报错”的循环写了 **4 次**：
+//!   现在统一收敛到私有 helper [`ZeroCopyTcpDecoder::fill_at_least`]，由 [`FillStage`]
+//!   决定不同阶段的 EOF 错误消息，状态机更易审计。
 //! - `parse_tcp_request_frame_header` / `check_tcp_request_max_message_size` 等帧头校验
-//!   仍委托给 `super::` 中的 **桥接 helper**，与 `codec.rs` 端的精细化结构对齐；待这边
-//!   长期稳定后，可一并切换到 `super::TcpRequestLayout`。
-//! - `try_shrink_after_split` 把"空 + 容量超阈值 → 重建 BytesMut"的判定独立化，便于测试
+//!   仍然委托给 `super::` 中的 **桥接 helper**，与 `codec.rs` 端的精细化结构对齐；等这边
+//!   长期稳定后，可以一并切换到 `super::TcpRequestLayout`。
+//! - `try_shrink_after_split` 把“空 + 容量超阈值 → 重建 BytesMut”的判定独立出来，便于测试
 //!   覆盖。
 
-//! Zero-copy TCP message decoder for high-concurrency scenarios
+//! 面向高并发场景的零拷贝 TCP 消息解码器。
 //!
-//! This decoder eliminates message reconstruction copies by:
-//! 1. Reading into a reusable buffer
-//! 2. Parsing headers in-place
-//! 3. Splitting off exact message sizes (zero-copy via Bytes::split_to)
-//! 4. Returning Arc-counted Bytes that can be cloned cheaply
+//! 这个解码器通过以下方式消除消息重建时的拷贝：
+//! 1. 读入可复用缓冲区；
+//! 2. 原地解析头部；
+//! 3. 精确切出消息大小（通过 `Bytes::split_to` 实现零拷贝）；
+//! 4. 返回可廉价克隆的、带 Arc 计数的 `Bytes`。
 
 // ─────────────────────────────────────────────────────────────────────────────
-// === SECTION: [1] 依赖导入
+// === SECTION: [1] 依赖导入 ===
 // ─────────────────────────────────────────────────────────────────────────────
 
 use super::{
@@ -58,24 +58,24 @@ use std::sync::OnceLock;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// === SECTION: [2] 常量、编译期不变式与全局收缩阈值缓存
+// === SECTION: [2] 常量、编译期不变式与全局收缩阈值缓存 ===
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 默认初始读缓冲容量：256 KiB。
 ///
-/// 选取依据：覆盖 LLM 请求中的绝大多数小帧（path + 数 KiB JSON header + ≤数十 KiB payload），
-/// 避免热路径上反复 grow。
+/// 选取依据：覆盖 LLM 请求中的绝大多数小帧（path + 数 KiB JSON header + ≤ 数十 KiB payload），
+/// 避免热路径上反复扩容。
 const INITIAL_BUFFER_SIZE: usize = 262_144; // 256 KiB
 
-/// 缺省的"读完后是否收缩"阈值：8 MiB。
+/// 缺省的“读完后是否收缩”阈值：8 MiB。
 ///
-/// 当 `read_buffer.capacity() > shrink_threshold` 且缓冲已空时，重新分配回
+/// 当 `read_buffer.capacity() > shrink_threshold` 且缓冲已经为空时，会重新分配回
 /// [`INITIAL_BUFFER_SIZE`]，避免一次大请求长期占用大段内存。
 const DEFAULT_SHRINK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
 
 // —— 编译期不变式 —— //
-// INITIAL_BUFFER_SIZE 必须 ≤ DEFAULT_SHRINK_SIZE，否则收缩动作会立刻把容量"放大"，
-// `resolve_shrink_message_size` 的 .max(INITIAL_BUFFER_SIZE) 也将失去意义。
+// INITIAL_BUFFER_SIZE 必须 ≤ DEFAULT_SHRINK_SIZE，否则收缩动作会立刻把容量“放大”，
+// `resolve_shrink_message_size` 的 `.max(INITIAL_BUFFER_SIZE)` 也将失去意义。
 const _: () = assert!(
     INITIAL_BUFFER_SIZE <= DEFAULT_SHRINK_SIZE,
     "INITIAL_BUFFER_SIZE 必须 ≤ DEFAULT_SHRINK_SIZE"
@@ -87,15 +87,15 @@ const _: () = assert!(DEFAULT_SHRINK_SIZE > 0);
 /// 进程内 once-init 的收缩阈值缓存（受 `get_tcp_max_message_size()` 与环境变量影响）。
 static SHRINK_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// 读取环境变量 `PGD_TCP_SHRINK_MESSAGE_SIZE`，与 `max_message_size`、`INITIAL_BUFFER_SIZE`
-/// 共同决定最终收缩阈值，并把结果缓存到 [`SHRINK_MESSAGE_SIZE`]。
+/// 读取环境变量 `PGD_TCP_SHRINK_MESSAGE_SIZE`，并与 `max_message_size`、`INITIAL_BUFFER_SIZE`
+/// 一起决定最终收缩阈值，然后把结果缓存到 [`SHRINK_MESSAGE_SIZE`]。
 ///
-/// 该函数仅在首次调用时做解析与日志告警，后续调用走 `OnceLock::get_or_init` 的快路径。
+/// 这个函数只在首次调用时做解析和日志告警，后续调用走 `OnceLock::get_or_init` 的快路径。
 fn get_shrink_message_size() -> usize {
     *SHRINK_MESSAGE_SIZE.get_or_init(|| {
         let max_size = get_tcp_max_message_size();
 
-        // Check for environment variable override
+        // 检查环境变量是否覆盖默认值。
         let env_result = std::env::var("PGD_TCP_SHRINK_MESSAGE_SIZE");
         let env_shrink_size = env_result.as_ref().ok().and_then(|s| {
             s.parse::<usize>().ok().or_else(|| {
@@ -110,7 +110,7 @@ fn get_shrink_message_size() -> usize {
 
         let resolved = resolve_shrink_message_size(max_size, env_shrink_size);
 
-        // Warn if the configured value was clamped
+        // 如果配置值被夹紧，则发出警告。
         if let Some(configured) = env_shrink_size
             && configured != resolved
         {
@@ -122,7 +122,6 @@ fn get_shrink_message_size() -> usize {
                 "PGD_TCP_SHRINK_MESSAGE_SIZE was clamped to valid range. Note the size is in bytes."
             );
         }
-
         resolved
     })
 }
@@ -150,7 +149,7 @@ fn resolve_shrink_message_size(max_size: usize, env_shrink_size: Option<usize>) 
 /// 当前填充阶段，仅用于在 `fill_at_least` 内部根据语义生成精确的 EOF 错误消息。
 ///
 /// 状态切换路径：
-/// `PortNameLen -> PortNameAndHeadersLen -> FullHeader -> FullMessage { total }`
+/// `PortNameLen -> PortNameAndHeadersLen -> FullHeader -> FullMessage { total }` 表示的状态转换顺序。
 #[derive(Debug, Clone, Copy)]
 enum FillStage {
     /// 还在等首 2 字节的 path_len。若此时连接被关闭：
@@ -192,28 +191,28 @@ impl FillStage {
 // === SECTION: [4] 解码器主体
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Zero-copy streaming decoder that reuses buffers
+/// 复用缓冲区的零拷贝流式解码器。
 ///
-/// This decoder maintains an internal buffer and only allocates when necessary.
-/// Messages are returned as Arc-counted Bytes slices, making cloning extremely cheap.
-/// The reusable buffer resets back to INITIAL_BUFFER_SIZE only when unread data
-/// is empty and capacity exceeds PGD_TCP_SHRINK_MESSAGE_SIZE.
+/// 这个解码器维护一个内部缓冲区，只在必要时才分配内存。
+/// 消息会以带 Arc 计数的 `Bytes` 切片返回，因此克隆代价非常低。
+/// 只有在未读数据为空且容量超过 `PGD_TCP_SHRINK_MESSAGE_SIZE` 时，
+/// 可复用缓冲区才会收回到 `INITIAL_BUFFER_SIZE`。
 pub struct ZeroCopyTcpDecoder {
-    /// Reusable read buffer - grows as needed, shrinks when empty and oversized
+    /// 可复用的读缓冲区 - 按需增长，在空且过大时收缩。
     read_buffer: BytesMut,
-    /// Maximum allowed message size
+    /// 允许的最大消息大小。
     max_message_size: usize,
-    /// Threshold for shrinking buffer back to initial size when empty
+    /// 当缓冲为空时，触发收缩回初始大小的阈值。
     shrink_threshold: usize,
 }
 
 impl ZeroCopyTcpDecoder {
-    /// Create a new decoder with default buffer size
+    /// 使用默认缓冲大小创建一个新的解码器。
     pub fn new() -> Self {
         Self::with_capacity(INITIAL_BUFFER_SIZE)
     }
 
-    /// Create a new decoder with specific initial capacity
+    /// 使用指定的初始容量创建一个新的解码器。
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             read_buffer: BytesMut::with_capacity(capacity),
@@ -222,41 +221,41 @@ impl ZeroCopyTcpDecoder {
         }
     }
 
-    /// Read one complete message with ZERO copies
+    /// 以零拷贝方式读取一条完整消息。
     ///
-    /// This method:
-    /// 1. Ensures headers are buffered
-    /// 2. Parses headers in-place (no allocation)
-    /// 3. Ensures entire message is buffered
-    /// 4. Splits off exact message size (zero-copy pointer arithmetic)
-    /// 5. Returns Arc-counted Bytes (cheap to clone)
+    /// 这个方法会：
+    /// 1. 确保头部已经缓冲到位；
+    /// 2. 原地解析头部（不分配内存）；
+    /// 3. 确保整条消息都已经缓冲到位；
+    /// 4. 精确切出消息大小（通过零拷贝指针操作）；
+    /// 5. 返回带 Arc 计数的 `Bytes`（克隆代价很低）。
     pub async fn read_message<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
     ) -> io::Result<TcpRequestMessageZeroCopy> {
-        // ── Stage 1：等到至少读出 path_len（前 2 字节） ──
+        // ── 阶段 1：至少读到 path_len（前 2 字节） ──
         self.fill_at_least(reader, super::TCP_REQUEST_ENDPOINT_LEN_WIDTH, FillStage::PortNameLen)
             .await?;
         let path_len = tcp_request_portname_len(&self.read_buffer)?;
 
-        // ── Stage 2：等到 path + headers_len 全部到达 ──
+        // ── 阶段 2：等待 path 和 headers_len 全部到达 ──
         let initial_header_size =
             super::TCP_REQUEST_ENDPOINT_LEN_WIDTH + path_len + super::TCP_REQUEST_HEADERS_LEN_WIDTH;
         self.fill_at_least(reader, initial_header_size, FillStage::PortNameAndHeadersLen)
             .await?;
         let headers_len = tcp_request_headers_len(&self.read_buffer, path_len)?;
 
-        // ── Stage 3：等到完整帧头（含 payload_len） ──
+        // ── 阶段 3：等待完整帧头（包含 payload_len） ──
         let full_header_size = tcp_request_header_size(path_len, headers_len);
         self.fill_at_least(reader, full_header_size, FillStage::FullHeader)
             .await?;
 
         let parsed = parse_tcp_request_frame_header(&self.read_buffer)?;
 
-        // ── 帧总长度上限校验（先于等待 payload，免得对端故意发巨大长度撑爆缓冲） ──
+        // ── 帧总长度上限校验（要先于等待 payload，以免对端故意发送巨大长度撑爆缓冲） ──
         check_tcp_request_max_message_size(parsed.total_len, self.max_message_size)?;
 
-        // ── Stage 4：等到整条帧（含 payload）落地 ──
+        // ── 阶段 4：等待整条帧（包含 payload）落地 ──
         self.fill_at_least(
             reader,
             parsed.total_len,
@@ -264,7 +263,7 @@ impl ZeroCopyTcpDecoder {
         )
         .await?;
 
-        // 真正切出该帧 —— 仅是指针/长度的拆分，无内存拷贝。
+        // 真正切出该帧 —— 只是指针和长度的拆分，没有内存拷贝。
         let message_bytes = self.read_buffer.split_to(parsed.total_len).freeze();
 
         // 必要时收缩读缓冲，避免一次大请求长期占住大段内存。
@@ -273,22 +272,22 @@ impl ZeroCopyTcpDecoder {
         Ok(TcpRequestMessageZeroCopy::new(message_bytes, parsed))
     }
 
-    /// Get the current buffer capacity
+    /// 获取当前缓冲容量。
     pub fn buffer_capacity(&self) -> usize {
         self.read_buffer.capacity()
     }
 
-    /// Get the current buffered data size
+    /// 获取当前已缓冲的数据大小。
     pub fn buffered_len(&self) -> usize {
         self.read_buffer.len()
     }
 
-    // ── 内部私有 helper（不暴露） ────────────────────────────────────────────
+    // ── 内部私有 helper（不对外暴露） ────────────────────────────────────────────
 
-    /// 反复 `read_buf` 直到 `self.read_buffer.len() >= need`；若中途读到 0 字节
-    /// （EOF），按当前 `stage` 翻译成精确的 [`io::Error`] 返回。
+    /// 反复 `read_buf`，直到 `self.read_buffer.len() >= need`；如果中途读到 0 字节
+    ///（EOF），就按当前 `stage` 翻译成精确的 [`io::Error`] 返回。
     ///
-    /// 将旧实现中 4 处几乎完全相同的循环统一收敛至此，行为完全等价但易审计、易测试。
+    /// 把旧实现里 4 处几乎完全相同的循环统一收敛到这里，行为完全等价，但更易审计、易测试。
     async fn fill_at_least<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
@@ -304,11 +303,11 @@ impl ZeroCopyTcpDecoder {
         Ok(())
     }
 
-    /// 帧切出后判定是否需要把读缓冲收回初始容量。
+    /// 在帧切出后判断是否需要把读缓冲收回初始容量。
     ///
-    /// 触发条件（两者皆需）：
-    /// 1. `read_buffer` 已被消费空（避免把后续 pipeline 数据误丢）；
-    /// 2. 当前容量超过 `shrink_threshold`（足够大才值得重建——避免抖动）。
+    /// 触发条件（两个都要满足）：
+    /// 1. `read_buffer` 已被消费为空（避免把后续 pipeline 数据误丢）；
+    /// 2. 当前容量超过 `shrink_threshold`（只有足够大才值得重建，避免抖动）。
     #[inline]
     fn try_shrink_after_split(&mut self) {
         if self.read_buffer.is_empty() && self.read_buffer.capacity() > self.shrink_threshold {
@@ -324,75 +323,75 @@ impl Default for ZeroCopyTcpDecoder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// === SECTION: [5] 零拷贝消息视图
+// === SECTION: [5] 零拷贝消息视图 ===
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Zero-copy message representation
+/// 零拷贝消息表示。
 ///
-/// This struct holds an Arc-counted Bytes buffer containing the entire message.
-/// All accessors return zero-copy slices or references into this buffer.
+/// 这个结构体持有一个包含整条消息的、带 Arc 计数的 `Bytes` 缓冲区。
+/// 所有访问器都返回该缓冲区上的零拷贝切片或引用。
 #[derive(Clone)]
 pub struct TcpRequestMessageZeroCopy {
-    /// Entire message as Arc-counted buffer
-    /// Format: [path_len(2)][path(var)][headers_len(2)][headers(var)][payload_len(4)][payload(var)]
+    /// 整条消息的 Arc 计数缓冲区。
+    /// 格式：[path_len(2)][path(var)][headers_len(2)][headers(var)][payload_len(4)][payload(var)]
     raw: Bytes,
     parsed: super::TcpRequestWireHeader,
 }
 
 impl TcpRequestMessageZeroCopy {
-    /// Create a new zero-copy message from raw bytes
+    /// 从原始字节创建一个新的零拷贝消息。
     fn new(raw: Bytes, parsed: super::TcpRequestWireHeader) -> Self {
         Self { raw, parsed }
     }
 
-    /// Get portname path as a string slice (zero-copy)
+    /// 以字符串切片形式获取 portname path（零拷贝）。
     ///
-    /// This returns a reference into the message buffer, no allocation.
+    /// 这里返回的是消息缓冲区中的引用，不会分配内存。
     pub fn portname_path(&self) -> Result<&str, std::str::Utf8Error> {
         std::str::from_utf8(self.portname_path_bytes())
     }
 
-    /// Get portname path as bytes (zero-copy)
+    /// 以字节形式获取 portname path（零拷贝）。
     pub fn portname_path_bytes(&self) -> &[u8] {
         &self.raw[self.parsed.portname_start()..self.parsed.portname_end()]
     }
 
-    /// Get headers as bytes (zero-copy)
+    /// 以字节形式获取 headers（零拷贝）。
     pub fn headers_bytes(&self) -> &[u8] {
         &self.raw[self.parsed.headers_start()..self.parsed.headers_end()]
     }
 
-    /// Get headers as a HashMap (requires parsing)
+    /// 以 HashMap 形式获取 headers（需要解析）。
     pub fn headers(&self) -> std::collections::HashMap<String, String> {
         let headers_bytes = self.headers_bytes();
         if headers_bytes.is_empty() {
             return std::collections::HashMap::new();
         }
 
-        // Parse headers from JSON format
+        // 从 JSON 格式解析 headers。
         serde_json::from_slice(headers_bytes).unwrap_or_default()
     }
 
-    /// Get the payload length
+    /// 获取 payload 长度。
     #[inline]
     fn payload_len(&self) -> usize {
         self.parsed.payload_len
     }
 
-    /// Get payload as zero-copy Bytes
+    /// 以零拷贝 `Bytes` 形式获取 payload。
     ///
-    /// This returns an Arc-counted slice of the message buffer.
-    /// Cloning the returned Bytes is extremely cheap (just Arc clone).
+    /// 这里返回的是消息缓冲区的一个 Arc 计数切片。
+    /// 克隆返回的 `Bytes` 成本极低，只是一次 Arc 克隆。
     pub fn payload(&self) -> Bytes {
         self.raw.slice(self.parsed.payload_start()..) // ZERO COPY! Just Arc clone + offset
     }
 
-    /// Get total message size in bytes
+    /// 获取消息总大小（字节）。
     pub fn total_size(&self) -> usize {
         self.raw.len()
     }
 
-    /// Get the raw message bytes (for debugging)
+    /// 获取原始消息字节（用于调试）。
     pub fn raw_bytes(&self) -> &Bytes {
         &self.raw
     }
@@ -418,17 +417,17 @@ mod tests {
     //!
     //! | 测试名 | 覆盖维度 |
     //! |---|---|
-    //! | `test_resolve_shrink_message_size_edge_cases` | （lib-copy）阈值在 `[INITIAL_BUFFER_SIZE, max_size]` 的夹紧逻辑 |
+    //! | `test_resolve_shrink_message_size_edge_cases` | 阈值在 `[INITIAL_BUFFER_SIZE, max_size]` 的夹紧逻辑 |
     //! | `test_resolve_shrink_message_size_below_initial_buffer` | env=0 → 抬升到 `INITIAL_BUFFER_SIZE`（边界） |
     //! | `test_decoder_default_equals_new_initial_state` | `Default::default()` 与 `new()` 等价（契约面） |
     //! | `test_buffered_len_zero_after_full_read` | 完整读完后 `buffered_len()` 归零（不变式） |
-    //! | `test_zero_copy_decoder_basic` | （lib-copy）单帧 happy path |
-    //! | `test_zero_copy_decoder_allows_empty_and_long_portname_paths` | （lib-copy）空 path 与 2 KiB path 边界 |
-    //! | `test_zero_copy_decoder_large_payload` | （lib-copy）200 KiB payload，触发 buffer grow |
-    //! | `test_zero_copy_decoder_total_size_limit` | （lib-copy）`max_message_size` 越界 → `InvalidData` |
-    //! | `test_zero_copy_decoder_with_headers` | （lib-copy）JSON headers 解析 + `headers_bytes()` 视图 |
-    //! | `test_zero_copy_decoder_empty_vs_populated_headers` | （lib-copy）同一 decoder 连续两帧、headers 形态切换 |
-    //! | `test_zero_copy_decoder_buffer_shrinking` | （lib-copy）大帧读后缓冲收缩到 `INITIAL_BUFFER_SIZE` |
+    //! | `test_zero_copy_decoder_basic` | 单帧 happy path |
+    //! | `test_zero_copy_decoder_allows_empty_and_long_portname_paths` | 空 path 与 2 KiB path 边界 |
+    //! | `test_zero_copy_decoder_large_payload` | 200 KiB payload，触发 buffer grow |
+    //! | `test_zero_copy_decoder_total_size_limit` | `max_message_size` 越界 → `InvalidData` |
+    //! | `test_zero_copy_decoder_with_headers` | JSON headers 解析 + `headers_bytes()` 视图 |
+    //! | `test_zero_copy_decoder_empty_vs_populated_headers` | 同一 decoder 连续两帧、headers 形态切换 |
+    //! | `test_zero_copy_decoder_buffer_shrinking` | 大帧读后缓冲收缩到 `INITIAL_BUFFER_SIZE` |
     //! | `test_read_message_eof_at_zero_bytes` | 对端未发任何字节就关闭 → `"connection closed"` |
     //! | `test_read_message_eof_mid_prefix` | 仅发 1 字节后断 → `"incomplete message header"` |
     //! | `test_read_message_eof_mid_payload` | 帧头完整但 payload 截断 → `"incomplete message: expected … got …"` |
@@ -479,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_resolve_shrink_message_size_edge_cases() {
-        // Test case: max_size = 10MB (larger than DEFAULT_SHRINK_SIZE)
+        // 测试用例：max_size = 10MB（大于 DEFAULT_SHRINK_SIZE）。
         let max_size_10mb = 10 * 1024 * 1024;
         let result = resolve_shrink_message_size(max_size_10mb, None);
         assert_eq!(
@@ -487,24 +486,24 @@ mod tests {
             "10MB max should return default 8MB"
         );
 
-        // Test case: max_size < DEFAULT_SHRINK_SIZE
+        // 测试用例：max_size < DEFAULT_SHRINK_SIZE。
         let max_size_1mb = 1024 * 1024;
         let result = resolve_shrink_message_size(max_size_1mb, None);
         assert_eq!(result, max_size_1mb, "1MB max should be capped to 1MB");
 
-        // Test case: max_size = DEFAULT_SHRINK_SIZE
+        // 测试用例：max_size = DEFAULT_SHRINK_SIZE。
         let result = resolve_shrink_message_size(DEFAULT_SHRINK_SIZE, None);
         assert_eq!(
             result, DEFAULT_SHRINK_SIZE,
             "exact match should return default"
         );
 
-        // Test case: env_shrink_size provided and within bounds
+        // 测试用例：提供了 env_shrink_size 且处于合法范围内。
         let env_size = 2 * 1024 * 1024;
         let result = resolve_shrink_message_size(max_size_10mb, Some(env_size));
         assert_eq!(result, env_size, "env var should be used when within bounds");
 
-        // Test case: env_shrink_size exceeds max_size
+        // 测试用例：env_shrink_size 超过 max_size。
         let env_size_large = 20 * 1024 * 1024;
         let result = resolve_shrink_message_size(max_size_10mb, Some(env_size_large));
         assert_eq!(
@@ -512,7 +511,7 @@ mod tests {
             "env var should be capped to max_size"
         );
 
-        // Test case: env_shrink_size below INITIAL_BUFFER_SIZE
+        // 测试用例：env_shrink_size 低于 INITIAL_BUFFER_SIZE。
         let env_size_small = 100 * 1024;
         let result = resolve_shrink_message_size(max_size_10mb, Some(env_size_small));
         assert_eq!(
@@ -520,7 +519,7 @@ mod tests {
             "env var should be clamped to INITIAL_BUFFER_SIZE"
         );
 
-        // Test case: max_size below INITIAL_BUFFER_SIZE
+        // 测试用例：max_size 低于 INITIAL_BUFFER_SIZE。
         let max_size_small = 100 * 1024;
         let result = resolve_shrink_message_size(max_size_small, None);
         assert_eq!(

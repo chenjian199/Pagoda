@@ -19,7 +19,7 @@
 //! - 私有 `default_server()` / `validate_nats_server()` 被同模块 supplemental 测试访问;
 //! - [`NatsQueue`] 各字段名 (`stream_name`/`subject`/`consumer_name`/`client`/`message_stream`)
 //!   被测试直接读写,不能改名;
-//! - [`instance_subject`] 拼装格式 `"{ns}_{comp}.{name}-{instance:x}"` 是协议级承诺.
+//! - [`instance_subject`] 拼装格式 `"{namespace}_{servicegroup}.{name}-{instance:x}"` 是协议级承诺.
 //!
 //! # 实现要点
 //! - 连接走 [`build_in_runtime`] 在独立 runtime 中跑,避免 NATS IO 抢占业务调度;
@@ -63,7 +63,7 @@ use super::utils::build_in_runtime;
 pub const URL_PREFIX: &str = "nats://";
 
 /// 连接 NATS 时为独立 runtime 分配的 worker 线程数.
-// TODO(jthomson04): 这个值理想情况下应可配置.
+// TODO(jthomson04): 这个值理想情况下应当可配置。
 const NATS_WORKER_THREADS: usize = 4;
 
 // === SECTION: Client ===
@@ -800,8 +800,8 @@ impl NatsQueue {
     ) -> Result<()> {
         let subject = format!("{}.{}", self.event_subject(), event_name.as_ref());
 
-        // Note: enqueue_task requires &mut self, but EventPublisher requires &self
-        // We need to ensure the client is connected and use it directly.
+        // 注意: enqueue_task 需要 &mut self,但 EventPublisher 只持有 &self,
+        // 因此这里要确保客户端已连接并直接使用它.
         let client = self
             .client
             .as_ref()
@@ -813,7 +813,7 @@ impl NatsQueue {
 
 /// 根据 portname 与实例号构造实例级消息 subject.
 ///
-/// 格式 `"{ns}_{servicegroup}.{name}-{instance:x}"` 是协议级承诺,不可改.
+/// 格式 `"{namespace}_{servicegroup}.{name}-{instance_id:x}"` 是协议级承诺,不可改.
 pub fn instance_subject(portname_id: &PortNameId, instance_id: u64) -> String {
     let namespace = &portname_id.namespace;
     let servicegroup = &portname_id.servicegroup;
@@ -882,18 +882,18 @@ mod tests {
         });
     }
 
-    // Integration test for object store data operations using bincode
+    // 使用 bincode 的对象存储数据操作集成测试
     #[tokio::test]
-    #[ignore] // Requires NATS server to be running
+    #[ignore] // 需要 NATS 服务器运行
     async fn test_object_store_data_operations() {
-        // Create test data
+        // 构造测试数据
         let test_data = TestData {
             id: 42,
             name: "test_item".to_string(),
             values: vec![1.0, 2.5, 3.7, 4.2],
         };
 
-        // Set up client
+        // 准备客户端
         let client_options = ClientOptions::builder()
             .server("nats://localhost:4222")
             .build()
@@ -904,33 +904,33 @@ mod tests {
             .await
             .expect("Failed to connect to NATS");
 
-        // Test URL (using .bin extension to indicate binary format)
+        // 测试 URL（用 .bin 后缀表示二进制格式）
         let url = Url::parse("nats://localhost/test-bucket/test-data.bin")
             .expect("Failed to parse URL");
 
-        // Upload the data
+        // 上传数据
         client
             .object_store_upload_data(&test_data, &url)
             .await
             .expect("Failed to upload data");
 
-        // Download the data
+        // 下载数据
         let downloaded_data: TestData = client
             .object_store_download_data(&url)
             .await
             .expect("Failed to download data");
 
-        // Verify the data matches
+        // 校验数据一致
         assert_eq!(test_data, downloaded_data);
 
-        // Clean up
+        // 清理
         client
             .object_store_delete_bucket("test-bucket")
             .await
             .expect("Failed to delete bucket");
     }
 
-    // Integration test for broadcast pattern with purging
+    // 广播模式 + 清理的集成测试
     #[tokio::test]
     #[ignore]
     async fn test_nats_queue_broadcast_with_purge() {
@@ -1107,7 +1107,7 @@ mod tests {
             .expect("Failed to delete test stream");
     }
 
-    // === SECTION: 合并自原 mod supplemental_tests ===
+    // === SECTION: 合并自 supplemental_tests 模块 ===
     // ## 测试过程
     // 7 类路径:常量与 server validator,NatsAuth 优先级与脱敏,ClientOptions
     // 连接失败/校验失败,URL 拆解 + instance_subject 格式,Queue 构造器 slugify,
@@ -1289,7 +1289,7 @@ mod tests {
             dequeue_timeout,
         );
 
-        // publish_event serialization failure path (NaN cannot be represented in JSON).
+        // publish_event 序列化失败路径（NaN 无法在 JSON 中表示）.
         #[derive(Serialize)]
         struct BadEvent {
             v: f64,
@@ -1301,26 +1301,25 @@ mod tests {
             .err()
             .expect("publish_event should fail serialization for NaN");
         assert!(!serialize_err.to_string().is_empty());
-
         let connect_res = timeout(Duration::from_secs(5), q.connect()).await;
         match connect_res {
             Ok(Ok(())) => {
                 q.close().await.expect("close should always succeed");
             }
             Ok(Err(_)) | Err(_) => {
-                // In disconnected mode these methods should surface connection failures.
+                // 未连接状态下这些方法应暴露连接失败.
                 assert!(q.ensure_connection().await.is_err());
             }
         }
 
         let _ = q.close().await.expect("close should always succeed");
 
-        // Explicit consumer name branch returns Ok even when not connected.
+        // 显式传入 consumer 名的分支，即使未连接也返回 Ok.
         q.shutdown(Some("other-consumer".to_string()))
             .await
             .expect("shutdown with explicit consumer should be no-op when disconnected");
 
-        // No explicit consumer delegates to close and still succeeds.
+        // 不传 consumer 时委托给 close，同样成功.
         q.shutdown(None)
             .await
             .expect("shutdown without explicit consumer should close disconnected queue");
@@ -1335,7 +1334,7 @@ mod tests {
             dequeue_timeout,
         );
 
-        // Force no connection and no stream to hit local validation branches.
+        // 强制无连接且无 stream，以命中本地校验分支.
         q.client = None;
         q.message_stream = None;
 
@@ -1346,7 +1345,7 @@ mod tests {
             .expect("publish_event_bytes should fail when disconnected");
         assert!(err.to_string().contains("Client not connected"));
 
-        // dequeue_task should try ensure_connection first and fail in disconnected setup.
+        // dequeue_task 应先调 ensure_connection，在未连接场景下失败.
         assert!(q.dequeue_task(Some(Duration::from_millis(1))).await.is_err());
         assert!(q.count_consumers().await.is_err());
         assert!(q.list_consumers().await.is_err());
@@ -1363,7 +1362,7 @@ mod tests {
             return;
         };
 
-        // Accessors and basic listing methods
+        // 访问器与基本列表方法
         let _raw_client = client.client();
         let _js = client.jetstream();
         let addr = client.addr();
@@ -1371,7 +1370,7 @@ mod tests {
 
         let _ = client.list_streams().await.expect("list_streams should succeed");
 
-        // Object store methods exercise private get_or_create_bucket via public API.
+        // 对象存储方法通过公共 API 间接驱动私有的 get_or_create_bucket.
         let bucket = format!("supp-bucket-{}", uuid::Uuid::new_v4());
         let key = "obj.bin";
         let url = Url::parse(&format!("nats://localhost/{bucket}/{key}"))
@@ -1419,7 +1418,7 @@ mod tests {
             .object_store_delete_bucket(&bucket)
             .await
             .expect("object_store_delete_bucket should succeed");
-        // idempotent delete branch (already gone)
+        // 幂等删除分支（bucket 已不存在）
         client
             .object_store_delete_bucket(&bucket)
             .await
@@ -1472,7 +1471,7 @@ mod tests {
             .expect("list_consumers should succeed");
         assert!(consumers.iter().any(|c| c == &consumer_name));
 
-        // scrape_service should return a subscription; no response required for this API test.
+        // scrape_service 应返回一个订阅;本 API 测试不需要对端响应.
         let _subscription = client
             .scrape_service("nonexistent-service")
             .await

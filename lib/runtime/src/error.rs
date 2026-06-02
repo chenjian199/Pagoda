@@ -26,8 +26,8 @@
 //! - [`match_error_chain`]: 走链;遇到 exclude 立即 `false`;否则 match 至少命中一项就 `true`.
 //!
 //! # 实现要点
-//! - 两个枚举的 Display 都抽为"变体名映射到 &'static str"的帮手函数,避免与
-//!   lib-copy 一样每个变体一条 `write!` 调用;
+//! - 两个枚举的 Display 都抽为"变体名映射到 &'static str"的帮手函数,避免
+//!   每个变体一条 `write!` 调用;
 //! - 引入私有 `ErrorChainIter` 迭代器,把 `match_error_chain` 的循环改写为函数式 `any`/`all`;
 //! - `From<Box<dyn Error>>` 用 `downcast` 走零拷贝路径,否则下放到 `From<&dyn Error>`.
 
@@ -279,10 +279,10 @@ pub fn match_error_chain(
 ) -> bool {
     let mut hit = false;
     for node in chain(err) {
-        let Some(dyn_err) = node.downcast_ref::<PagodaError>() else {
+        let Some(pagoda_err) = node.downcast_ref::<PagodaError>() else {
             continue;
         };
-        let ty = dyn_err.error_type();
+        let ty = pagoda_err.error_type();
         if exclude_set.contains(&ty) {
             return false;
         }

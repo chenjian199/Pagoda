@@ -263,7 +263,7 @@ mod tests {
         let result = handle.join().await;
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
-        // Check that the error contains either the original message or the context
+        // 校验错误信息中包含原始消息或附加的上下文之一
         assert!(
             error_msg.contains("Critical task failed!")
                 || error_msg.contains("Critical task 'test-failure-task' failed"),
@@ -382,7 +382,7 @@ mod tests {
 
         let result1 = handle1.join().await;
         assert!(result1.is_ok());
-        assert!(!task1_completed.load(Ordering::SeqCst)); // Should not have completed normally
+        assert!(!task1_completed.load(Ordering::SeqCst)); // 不应按正常流程完成
     }
 
     #[tokio::test]

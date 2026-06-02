@@ -10,7 +10,7 @@
 //! 让下游 `use pagoda_runtime::{Runtime, Worker, Result, Error}` 即可。
 //!
 //! ## 外部契约
-//! - 顶层 `pub use` 集合（外部 API 表面，与 lib-copy 严格一致）：
+//! - 顶层 `pub use` 集合（外部 API 表面）：
 //!   - `anyhow` 别名：`Context as ErrorContext` / `Error` / `Ok as OK` /
 //!     `Result` / `anyhow as error` / `bail as raise`。
 //!   - `config::RuntimeConfig`、`system_status_server::SystemStatusServerInfo`。
@@ -33,7 +33,7 @@
 //! - crate 级 `use std::{...}` / `OnceCell` / `PortName` / `GracefulShutdownTracker`
 //!   / `HealthStatus` 等 internal-only 导入保留原貌：它们供子模块通过
 //!   `crate::...` 路径间接引用，并被 `#![allow(unused_imports)]` 兜底。
-//! - `pub use` 中保留 `Ok as OK` 这种大写别名是与 lib-copy 一致的历史约定，
+//! - `pub use` 中保留 `Ok as OK` 这种大写别名是约定俗成的命名，
 //!   不可换成 `Ok`（会和 prelude 冲突）。
 
 #![allow(dead_code)]

@@ -4,20 +4,20 @@
 //! # `pipeline::network::ingress::push_handler` —— PushWorkHandler 处理器实现
 //!
 //! ## 设计意图
-//! ingress 侧端点收到一条请求后，需要把"反序列化 → 调用本地 AsyncEngine → 把响应流通过
-//! response plane 推回"这一连串动作封装成可复用对象。本文件提供该实现，让
-//! NATS / TCP / HTTP server 都能共用同一份请求处理逻辑。
+//! ingress 侧端点收到一条请求后，需要把“反序列化 → 调用本地 AsyncEngine → 通过
+//! response plane 回传响应流”这一整串动作封装成可复用对象。本文件提供这一实现，
+//! 让 NATS / TCP / HTTP server 都能共用同一份请求处理逻辑。
 //!
 //! ## 外部契约
 //! - `pub trait PushWorkHandler` 由 ingress.rs 定义；本文件提供其默认实现结构体，
-//!   完全一致；不引入额外的 helper 方法或类型别名。
+//!   不引入额外的 helper 方法或类型别名。
 //! - `handle_payload(payload, request_id)` 的错误语义、tracing span / metric 增量
 //!   都属于契约。
 //!
 //! ## 实现要点
 //! - 反序列化失败、响应流断开等错误统一返回 `anyhow::Error`，由调用方决定是否降级；
-//!   不在本文件内做 retry。
-//! - response plane 的 `mpsc::Sender` 在响应流耗尽后立即 drop，触发下游 close。
+//!   不在本文件内做重试。
+//! - response plane 的 `mpsc::Sender` 在响应流耗尽后立即 drop，触发下游关闭。
 
 use super::*;
 
@@ -33,7 +33,7 @@ use std::time::Instant;
 use tracing::Instrument;
 use tracing::info_span;
 
-/// Metrics configuration for profiling work handlers
+/// 用于分析工作处理器的指标配置。
 #[derive(Clone, Debug)]
 pub struct WorkHandlerMetrics {
     pub request_counter: IntCounter,
@@ -66,7 +66,7 @@ impl WorkHandlerMetrics {
         }
     }
 
-    /// Create WorkHandlerMetrics from an portname using its built-in labeling
+    /// 根据内置标签，从某个 portname 创建 WorkHandlerMetrics。
     pub fn from_portname(
         portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
@@ -79,9 +79,8 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
-        // Custom buckets for inference workloads: retain sub-second resolution for
-        // fast operations, extend well beyond the default 10s ceiling to capture
-        // long-running generation requests that can last minutes.
+        // 推理工作负载使用自定义 bucket：保留亚秒级分辨率用于快速操作，
+        // 同时把上限扩展到默认 10 秒之外，以覆盖可能持续数分钟的长生成请求。
         let request_duration_buckets = vec![
             0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0,
             300.0, 600.0,
@@ -136,8 +135,8 @@ impl WorkHandlerMetrics {
     }
 }
 
-// RAII guard to ensure inflight gauge is decremented, request duration is observed,
-// and lifecycle logs are emitted on all code paths.
+// RAII 守卫，用于确保 inflight 计数递减、请求时长被记录，
+// 并且在所有代码路径上都会输出生命周期日志。
 struct RequestMetricsGuard {
     inflight_requests: prometheus::IntGauge,
     request_duration: prometheus::Histogram,
@@ -167,7 +166,7 @@ where
         portname: &crate::servicegroup::PortName,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        // Call the Ingress-specific add_metrics implementation
+        // 调用 Ingress 侧特定的 add_metrics 实现。
         use crate::pipeline::network::Ingress;
         Ingress::add_metrics(self, portname, metrics_labels)
     }
@@ -191,7 +190,7 @@ where
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
 
-        // Increment inflight and ensure it's decremented on all exits via RAII guard
+        // 递增 inflight，并通过 RAII 守卫确保在所有退出路径上递减。
         let _inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
             m.inflight_requests.inc();
@@ -207,13 +206,13 @@ where
             }
         });
 
-        // decode the control message and the request
+        // 解码控制消息和请求体。
         let msg = TwoPartCodec::default()
             .decode_message(payload)?
             .into_message_type();
 
-        // we must have a header and a body
-        // it will be held by this closure as a Some(permit)
+        // 必须同时拿到 header 和 body。
+        // 这会被这个闭包以 Some(permit) 的形式持有。
         let (control_msg, request) = match msg {
             TwoPartMessageType::HeaderAndData(header, data) => {
                 tracing::trace!(
@@ -250,19 +249,19 @@ where
             }
         };
 
-        // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
+        // 使用跨进程的墙钟时间戳计算网络传输时间（T2 - T1）。
         if let Some(t1_ns) = control_msg.frontend_send_ts_ns {
             let transit_ns = t2_wallclock_ns.saturating_sub(t1_ns);
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // extend request with context
+        // 为请求补充上下文。
         tracing::trace!("received control message: {:?}", control_msg);
         tracing::trace!("received request: {:?}", request);
         let request: context::Context<T> = Context::with_id(request, control_msg.id);
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
+        // TODO：后续会有一个 handler 类返回抽象化对象；但目前这里只支持 TCP，
+        // 所以可以直接解包连接信息。
         tracing::trace!("creating tcp response stream");
         let mut publisher = tcp::client::TcpClient::create_response_stream(
             request.context(),
@@ -295,8 +294,8 @@ where
                 PipelineError::GenerateError(e)
             });
 
-        // the prolouge is sent to the client to indicate that the stream is ready to receive data
-        // or if the generate call failed, the error is sent to the client
+        // prologue 会发给客户端，用于指示流已准备好接收数据；
+        // 如果 generate 调用失败，则会把错误发送给客户端。
         let mut stream = match stream {
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
@@ -327,7 +326,7 @@ where
 
         let context = stream.context();
 
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
+        // TODO：未来使用 Server-Sent Events（SSE）检测流结束。
         let mut send_complete_final = true;
         let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
@@ -348,22 +347,20 @@ where
             if (publisher.send(resp_bytes.into()).await).is_err() {
                 send_complete_final = false;
                 if context.is_stopped() {
-                    // Say there are 2 threads accessing `context`, the sequence can be either:
-                    // 1. context.stop_generating (other) -> publisher.send failure (this)
-                    //    -> context.is_stopped (this)
-                    // 2. publisher.send failure (this) -> context.stop_generating (other)
-                    //    -> context.is_stopped (this)
-                    // Case 1 can happen when client closed the connection after receiving the
-                    // complete response from frontend. Hence, send failure can be expected in this
-                    // case.
+                    // 假设有 2 个线程在访问 `context`，顺序可能是：
+                    // 1. context.stop_generating（其他线程）→ publisher.send 失败（当前线程）
+                    //    → context.is_stopped（当前线程）
+                    // 2. publisher.send 失败（当前线程）→ context.stop_generating（其他线程）
+                    //    → context.is_stopped（当前线程）
+                    // 情况 1 可能出现在客户端已经收到前端发来的完整响应并关闭连接之后，
+                    // 因此这种 send 失败是可预期的。
                     tracing::warn!("Failed to publish response for stream {}", context.id());
                 } else {
-                    // Otherwise, this is an error.
+                    // 否则，这就是错误。
                     tracing::error!("Failed to publish response for stream {}", context.id());
                     context.stop_generating();
                 }
-                // Account errors in all cases, including cancellation. Therefore this metric can be
-                // inflated.
+                // 无论哪种情况都要统计错误，包括取消。因此这个指标可能会偏高。
                 if let Some(m) = self.metrics() {
                     m.error_counter
                         .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
@@ -371,8 +368,8 @@ where
                 }
                 break;
             } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
+                // 只在非错误分片上通知。错误响应不能证明引擎健康，
+                // 不应重置 canary 计时器。
                 if let Some(notifier) = self.portname_health_check_notifier.get() {
                     notifier.notify_one();
                 }
@@ -399,7 +396,7 @@ where
                         .inc();
                 }
             }
-            // Only notify on stream completion if no error responses were seen
+            // 只有在未见到错误响应时，才在流完成时通知。
             if let (false, Some(notifier)) = (
                 saw_error_response,
                 self.portname_health_check_notifier.get(),
@@ -408,8 +405,8 @@ where
             }
         }
 
-        // Ensure the metrics guard is not dropped until the end of the function.
-        // Drop fires "request completed" log via RAII.
+        // 确保指标守卫不会在函数结束前被提前 drop。
+        // drop 时会通过 RAII 触发“request completed”日志。
         drop(_inflight_guard);
 
         Ok(())

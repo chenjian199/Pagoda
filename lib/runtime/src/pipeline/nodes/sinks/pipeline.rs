@@ -18,7 +18,7 @@
 //! - `impl Source<Resp> for ServiceBackend<Req, Resp> where Req: PipelineIO`：
 //!   - `on_next` 透传到 `self.inner.on_next(...)`；
 //!   - `set_edge` 透传到 `self.inner.set_edge(...)`。
-//! - **泛型 bound 严格匹配基线**：`Sink` 实现需 `Req: PipelineIO + Sync`，
+//! - **泛型 bound 严格区分**：`Sink` 实现需 `Req: PipelineIO + Sync`，
 //!   `Source` 实现仅需 `Req: PipelineIO`（**不**带 `Sync`）；这一不对称
 //!   是契约的一部分，禁止统一加 `Sync`。
 //!
@@ -28,7 +28,7 @@
 //!   PipelineError` 等全部名称；本文件不重复 import。
 //! - `from_engine` 直接 `Arc::new(Self { engine, inner: SinkEdge::default() })`，
 //!   不暴露 `new` / `default`，避免外部错误构造一个无引擎的 `ServiceBackend`。
-//! - `on_data` 中保留变量名 `stream`（而非 `resp`），与基线保持一致，便于
+//! - `on_data` 中保留变量名 `stream`（而非 `resp`），便于
 //!   读者识别"响应可能是单值或流"的事实语义。
 
 use super::*;

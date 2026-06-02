@@ -116,7 +116,7 @@ mod tests {
             match &self.ipv4_result {
                 Ok(addr) => Ok(*addr),
                 Err(Error::LocalIpAddressNotFound) => Err(Error::LocalIpAddressNotFound),
-                Err(_) => Err(Error::LocalIpAddressNotFound), // Simplify for testing
+                Err(_) => Err(Error::LocalIpAddressNotFound), // 测试场景下简化处理
             }
         }
 
@@ -125,7 +125,7 @@ mod tests {
             match &self.ipv6_result {
                 Ok(addr) => Ok(*addr),
                 Err(Error::LocalIpAddressNotFound) => Err(Error::LocalIpAddressNotFound),
-                Err(_) => Err(Error::LocalIpAddressNotFound), // Simplify for testing
+                Err(_) => Err(Error::LocalIpAddressNotFound), // 测试场景下简化处理
             }
         }
     }

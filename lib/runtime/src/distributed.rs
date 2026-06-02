@@ -10,14 +10,11 @@
 //! 3. 「热状态可观测」:`MetricsRegistry` + `system_health()` 上报运行时指标。
 //!
 //! # 外部契约
-//! - `pub struct DistributedRuntime { ... }`:使用者主要接口与返回类型;
-//! - `DistributedRuntime::new(rt, cfg)` 同步构造(内部需 tokio 运行时);
-//! - `DistributedRuntime::from_settings(rt)` / `from_settings_with_discovery`:
-//!   从环境变量初始化,避免调用方手拼 `DistributedConfig`;
-//! - `enum DiscoveryBackend { Etcd, Process }`,
-//!   `struct DistributedConfig { discovery_backend, .. }`,
-//!   `enum RequestPlaneMode { Nats, Http, Tcp }` + `FromStr` / `Display` (全小写);
-//! - `pub mod distributed_test_utils`:对外暴露给 integration 测试的辅助构造器。
+//! - 分布式运行时根对象提供主要接口与返回类型；
+//! - 主构造函数会同步完成初始化，但内部需要 tokio 运行时；
+//! - 提供从环境变量直接创建的入口，避免调用方手动拼装配置；
+//! - discovery backend、运行配置和 request plane 模式都有明确的枚举与解析规则；
+//! - 测试辅助模块对外暴露给集成测试使用。
 //!
 //! # 实现要点
 //! - 后端接入全部点起后才初始化:`etcd_client` / `nats_client` / `tcp_server`
@@ -48,7 +45,7 @@ use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
 use crate::runtime::Runtime;
 
-// Used instead of std::cell::OnceCell because get_or_try_init there is nightly
+// 这里使用它而不是 std::cell::OnceCell，因为后者的 get_or_try_init 仍是 nightly。
 use async_once_cell::OnceCell;
 
 use std::fmt;
@@ -68,8 +65,8 @@ type RoutingOccupancyMap = HashMap<PortName, Weak<RoutingOccupancyState>>;
 
 // === SECTION: DistributedRuntime ===
 
-/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
-/// communication protocols and transports.
+/// 分布式 [Runtime]，为集群内共享资源提供访问能力，这包括
+/// 通信协议和传输层。
 #[derive(Clone)]
 pub struct DistributedRuntime {
     // local runtime
@@ -81,18 +78,18 @@ pub struct DistributedRuntime {
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
 
-    // Service discovery client
+    // 服务发现客户端。
     discovery_client: Arc<dyn discovery::Discovery>,
 
-    // Discovery metadata (only used for Kubernetes backend)
-    // Shared with system status server to expose via /metadata portname
+    // 发现元数据（仅用于 Kubernetes 后端）。
+    // 与 system status server 共享，用于通过 /metadata portname 暴露。
     discovery_metadata: Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>>,
 
-    // local registry for servicegroups
-    // the registry allows us to use share runtime resources across instances of the same servicegroup object.
-    // take for example two instances of a client to the same remote servicegroup. The registry allows us to use
-    // a single portname watcher for both clients, this keeps the number background tasking watching specific
-    // paths in etcd to a minimum.
+    // servicegroup 的本地 registry。
+    // 该 registry 允许我们在同一 servicegroup 对象的多个实例之间共享 runtime 资源。
+    // 例如，两个客户端实例都连接到同一个远端 servicegroup 时，registry 允许我们
+    // 只使用一个 portname watcher 覆盖两者，从而把监视 etcd 中特定路径的后台任务数
+    // 降到最低。
     servicegroup_registry: servicegroup::Registry,
 
     portname_discovery_sources: Arc<tokio::sync::Mutex<PortNameDiscoverySourceMap>>,
@@ -101,20 +98,20 @@ pub struct DistributedRuntime {
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
 
-    // Local portname registry for in-process calls
+    // 进程内调用的本地 portname registry。
     local_portname_registry: crate::local_portname_registry::LocalPortNameRegistry,
 
-    // This hierarchy's own metrics registry
+    // 该层级自身的指标 registry。
     metrics_registry: MetricsRegistry,
 
-    // Registry for /engine/* route callbacks
+    // `/engine/*` 路由回调的 registry。
     engine_routes: crate::engine_routes::EngineRouteRegistry,
 
-    // Backs `/v1/metadata/{model_slug}/{model_suffix}/{filename}`.
+    // 支撑 `/v1/metadata/{model_slug}/{model_suffix}/{filename}`。
     metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
 
-    // Resolved event transport kind — set once at construction time from
-    // PGD_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
+    // 已解析的事件传输类型——在构造时由 PGD_EVENT_PLANE + discovery backend 决定一次；
+    // 由 default_event_transport_kind() 返回。
     event_transport_kind: crate::discovery::EventTransportKind,
 }
 
@@ -184,10 +181,10 @@ impl DistributedRuntime {
             None => None,
         };
 
-        // Start system status server for health and metrics if enabled in configuration
+        // 如果配置中启用，则启动 system status server 以提供健康和指标。
         let runtime_config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-        // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
-        // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
+        // 重要：必须在把 runtime 移入下面的结构体之前，从 runtime 中提取 cancel_token。
+        // 因为一旦移动完成，当前作用域里就不再能访问 runtime（所有权规则）。
         let cancel_token = runtime_config
             .system_server_enabled()
             .then(|| runtime.clone().child_token());
@@ -208,7 +205,7 @@ impl DistributedRuntime {
         let primary_token = runtime.primary_token();
         let child_token = runtime.child_token();
 
-        // Initialize discovery client based on backend configuration
+        // 根据后端配置初始化 discovery client。
         let discovery_setup = match discovery_backend {
             DiscoveryBackend::Kubernetes => {
                 tracing::info!("Initializing Kubernetes discovery backend");
@@ -251,7 +248,7 @@ impl DistributedRuntime {
 
         let servicegroup_registry = servicegroup::Registry::new();
 
-        // NetworkManager for request plane
+        // 请求平面的 NetworkManager。
         let network_manager = {
             let request_plane_client = nats_client.as_ref().map(|client| client.client().clone());
             Arc::new(NetworkManager::new(
@@ -282,14 +279,14 @@ impl DistributedRuntime {
             event_transport_kind,
         };
 
-        // Initialize the uptime gauge in SystemHealth
+        // 在 SystemHealth 中初始化 uptime gauge。
         {
             let system_health = distributed_runtime.system_health.lock();
             system_health.initialize_uptime_gauge(&distributed_runtime)?;
         }
 
-        // Register an update callback so the uptime gauge is refreshed before
-        // every Prometheus scrape (both system status server and frontend).
+        // 注册更新回调，以便在每次 Prometheus scrape 之前刷新 uptime gauge
+        //（system status server 和前端两边都适用）。
         distributed_runtime.metrics_registry.add_update_callback({
             let system_health = Arc::clone(&distributed_runtime.system_health);
             let callback: PrometheusUpdateCallback = Arc::new(move || {
@@ -299,7 +296,7 @@ impl DistributedRuntime {
             callback
         });
 
-        // Handle system status server initialization
+        // 处理 system status server 的初始化。
         match cancel_token {
             Some(cancel_token) => {
                 let host = runtime_config.system_host.clone();
@@ -343,7 +340,7 @@ impl DistributedRuntime {
             }
         }
 
-        // Start health check manager if enabled
+        // 如果启用，则启动健康检查管理器。
         if runtime_config.health_check_enabled {
             let health_check_config = crate::health_check::HealthCheckConfig {
                 canary_wait_time: Duration::from_secs(runtime_config.canary_wait_time_secs),
@@ -352,7 +349,7 @@ impl DistributedRuntime {
                 ),
             };
 
-            // Start the health check manager (spawns per-portname monitoring tasks)
+            // 启动健康检查管理器（为每个 portname 派发监控任务）。
             match crate::health_check::start_health_check_manager(
                 distributed_runtime.clone(),
                 Some(health_check_config),
@@ -400,8 +397,8 @@ impl DistributedRuntime {
         runtime.primary_token()
     }
 
-    // TODO: Don't hand out pointers, instead have methods to use the registry in friendly ways
-    // (without being aware of async locks and so on)
+    // TODO：不要直接把指针发出去，而是提供更友好的方法来使用 registry
+    //（让调用方不用感知 async lock 等细节）。
     // 中文说明：
     // 1. 这个函数把组件注册表的引用暴露出去，供其它模块读取或操作已注册组件。
     // 2. 这里使用 match 只是为了把返回对象写得更显式，强调返回值就是当前结构里的 servicegroup_registry 字段。
@@ -412,7 +409,7 @@ impl DistributedRuntime {
         }
     }
 
-    // TODO: Don't hand out pointers, instead provide system health related services.
+    // TODO：不要直接发出指针，而是提供 system health 相关服务。
     // 中文说明：
     // 1. 这个函数提供系统健康状态对象的共享访问入口。
     // 2. 因为内部字段是 Arc 包裹的互斥对象，所以这里通过 Arc::clone 增加一个共享引用计数。
@@ -425,7 +422,7 @@ impl DistributedRuntime {
     // 1. 这个函数返回本地端点注册表，供进程内直连调用场景使用。
     // 2. 代码通过 match 显式取出 local_portname_registry 字段，表达“这里只是转交现有注册表”。
     // 3. 返回引用而不是复制对象，保证所有调用方看到的是同一个本地端点注册中心。
-    /// Get the local portname registry for in-process portname calls
+    /// 获取进程内 portname 调用的本地 portname registry。
     pub fn local_portname_registry(
         &self,
     ) -> &crate::local_portname_registry::LocalPortNameRegistry {
@@ -438,7 +435,7 @@ impl DistributedRuntime {
     // 1. 这个函数把 /engine/* 路由注册表暴露给上层，以便外部注册自定义引擎路由。
     // 2. 它通过 match 明确返回当前运行时内部保存的 engine_routes 字段。
     // 3. 由于只是返回不可变引用，所以不会触发任何路由注册行为，也不会修改现有状态。
-    /// Get the engine route registry for registering custom /engine/* routes
+    /// 获取 engine route registry，用于注册自定义 `/engine/*` 路由。
     pub fn engine_routes(&self) -> &crate::engine_routes::EngineRouteRegistry {
         match &self.engine_routes {
             routes => routes,
@@ -488,7 +485,7 @@ impl DistributedRuntime {
     // 1. 这个函数向外返回 discovery 接口，供服务注册、发现和实例查询等逻辑使用。
     // 2. 内部字段是 Arc<dyn Discovery>，因此这里使用 Arc::clone 复制共享指针而不是复制底层对象。
     // 3. 调用方拿到新的 Arc 后，可以独立持有 discovery 客户端，而不会影响当前运行时的所有权结构。
-    /// Returns the discovery interface for service registration and discovery
+    /// 返回用于服务注册与发现的 discovery 接口。
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         Arc::clone(&self.discovery_client)
     }
@@ -554,10 +551,10 @@ impl DistributedRuntime {
     // 1. 这个函数提供网络管理器的共享访问入口。
     // 2. 因为 network_manager 被 Arc 包裹，所以这里通过 Arc::clone 返回一个新的共享句柄。
     // 3. 这样调用方可以安全地继续使用网络管理器，而不需要关心底层对象的生命周期管理。
-    /// Get the network manager
+    /// 获取 network manager。
     ///
-    /// The network manager consolidates all network configuration and provides
-    /// unified access to request plane servers and clients.
+    /// network manager 会汇总所有网络配置，并为 request plane 的 server 和 client
+    /// 提供统一访问入口。
     pub fn network_manager(&self) -> Arc<NetworkManager> {
         Arc::clone(&self.network_manager)
     }
@@ -566,9 +563,9 @@ impl DistributedRuntime {
     // 1. 这个函数是 request plane server 的便捷访问入口，避免外部重复写拿 manager 再取 server 的流程。
     // 2. 它先通过 network_manager() 获取网络管理器的共享句柄。
     // 3. 然后调用 server().await 创建或获取统一请求平面服务端，并把结果直接返回给调用方。
-    /// Get the request plane server (convenience method)
+    /// 获取 request plane server（便捷方法）。
     ///
-    /// This is a shortcut for `network_manager().await?.server().await`.
+    /// 这相当于 `network_manager().await?.server().await` 的快捷方式。
     pub async fn request_plane_server(
         &self,
     ) -> Result<Arc<dyn crate::pipeline::network::ingress::unified_server::RequestPlaneServer>>
@@ -581,7 +578,7 @@ impl DistributedRuntime {
     // 1. 这个函数查询系统状态服务是否已经启动，并返回对应的服务信息对象。
     // 2. 它先从 OnceLock 中尝试读取已经保存的 SystemStatusServerInfo。
     // 3. 如果服务存在，就克隆一份 Arc 返回；如果尚未启动或初始化失败，则返回 None 表示没有可用信息。
-    /// Get system status server information if available
+    /// 如可用，则获取 system status server 信息。
     pub fn system_status_server_info(
         &self,
     ) -> Option<Arc<crate::system_status_server::SystemStatusServerInfo>> {
@@ -595,7 +592,7 @@ impl DistributedRuntime {
     // 1. 这个函数返回当前运行时配置好的 request plane 模式。
     // 2. 代码使用 match 显式取出枚举值，便于表达“这里只是返回字段本身”。
     // 3. 由于 RequestPlaneMode 是可复制的小型枚举，返回时不会带来额外的资源管理成本。
-    /// How the frontend should talk to the backend.
+    /// 前端应如何与后端通信。
     pub fn request_plane(&self) -> RequestPlaneMode {
         match self.request_plane {
             mode => mode,
@@ -606,15 +603,15 @@ impl DistributedRuntime {
     // 1. 这个函数返回在构造 DistributedRuntime 时就已经解析好的事件传输类型。
     // 2. 它不会重新读取环境变量，也不会再次根据后端类型重新推导，保证整个运行期答案一致。
     // 3. 代码先把字段赋给局部变量，再原样返回这个缓存值，强调返回的是启动时确定下来的配置结果。
-    /// Returns the event transport kind this runtime was configured with.
+    /// 返回此 runtime 配置的事件传输类型。
     ///
-    /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
-    /// if `PGD_EVENT_PLANE` is set explicitly that value wins; otherwise the discovery
-    /// backend drives the default (ZMQ for `file`/`mem`, NATS for `etcd`/`kubernetes`).
+    /// 该值在构造时由 `DiscoveryBackend::resolve_event_transport_kind` 只解析一次：
+    /// 如果显式设置了 `PGD_EVENT_PLANE`，则以该值为准；否则由 discovery backend
+    /// 决定默认值（`file`/`mem` 使用 ZMQ，`etcd`/`kubernetes` 使用 NATS）。
     ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
-    /// access to a `DistributedRuntime`, so that local-only workflows work without
-    /// setting `PGD_EVENT_PLANE` explicitly.
+    /// 只要手头有 `DistributedRuntime`，就应优先使用这个接口，而不是
+    /// [`EventTransportKind::from_env_or_default`]，这样本地专用流程就无需显式
+    /// 设置 `PGD_EVENT_PLANE`。
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         let event_transport_kind = self.event_transport_kind;
         event_transport_kind
@@ -648,11 +645,9 @@ impl DistributedRuntime {
     // 1. 这个函数用于把外部长时间运行的清理任务注册到优雅关闭流程中。
     // 2. 它先从 Runtime 中拿到统一的 graceful shutdown tracker。
     // 3. 然后调用 register_task 生成守卫对象，只要守卫还活着，关闭流程就会继续等待该任务完成。
-    /// Register an external long-running shutdown task with this runtime's
-    /// graceful-shutdown tracker. While the returned guard is alive,
-    /// `Runtime::shutdown` will keep waiting in Phase 2 (rather than
-    /// advancing to Phase 3 / NATS+etcd teardown). Drop the guard once
-    /// the task has finished.
+    /// 将外部的长运行关闭任务注册到该 runtime 的优雅关闭跟踪器中。
+    /// 在返回的 guard 存活期间，`Runtime::shutdown` 会继续停留在 Phase 2（而不是
+    /// 进入 Phase 3 / NATS+etcd 拆除）。任务完成后再 drop 该 guard。
     pub fn register_graceful_task(&self) -> crate::utils::GracefulTaskGuard {
         let graceful_shutdown_tracker = self.runtime.graceful_shutdown_tracker();
         graceful_shutdown_tracker.register_task()
@@ -670,11 +665,11 @@ impl DistributedRuntime {
     // 1. 这个函数负责把 KV Router 产生的事件消息发布到 NATS 指定主题。
     // 2. 代码先检查当前运行时是否已经配置 NATS 客户端；如果有，就真正执行 publish 并等待异步发送完成。
     // 3. 如果没有 NATS，则把这次发布视为可选行为，只记录一条 trace 日志后返回 Ok(())，避免近似模式下报错。
-    /// TODO: This is a temporary KV router measure for servicegroup/servicegroup.rs EventPublisher impl for
-    /// ServiceGroup, to allow it to publish to NATS. KV Router is the only user.
+    /// TODO：这是给 servicegroup/servicegroup.rs 中 EventPublisher 实现使用的临时 KV router 方案，
+    /// 目的是让它能发布到 NATS。KV Router 是唯一使用者。
     ///
-    /// When NATS is not available (e.g., running in approximate mode with --no-kv-events),
-    /// this function returns Ok(()) silently since publishing is optional in that mode.
+    /// 当 NATS 不可用时（例如以近似模式运行且带 `--no-kv-events`），
+    /// 由于该模式下发布是可选的，这个函数会静默返回 `Ok(())`。
     pub async fn kv_router_nats_publish(
         &self,
         subject: String,
@@ -696,8 +691,8 @@ impl DistributedRuntime {
     // 1. 这个函数为 KV Router 建立一个 NATS 订阅者，用来接收指定主题上的消息。
     // 2. 它先判断当前运行时里是否存在 NATS 客户端；有客户端时就向 NATS 发起 subscribe 请求并返回订阅者。
     // 3. 如果运行时根本没有启用 NATS，则立即返回错误，明确告诉上层这个能力依赖 NATS 支持。
-    /// TODO: This is a temporary KV router measure for servicegroup/servicegroup.rs EventSubscriber impl for
-    /// ServiceGroup, to allow it to subscribe to NATS. KV Router is the only user.
+    /// TODO：这是给 servicegroup/servicegroup.rs 中 EventSubscriber 实现使用的临时 KV router 方案，
+    /// 目的是让它能订阅 NATS。KV Router 是唯一使用者。
     pub(crate) async fn kv_router_nats_subscribe(
         &self,
         subject: String,
@@ -714,9 +709,9 @@ impl DistributedRuntime {
     // 2. 首先它会检查 NATS 客户端是否存在，不存在时立即返回错误，避免继续发请求。
     // 3. 有客户端后，代码把 request 调用包装成 future，再用 tokio::time::timeout 为它增加超时控制。
     // 4. 最后把 timeout 结果和内部 request 结果两层错误都展开，成功时返回收到的 async_nats::Message。
-    /// TODO (karenc): This is a temporary KV router measure for worker query requests.
-    /// Allows KV Router to perform request/reply with workers. (versus the pub/sub pattern above)
-    /// KV Router is the only user, made public for use in pagoda-llm crate
+    /// TODO（karenc）：这是给 worker 查询请求使用的临时 KV router 方案。
+    /// 允许 KV Router 与 worker 做 request/reply（而不是上面的 pub/sub 模式）。
+    /// KV Router 是唯一使用者，之所以公开是为了供 pagoda-llm crate 使用。
     pub async fn kv_router_nats_request(
         &self,
         subject: String,
@@ -746,12 +741,11 @@ impl DistributedRuntime {
     // 6. 服务构建成功后，再次加锁组件注册表，用 entry API 判断最终应插入还是放弃重复服务。
     // 7. 若插入成功就记录新增日志；若发现已有占位，则停止刚创建的重复服务，避免泄漏多余后台资源。
     // 8. 整个流程结束后，后台任务会通过 tx 发送 Ok(()), 调用方可从 rx 中等待最终注册结果。
-    /// DEPRECATED: This method exists only for NATS request plane support.
-    /// Once everything uses the TCP request plane, this can be removed along with
-    /// the NATS service registration infrastructure.
+    /// 已废弃：该方法仅为 NATS request plane 支持而存在。
+    /// 一旦全部切换到 TCP request plane，这里就可以和 NATS 服务注册基础设施一起移除。
     ///
-    /// Returns a receiver that signals when the NATS service registration is complete.
-    /// The caller should use `blocking_recv()` to wait for completion.
+    /// 返回一个 receiver，用于在 NATS 服务注册完成时发出信号。
+    /// 调用方应使用 `blocking_recv()` 等待完成。
     pub fn register_nats_service(
         &self,
         servicegroup: ServiceGroup,
@@ -820,12 +814,12 @@ impl DistributedRuntime {
 
 // === SECTION: DiscoveryBackend ===
 
-/// Selects which discovery backend to use and, for KV store backends, which KV store.
+/// 选择要使用的 discovery backend；对于 KV store 后端，还会选择具体的 KV store。
 #[derive(Clone, Debug)]
 pub enum DiscoveryBackend {
-    /// Use Kubernetes API for service discovery (no KV store needed)
+    /// 使用 Kubernetes API 进行服务发现（不需要 KV store）。
     Kubernetes,
-    /// Use a KV store (etcd, file, or memory) for service discovery
+    /// 使用 KV store（etcd、file 或 memory）进行服务发现。
     KvStore(kv::Selector),
 }
 
@@ -834,11 +828,11 @@ impl DiscoveryBackend {
     // 1. 这个函数用于判断当前 discovery backend 是否属于“本地模式”后端。
     // 2. 对 file 和 memory 这两类 KVStore 选择器，函数返回 true，因为它们不依赖外部基础设施。
     // 3. 对 kubernetes 或其它需要远端依赖的 KVStore 类型，则返回 false，供默认配置逻辑继续分支处理。
-    /// Returns true if this backend requires no external services (file or in-memory).
+    /// 如果该 backend 不需要外部服务（file 或 in-memory），则返回 true。
     ///
-    /// Local backends do not need etcd, NATS, or any other infrastructure daemon.
-    /// This is used to drive smart defaults: for example, the event plane defaults to
-    /// ZMQ (not NATS) when a local backend is in use and `PGD_EVENT_PLANE` is not set.
+    /// 本地后端不需要 etcd、NATS 或其他基础设施守护进程。
+    /// 该结果用于驱动智能默认值：例如在使用本地 backend 且未设置 `PGD_EVENT_PLANE` 时，
+    /// 事件面默认使用 ZMQ（而不是 NATS）。
     pub fn is_local(&self) -> bool {
         match self {
             DiscoveryBackend::KvStore(kv::Selector::File(_))
@@ -853,14 +847,13 @@ impl DiscoveryBackend {
     // 3. 然后读取环境变量；如果显式写了 nats 或 zmq，就直接采用该值。
     // 4. 如果环境变量为空或根本未设置，就回退到前面定义的默认策略。
     // 5. 如果环境变量是非法值，则记录 warning 日志，并返回根据后端推导出的兜底默认值。
-    /// Resolve the event transport kind for this backend.
+    /// 为该 backend 解析事件传输类型。
     ///
-    /// This is the single authoritative mapping of `(PGD_EVENT_PLANE, backend)` →
-    /// `EventTransportKind`. When `PGD_EVENT_PLANE` is unset or empty the backend
-    /// drives the default: local backends (`file`/`mem`) → ZMQ, distributed backends
-    /// (`etcd`/`kubernetes`) → NATS.
+    /// 这是 `(PGD_EVENT_PLANE, backend)` → `EventTransportKind` 的唯一权威映射。
+    /// 当 `PGD_EVENT_PLANE` 未设置或为空时，由 backend 决定默认值：本地 backend
+    ///（`file`/`mem`）→ ZMQ，分布式 backend（`etcd`/`kubernetes`）→ NATS。
     ///
-    /// Call this once at startup and store the result; do not call it repeatedly.
+    /// 应在启动时调用一次并缓存结果，不要重复调用。
     pub fn resolve_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         use crate::config::environment_names::event_plane::PGD_EVENT_PLANE;
         use crate::discovery::EventTransportKind;
@@ -898,10 +891,8 @@ pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
-    /// Resolved event transport kind — computed once at config time from
-    /// `PGD_EVENT_PLANE` and the discovery backend, then stored on the runtime
-    /// so callers always get the same answer regardless of which other services
-    /// happen to be reachable.
+    /// 已解析的事件传输类型——在配置阶段由 `PGD_EVENT_PLANE` 和 discovery backend
+    /// 计算一次，然后存入 runtime，因此无论其它服务是否可达，调用方拿到的答案都一致。
     pub event_transport_kind: crate::discovery::EventTransportKind,
 }
 
@@ -915,8 +906,8 @@ impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
 
-        // Determine the discovery backend first — we need it to compute the NATS default below.
-        // Valid values for PGD_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
+        // 先确定 discovery backend——后面计算 NATS 默认值时需要它。
+        // PGD_DISCOVERY_BACKEND 的有效值："kubernetes"、"etcd"（默认）、"file"、"mem"。
         let backend_value =
             std::env::var("PGD_DISCOVERY_BACKEND").unwrap_or_else(|_| String::from("etcd"));
 
@@ -933,21 +924,20 @@ impl DistributedConfig {
             DiscoveryBackend::KvStore(selector)
         };
 
-        // Resolve event transport kind once — the single source of truth used both to
-        // decide whether to open a NATS connection and to answer
-        // `DistributedRuntime::default_event_transport_kind()` later.
+        // 只解析一次事件传输类型——这既是决定是否打开 NATS 连接的唯一依据，
+        // 也是后续 `DistributedRuntime::default_event_transport_kind()` 的答案来源。
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
         let has_explicit_nats_server =
             std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
 
-        // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (JetStream or NATS core + local indexer)
-        // - inter-router replica sync (NATS core)
+        // NATS 不只用于 request-plane RPC：
+        // - KV router 事件（JetStream 或 NATS core + 本地 indexer）
+        // - router 间副本同步（NATS core）
         //
-        // Enable the NATS client when any of these hold:
-        // 1. Request plane is NATS
-        // 2. NATS_SERVER is explicitly configured by the user
-        // 3. The resolved event transport kind is NATS
+        // 在以下任一情况满足时启用 NATS 客户端：
+        // 1. request plane 是 NATS
+        // 2. 用户显式配置了 NATS_SERVER
+        // 3. 解析出的事件传输类型是 NATS
         let nats_enabled = request_plane.is_nats()
             || has_explicit_nats_server
             || matches!(event_transport_kind, crate::discovery::EventTransportKind::Nats);
@@ -1004,8 +994,7 @@ impl DistributedConfig {
     // 2. 它把 discovery backend 固定为内存型 KVStore，不依赖外部 etcd 或 Kubernetes。
     // 3. 同时把 request plane 固定为 Tcp、event transport 固定为 Zmq，并明确关闭 NATS 配置。
     // 4. 这样返回的配置可以表达一个完全本地、无需额外网络依赖的执行环境。
-    /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
-    /// same process.
+    /// 一个不“分布式”的 DistributedConfig，适用于前端和后端处于同一进程的场景。
     pub fn process_local() -> DistributedConfig {
         let discovery_backend = DiscoveryBackend::KvStore(kv::Selector::Memory);
         let request_plane = RequestPlaneMode::Tcp;
@@ -1014,8 +1003,8 @@ impl DistributedConfig {
         Self {
             discovery_backend,
             nats_config: None,
-            // This won't be used in process local, so we likely need a "none" option to
-            // communicate that and avoid opening the ports.
+            // 在进程内本地模式下不会用到它，所以大概率需要一个 "none" 选项来
+            // 明确表达这一点，并避免打开端口。
             request_plane,
             event_transport_kind,
         }
@@ -1024,19 +1013,19 @@ impl DistributedConfig {
 
 // === SECTION: RequestPlaneMode ===
 
-/// Request plane transport mode configuration
+/// request plane 的传输模式配置。
 ///
-/// This determines how requests are distributed from routers to workers:
-/// - `Nats`: Use NATS for request distribution (legacy)
-/// - `Http`: Use HTTP/2 for request distribution
-/// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
+/// 它决定请求如何从 router 分发到 worker：
+/// - `Nats`：使用 NATS 进行请求分发（旧方案）。
+/// - `Http`：使用 HTTP/2 进行请求分发。
+/// - `Tcp`：使用原生 TCP 进行请求分发，并支持 msgpack（默认）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestPlaneMode {
-    /// Use NATS for request plane
+    /// request plane 使用 NATS。
     Nats,
-    /// Use HTTP/2 for request plane
+    /// request plane 使用 HTTP/2。
     Http,
-    /// Use raw TCP for request plane with msgpack support
+    /// request plane 使用原生 TCP，并支持 msgpack。
     #[default]
     Tcp,
 }
@@ -1088,8 +1077,8 @@ impl RequestPlaneMode {
     // 1. 这个函数从环境变量 PGD_REQUEST_PLANE 中读取请求平面模式。
     // 2. 如果环境变量存在，就尝试把它解析成 RequestPlaneMode；解析失败时退回默认值，避免非法配置导致启动崩溃。
     // 3. 如果环境变量根本不存在，也同样直接返回默认模式，保证系统总能得到一个可用配置。
-    /// Get the request plane mode from environment variable (uncached)
-    /// Reads from `PGD_REQUEST_PLANE` environment variable.
+    /// 从环境变量获取 request plane 模式（不缓存）。
+    /// 读取 `PGD_REQUEST_PLANE` 环境变量。
     fn from_env() -> Self {
         match std::env::var("PGD_REQUEST_PLANE") {
             Ok(value) => value.parse().unwrap_or_default(),
@@ -1106,14 +1095,14 @@ impl RequestPlaneMode {
     }
 }
 
-// === SECTION: distributed_test_utils ===
+// === SECTION: 分布式测试辅助函数 ===
 
 pub mod distributed_test_utils {
-    //! Common test helper functions for DistributedRuntime tests
+    //! DistributedRuntime 测试的通用 helper 函数。
 
-    /// Helper function to create a DRT instance for integration-only tests.
-    /// Uses from_current to leverage existing tokio runtime
-    /// Note: Settings are read from environment variables inside DistributedRuntime::from_settings
+    /// 用于仅集成测试的 DRT 实例创建 helper。
+    /// 使用 from_current 复用现有的 tokio runtime。
+    /// 注意：设置会在 DistributedRuntime::from_settings 内部从环境变量读取。
     #[cfg(feature = "integration")]
     // 中文说明：
     // 1. 这个测试辅助函数用于在集成测试里快速创建一个可用的 DistributedRuntime。
@@ -1138,12 +1127,10 @@ pub mod distributed_test_utils {
         super::DistributedRuntime::new(rt, config).await.unwrap()
     }
 
-    /// Helper function to create a DRT instance which points at
-    /// a (shared) file-backed KV store and ephemeral NATS transport so that
-    /// multiple DRT instances may observe the same registration state.
-    /// NOTE: This gets around the fact that create_test_drt_async() is
-    /// hardcoded to spin up a memory-backed discovery store
-    /// which means we can't share discovery state across runtimes.
+    /// 用于创建一个指向共享文件型 KV store 和临时 NATS 传输的 DRT 实例，
+    /// 以便多个 DRT 实例能够观察到相同的注册状态。
+    /// 注意：这绕过了 create_test_drt_async() 固定启动内存型 discovery store 的限制，
+    /// 因此可以在多个 runtime 之间共享 discovery 状态。
     // 中文说明：
     // 1. 这个测试辅助函数用于创建多个测试运行时可共享发现状态的 DRT 实例。
     // 2. 与内存版辅助函数不同，这里会把 discovery backend 配成文件型 KVStore，并使用传入路径作为共享存储位置。
@@ -1848,5 +1835,3 @@ mod tests {
     }
 }
 
-
-// cargo test -p pagoda-runtime distributed --lib --features integration

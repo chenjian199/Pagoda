@@ -268,17 +268,17 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Barrier;
 
-    /// Test the DistributedRWLock behavior
+    /// 测试 DistributedRWLock 的行为
     ///
-    /// This test verifies:
-    /// 1. Multiple readers can acquire read locks simultaneously
-    /// 2. Write lock fails when readers are active
-    /// 3. Write lock succeeds when no locks are held
-    /// 4. Read lock waits for write lock to be released
+    /// 本测试验证:
+    /// 1. 多个读者可以同时获取读锁
+    /// 2. 存在活跃读者时写锁失败
+    /// 3. 没有任何锁被持有时写锁成功
+    /// 4. 读锁会等待写锁被释放
     #[cfg(feature = "testing-etcd")]
     #[tokio::test]
     async fn test_distributed_rwlock() {
-        // Setup: Create etcd client
+        // 准备: 创建 etcd 客户端
         let runtime = Runtime::from_settings().unwrap();
         let etcd_client = Client::builder()
             .etcd_url(vec!["http://localhost:2379".to_string()])
@@ -286,29 +286,29 @@ mod tests {
             .unwrap();
         let etcd_client = Client::new(etcd_client, runtime).await.unwrap();
 
-        // Prevent runtime from being dropped in async context at end of test
+        // 避免运行时在测试末尾的异步上下文中被 drop
         let etcd_client = std::mem::ManuallyDrop::new(etcd_client);
 
-        // Create RWLock with unique prefix for this test
+        // 为本测试创建带唯一前缀的 RWLock
         let test_id = uuid::Uuid::new_v4();
         let lock_prefix = format!("/test/rwlock/{}", test_id);
         let rwlock = DistributedRWLock::new(lock_prefix.clone());
 
-        // Step 1: Acquire first read lock
+        // 步骤 1: 获取第一个读锁
         let _reader1_guard = rwlock
             .read_lock_with_wait(&etcd_client, "reader1", Some(Duration::from_secs(5)))
             .await
             .expect("First read lock should succeed");
         println!("✓ Acquired first read lock");
 
-        // Step 2: Acquire second read lock (should succeed - multiple readers allowed)
+        // 步骤 2: 获取第二个读锁（应成功 —— 允许多读者）
         let _reader2_guard = rwlock
             .read_lock_with_wait(&etcd_client, "reader2", Some(Duration::from_secs(5)))
             .await
             .expect("Second read lock should succeed");
         println!("✓ Acquired second read lock");
 
-        // Step 3: Try to acquire write lock (should fail - readers are active)
+        // 步骤 3: 尝试获取写锁（应失败 —— 读者活跃中）
         let write_result = rwlock.try_write_lock(&etcd_client).await;
         assert!(
             write_result.is_none(),
@@ -316,12 +316,12 @@ mod tests {
         );
         println!("✓ Write lock correctly failed with active readers");
 
-        // Step 4: Drop first read lock
+        // 步骤 4: 丢弃第一个读锁
         drop(_reader1_guard);
-        tokio::time::sleep(Duration::from_millis(50)).await; // Give time for async drop
+        tokio::time::sleep(Duration::from_millis(50)).await; // 留出异步 drop 的时间
         println!("✓ Released first read lock");
 
-        // Verify write lock still fails with one reader active
+        // 验证仍有一个读者活跃时写锁仍失败
         let write_result_with_one_reader = rwlock.try_write_lock(&etcd_client).await;
         assert!(
             write_result_with_one_reader.is_none(),
@@ -330,20 +330,20 @@ mod tests {
         println!("✓ Write lock correctly failed with one reader still active");
 
         drop(_reader2_guard);
-        tokio::time::sleep(Duration::from_millis(50)).await; // Give time for async drop
+        tokio::time::sleep(Duration::from_millis(50)).await; // 留出异步 drop 的时间
         println!("✓ Released second read lock");
 
-        // Give etcd a moment to process the deletions
+        // 给 etcd 一点时间处理删除操作
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Step 5: Acquire write lock (should succeed now - no locks held)
+        // 步骤 5: 获取写锁（现在应成功 —— 无锁被持有）
         let _write_guard = rwlock
             .try_write_lock(&etcd_client)
             .await
             .expect("Write lock should succeed with no readers");
         println!("✓ Acquired write lock");
 
-        // Step 5a: Try to acquire write lock again (should fail immediately - already held)
+        // 步骤 5a: 再次尝试获取写锁（应立即失败 —— 已被持有）
         let write_result_already_held = rwlock.try_write_lock(&etcd_client).await;
         assert!(
             write_result_already_held.is_none(),
@@ -351,8 +351,8 @@ mod tests {
         );
         println!("✓ Write lock correctly failed when already held");
 
-        // Step 6: Spawn background task to acquire read lock
-        // It should wait because write lock is held
+        // 步骤 6: 启动后台任务去获取读锁
+        // 由于写锁被持有，它应该等待
         let barrier = Arc::new(Barrier::new(2));
         let barrier_clone = barrier.clone();
         let rwlock_clone = rwlock.clone();
@@ -360,7 +360,7 @@ mod tests {
 
         let read_task = tokio::spawn(async move {
             println!("→ Background: Attempting to acquire read lock (should wait)...");
-            barrier_clone.wait().await; // Signal that we've started
+            barrier_clone.wait().await; // 告知已经开始
 
             let start = std::time::Instant::now();
             let _guard = rwlock_clone
@@ -375,33 +375,33 @@ mod tests {
             let elapsed = start.elapsed();
             println!("✓ Background: Acquired read lock after {:?}", elapsed);
 
-            // Verify it actually waited (should be > 100ms since we sleep before releasing write lock)
+            // 验证它确实等待过（应 > 100ms，因为释放写锁前会休眠）
             assert!(
                 elapsed > Duration::from_millis(50),
                 "Read lock should have waited for write lock to be released"
             );
 
-            // Guard will be dropped here, releasing the lock
+            // guard 在此处被 drop，释放锁
         });
 
-        // Wait for background task to start
+        // 等待后台任务启动
         barrier.wait().await;
 
-        // Give the background task a moment to start polling
+        // 给后台任务一点时间开始轮询
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Step 7: Release write lock by dropping guard
+        // 步骤 7: 通过丢弃 guard 释放写锁
         println!("→ Releasing write lock...");
         drop(_write_guard);
-        tokio::time::sleep(Duration::from_millis(50)).await; // Give time for async drop
+        tokio::time::sleep(Duration::from_millis(50)).await; // 留出异步 drop 的时间
         println!("✓ Released write lock");
 
-        // Step 8: Background task should now succeed
+        // 步骤 8: 后台任务现在应成功
         read_task
             .await
             .expect("Background task should complete successfully");
 
-        // Final cleanup: verify all locks are released
+        // 最终清理: 验证所有锁都已释放
         tokio::time::sleep(Duration::from_millis(100)).await;
         let remaining_locks = etcd_client
             .kv_get_prefix(&format!("v1/{lock_prefix}"))
@@ -416,7 +416,7 @@ mod tests {
         println!("\n🎉 All DistributedRWLock tests passed!");
     }
 
-    // === SECTION: 合并自原 mod supplemental_tests ===
+    // === SECTION: 合并自 supplemental_tests 模块 ===
     // ## 测试过程
     // 覆盖四种边界：
     // 1. writer 持有时 reader 必须超时；

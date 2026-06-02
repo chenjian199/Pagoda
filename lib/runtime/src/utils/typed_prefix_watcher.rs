@@ -64,12 +64,12 @@ where
 ///
 /// # 示例
 /// ```ignore
-/// // Watch for ModelDeploymentCard objects and extract runtime_config field
+/// // 监听 ModelDeploymentCard 对象并提取其中的 runtime_config 字段
 /// let watcher = watch_prefix_with_extraction(
 ///     etcd_client,
 ///     "v1/mdc/",
-///     |kv| Some(kv.lease()),  // Use lease_id as key
-///     |card: ModelDeploymentCard| card.runtime_config,  // Extract runtime_config field
+///     |kv| Some(kv.lease()),  // 以 lease_id 作为键
+///     |card: ModelDeploymentCard| card.runtime_config,  // 提取 runtime_config 字段
 ///     cancellation_token,
 /// ).await?;
 /// ```
@@ -172,11 +172,11 @@ where
 ///
 /// # 示例
 /// ```ignore
-/// // Watch for TestConfig objects directly
+/// // 直接监听 TestConfig 对象
 /// let watcher = watch_prefix(
 ///     etcd_client,
 ///     "configs/",
-///     |kv| Some(kv.lease()),  // Use lease_id as key
+///     |kv| Some(kv.lease()),  // 以 lease_id 作为键
 ///     cancellation_token,
 /// ).await?;
 /// ```

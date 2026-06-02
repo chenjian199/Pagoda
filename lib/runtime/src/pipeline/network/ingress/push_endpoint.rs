@@ -4,36 +4,36 @@
 //! # `pipeline::network::ingress::push_endpoint` —— NATS Push 服务端点单体启动器
 //!
 //! ## 设计意图
-//! [`PushEndpoint`] 把一个 `async_nats::service::endpoint::Endpoint` 流式请求源
-//! 套接到 [`PushWorkHandler::handle_payload`] 上：
-//! - 主循环 `tokio::select!` 在"下一条请求"与"取消令牌"之间竞争；
-//! - 每条请求 fire-and-forget 地 `tokio::spawn` 进入 handler，主循环立刻回到 `next()`，
-//!   实现单端点内部的全并发服务；
-//! - `AtomicU64` 维护 inflight 计数，`Notify` 在每条任务完成时 `notify_one`，
-//!   `graceful_shutdown=true` 时主循环在取消后会阻塞等待 inflight 归零。
-//! - 与 `SystemHealth` 联动：启动时 `set_portname_registered`、退出时
+//! [`PushEndpoint`] 把一个 `async_nats::service::endpoint::Endpoint` 的流式请求源
+//! 接到 [`PushWorkHandler::handle_payload`] 上：
+//! - 主循环通过 `tokio::select!` 在“下一条请求”和“取消令牌”之间竞争；
+//! - 每条请求都会 fire-and-forget 地 `tokio::spawn` 进入 handler，主循环立刻回到 `next()`，
+//!   从而实现单端点内部的全并发服务；
+//! - `AtomicU64` 维护 in-flight 计数，`Notify` 在每条任务完成时 `notify_one`，
+//!   当 `graceful_shutdown=true` 时，主循环会在取消后阻塞等待 in-flight 归零。
+//! - 与 `SystemHealth` 联动：启动时调用 `set_portname_registered`，退出时调用
 //!   `set_portname_health_status(NotReady)`。
 //!
 //! ## 外部契约
-//! - `pub struct PushEndpoint` 字段全部 `pub`：`service_handler`、`cancellation_token`、
+//! - `pub struct PushEndpoint` 的字段全部是 `pub`：`service_handler`、`cancellation_token`、
 //!   `graceful_shutdown: bool`（`#[builder(default = "true")]`）。
 //! - `pub const VERSION = env!("CARGO_PKG_VERSION")`。
 //! - `pub fn builder() -> PushEndpointBuilder`（由 `derive_builder` 生成的 builder 类型
 //!   `PushEndpointBuilder` 同样 pub）。
 //! - `pub async fn start(self, portname, namespace, servicegroup_name, portname_name,
-//!   instance_id, system_health)` —— 形参签名与顺序为契约。
+//!   instance_id, system_health)` —— 形参签名与顺序本身就是契约。
 //! - **不**提供 `new` / `portname_name` / `request_span` / `enter` / `leave` /
 //!   `count` / `wait_until_empty` / `stop_portname` / `mark_*` / `acknowledge_request`
-//!   等私有抽取出来的辅助方法；inflight、Notify、span 逻辑全部内联在 `start` 中。
+//!   这类从私有实现中抽出来的辅助方法；in-flight、Notify、span 逻辑都内联在 `start` 中。
 //!
 //! ## 实现要点
-//! - `parking_lot::Mutex` 用于 `SystemHealth` 锁；与 `std::sync::Mutex` 不同 API
-//!   (`lock()` 不返回 `Result`)，这是契约的一部分（不可换为 std）。
-//! - `Arc<String>`（不是 `Arc<str>`）三件套 `servicegroup_name_local / portname_name_local
-//!   / namespace_local` 提前装箱，避免每次 spawn clone 字符串。
-//! - request-id 优先从 `request-id`、回退到 `x-pagoda-request-id`，再传入 handler。
-//! - `req.respond(Ok("".into()))` 是 NATS 服务即时 ACK：必须紧跟在 `next()` 之后、
-//!   在 spawn 之前，让客户端尽快释放半同步等待。
+//! - `parking_lot::Mutex` 用于 `SystemHealth` 锁；它和 `std::sync::Mutex` 的 API 不同
+//!   （`lock()` 不返回 `Result`），这是契约的一部分，不能换成 std。
+//! - `Arc<String>`（不是 `Arc<str>`）的三件套 `servicegroup_name_local / portname_name_local
+//!   / namespace_local` 先装箱，避免每次 spawn 都克隆字符串。
+//! - request-id 优先读取 `request-id`，再回退到 `x-pagoda-request-id`，然后传给 handler。
+//! - `req.respond(Ok("".into()))` 是 NATS 服务的即时 ACK：它必须紧跟在 `next()` 之后、
+//!   且在 spawn 之前，这样客户端才能尽快释放半同步等待。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -61,7 +61,7 @@ pub struct PushEndpoint {
     pub graceful_shutdown: bool,
 }
 
-/// version of crate
+/// crate 版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // === SECTION: start 主循环 ===
@@ -96,16 +96,16 @@ impl PushEndpoint {
             let req = tokio::select! {
                 biased;
 
-                // await on service request
+                // 等待服务请求。
                 req = endpoint.next() => {
                     req
                 }
 
-                // process shutdown
+                // 处理关闭流程。
                 _ = self.cancellation_token.cancelled() => {
-                    tracing::info!("PushEndpoint received cancellation signal, shutting down service");
+                    tracing::info!("PushEndpoint 收到取消信号，准备关闭服务。");
                     if let Err(e) = endpoint.stop().await {
-                        tracing::warn!("Failed to stop NATS service: {:?}", e);
+                        tracing::warn!("停止 NATS 服务失败：{:?}", e);
                     }
                     break;
                 }
@@ -115,7 +115,7 @@ impl PushEndpoint {
                 let response = "".to_string();
                 if let Err(e) = req.respond(Ok(response.into())).await {
                     tracing::warn!(
-                        "Failed to respond to request; this may indicate the request has shutdown: {:?}",
+                        "响应请求失败；这可能表示请求已经关闭：{:?}",
                         e
                     );
                 }
@@ -125,12 +125,12 @@ impl PushEndpoint {
                 let servicegroup_name: Arc<String> = Arc::clone(&servicegroup_name_local);
                 let namespace: Arc<String> = Arc::clone(&namespace_local);
 
-                // increment the inflight counter
+                // 增加 in-flight 计数。
                 inflight.fetch_add(1, Ordering::SeqCst);
                 let inflight_clone = inflight.clone();
                 let notify_clone = notify.clone();
 
-                // Handle headers here for tracing
+                // 在这里处理头部以便打 tracing。
                 let span = if let Some(headers) = req.message.headers.as_ref() {
                     make_handle_payload_span(
                         headers,
@@ -143,7 +143,7 @@ impl PushEndpoint {
                     tracing::info_span!(target: "request_span", "handle_payload")
                 };
 
-                // Extract request_id from headers before passing payload
+                // 在传递 payload 之前，从头部提取 request_id。
                 let request_id = req
                     .message
                     .headers
@@ -171,7 +171,7 @@ impl PushEndpoint {
                         }
                     }
 
-                    // decrease the inflight counter
+                    // 减少 in-flight 计数。
                     inflight_clone.fetch_sub(1, Ordering::SeqCst);
                     notify_clone.notify_one();
                 });
@@ -184,27 +184,27 @@ impl PushEndpoint {
             .lock()
             .set_portname_health_status(portname_name_local.as_str(), HealthStatus::NotReady);
 
-        // await for all inflight requests to complete if graceful shutdown
+        // 如果启用优雅关闭，就等待所有 in-flight 请求完成。
         if self.graceful_shutdown {
             let inflight_count = inflight.load(Ordering::SeqCst);
             if inflight_count > 0 {
                 tracing::info!(
                     portname_name = portname_name_local.as_str(),
                     inflight_count = inflight_count,
-                    "Waiting for inflight NATS requests to complete"
+                    "等待 in-flight NATS 请求完成"
                 );
                 while inflight.load(Ordering::SeqCst) > 0 {
                     notify.notified().await;
                 }
                 tracing::info!(
                     portname_name = portname_name_local.as_str(),
-                    "All inflight NATS requests completed"
+                    "所有 in-flight NATS 请求已完成"
                 );
             }
         } else {
             tracing::info!(
                 portname_name = portname_name_local.as_str(),
-                "Skipping graceful shutdown, not waiting for inflight requests"
+                "跳过优雅关闭，不等待 in-flight 请求"
             );
         }
 
@@ -231,7 +231,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
 
-    /// 仅满足 trait 的最小 handler；不在测试中真正运行。
+    /// 仅用于满足 trait 约束的最小 handler；测试中不会真正运行。
     struct NoopHandler;
 
     #[async_trait]

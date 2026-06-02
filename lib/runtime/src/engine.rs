@@ -55,24 +55,24 @@ use futures::stream::Stream;
 
 // === SECTION: Data 与上下文 trait ===
 
-/// All [`Send`] + [`Sync`] + `'static` types can be used as [`AsyncEngine`] request and response types.
+/// 任何满足 [`Send`] + [`Sync`] + `'static` 的类型都可用作 [`AsyncEngine`] 的请求与响应类型。
 ///
-/// This is implemented as a blanket implementation for all types that meet the bounds.
-/// **Do not manually implement this trait** - the blanket implementation covers all valid types.
+/// 该 trait 以“毯子实现”（blanket impl）的方式为所有符合约束的类型自动提供。
+/// **不要手动实现此 trait** —— 毯子实现已涵盖所有合法类型。
 pub trait Data: Send + Sync + 'static {}
 impl<T: Send + Sync + 'static> Data for T {}
 
-/// [`DataStream`] is a type alias for a stream of [`Data`] items. This can be adapted to a [`ResponseStream`]
-/// by associating it with a [`AsyncEngineContext`].
+/// [`DataStream`] 是 [`Data`] 项流的类型别名。通过关联一个 [`AsyncEngineContext`]，
+/// 可以将其适配为 [`ResponseStream`]。
 pub type DataUnary<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
 pub type Engine<Req, Resp, E> = Arc<dyn AsyncEngine<Req, Resp, E>>;
 pub type EngineUnary<Resp> = Pin<Box<dyn AsyncEngineUnary<Resp>>>;
-/// Trait-object alias for an [`AsyncEngineStream`] — used on both sides of an
-/// engine: the input side via [`crate::pipeline::ManyIn`] and the output side via
-/// [`crate::pipeline::ManyOut`]. The directional names exist
-/// at the [`crate::pipeline`] alias layer for documentary clarity at use sites.
+/// [`AsyncEngineStream`] 的 trait 对象别名 —— 在引擎的两侧都会用到：
+/// 输入侧通过 [`crate::pipeline::ManyIn`]，输出侧通过
+/// [`crate::pipeline::ManyOut`]。这些方向性名称存在于
+/// [`crate::pipeline`] 别名层，仅为了在使用点上提升文档可读性。
 pub type EngineStream<T> = Pin<Box<dyn AsyncEngineStream<T>>>;
 pub type Context = Arc<dyn AsyncEngineContext>;
 
@@ -87,168 +87,125 @@ impl<T: Data> From<EngineStream<T>> for DataStream<T> {
     }
 }
 
-// The Controller and the Context when https://github.com/rust-lang/rust/issues/65991 becomes stable
+// 当 https://github.com/rust-lang/rust/issues/65991 稳定后，再合并 Controller 与 Context
 pub trait AsyncEngineController: Send + Sync {}
 
-/// The [`AsyncEngineContext`] trait defines the interface to control the resulting stream
-/// produced by the engine.
+/// [`AsyncEngineContext`] trait 定义了控制引擎所产生结果流的接口。
 ///
-/// This trait provides lifecycle management for async operations, including:
-/// - Stream identification via unique IDs
-/// - Graceful shutdown capabilities (`stop_generating`)
-/// - Immediate termination capabilities (`kill`)
-/// - Status checking for stopped/killed states
+/// 该 trait 为异步操作提供生命周期管理，包括：
+/// - 通过唯一 ID 标识流；
+/// - 优雅停止能力（`stop_generating`）；
+/// - 立即终止能力（`kill`）；
+/// - 对 stopped/killed 状态的查询。
 ///
-/// Implementations should ensure thread-safety and proper state management
-/// across concurrent access patterns.
+/// 实现方应保证线程安全与并发访问下的状态管理正确性。
 #[async_trait]
 pub trait AsyncEngineContext: Send + Sync + Debug {
-    /// Unique ID for the Stream
-    // 中文说明：
-    // 1. 返回当前上下文对应流的唯一标识。
-    // 2. 调用方可以用这个标识做日志追踪、关联关系记录或调试输出。
+    /// 返回当前上下文对应流的唯一标识，可用于日志追踪、关联记录或调试输出。
     fn id(&self) -> &str;
 
-    /// Returns true if `stop_generating()` has been called; otherwise, false.
-    // 中文说明：
-    // 1. 查询当前上下文是否已经收到“停止继续生成”的信号。
-    // 2. 返回 `true` 表示上游应尽快停止产生新结果，但不一定立刻中断现有输出。
+    /// 查询当前上下文是否已收到“停止继续生成”信号；
+    /// 返回 `true` 表示上游应尽快停止产生新结果，但不一定立即中断现有输出。
     fn is_stopped(&self) -> bool;
 
-    /// Returns true if `kill()` has been called; otherwise, false.
-    /// This can be used with a `.take_while()` stream combinator to immediately terminate
-    /// the stream.
-    ///
-    /// An ideal location for a `[.take_while(!ctx.is_killed())]` stream combinator is on
-    /// the most downstream  return stream.
-    // 中文说明：
-    // 1. 查询当前上下文是否已经收到“立即终止”的信号。
-    // 2. 返回 `true` 时，调用方通常应停止继续消费并尽快结束整条流。
+    /// 查询当前上下文是否已收到“立即终止”信号。
+    /// 可配合 `.take_while()` 流组合子在最下游返回流上立即终止整条流。
+    /// 返回 `true` 时，调用方通常应停止继续消费并尽快结束整条流。
     fn is_killed(&self) -> bool;
 
-    /// Calling this method when [`AsyncEngineContext::is_stopped`] is `true` will return
-    /// immediately; otherwise, it will [`AsyncEngineContext::is_stopped`] will return true.
-    // 中文说明：
-    // 1. 异步等待上下文进入 stopped 状态。
-    // 2. 如果当前已经停止，则立即返回；否则一直等到实现方把状态切换为已停止。
+    /// 异步等待上下文进入 stopped 状态：若当前已停止则立即返回，
+    /// 否则一直等到实现方把状态切换为已停止。
     async fn stopped(&self);
 
-    /// Calling this method when [`AsyncEngineContext::is_killed`] is `true` will return
-    /// immediately; otherwise, it will [`AsyncEngineContext::is_killed`] will return true.
-    // 中文说明：
-    // 1. 异步等待上下文进入 killed 状态。
-    // 2. 如果当前已经被标记为终止，则立即返回；否则等待终止信号真正到达。
+    /// 异步等待上下文进入 killed 状态：若当前已被标记为终止则立即返回，
+    /// 否则等待终止信号真正到达。
     async fn killed(&self);
 
-    // Controller
+    // 控制器
 
-    /// Informs the [`AsyncEngine`] to stop producing results for this particular stream.
-    /// This method is idempotent. This method does not invalidate results current in the
-    /// stream. It might take some time for the engine to stop producing results. The caller
-    /// can decided to drain the stream or drop the stream.
-    // 中文说明：
-    // 1. 通知引擎停止继续为当前流生成新的结果。
-    // 2. 该操作应当是幂等的，多次调用不会产生额外副作用。
+    /// 通知 [`AsyncEngine`] 停止继续为当前流生成新结果。
+    /// 该操作是幂等的，且不会使流中已有结果失效；引擎可能需要一段时间才真正停止，
+    /// 调用方可以选择继续排空（drain）该流或直接将其丢弃。
     fn stop_generating(&self);
 
-    /// See [`AsyncEngineContext::stop_generating`].
-    // 中文说明：
-    // 1. 这是 `stop_generating` 的便捷别名。
-    // 2. 实现方通常会把它映射到相同的停止逻辑。
+    /// `stop_generating` 的便捷别名，参见 [`AsyncEngineContext::stop_generating`]；
+    /// 实现方通常会把它映射到相同的停止逻辑。
     fn stop(&self);
 
-    /// Extends the [`AsyncEngineContext::stop_generating`] also indicates a preference to
-    /// terminate without draining the remaining items in the stream. This is implementation
-    /// specific and may not be supported by all engines.
-    // 中文说明：
-    // 1. 请求引擎尽快终止当前流，而不是只做“优雅停止生成”。
-    // 2. 是否立即丢弃未消费结果取决于具体实现，但语义上比 `stop` 更强。
+    /// 在 [`AsyncEngineContext::stop_generating`] 基础上，进一步表达“终止时不排空剩余项”的意图；
+    /// 是否立即丢弃未消费结果取决于具体实现，并非所有引擎都支持，但语义上比 `stop` 更强。
     fn kill(&self);
 
-    /// Links child AsyncEngineContext to this AsyncEngineContext. If the `stop_generating`, `stop`
-    /// or `kill` on this AsyncEngineContext is called, the same method is called on all linked
-    /// child AsyncEngineContext, in the order they are linked, and then the method on this
-    /// AsyncEngineContext continues.
-    // 中文说明：
-    // 1. 把一个子上下文挂接到当前上下文上，形成联动的生命周期控制关系。
-    // 2. 之后父上下文收到 stop 或 kill 类命令时，子上下文也会按链接顺序收到同样的命令。
+    /// 把一个子 `AsyncEngineContext` 挂接到当前上下文，形成联动的生命周期控制关系：
+    /// 当对当前上下文调用 `stop_generating`、`stop` 或 `kill` 时，会按链接顺序对所有
+    /// 子上下文调用相同方法，随后当前上下文自身的方法再继续执行。
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>);
 }
 
-/// Provides access to the [`AsyncEngineContext`] associated with an engine operation.
+/// 提供对某次引擎操作所关联 [`AsyncEngineContext`] 的访问能力。
 ///
-/// This trait is implemented by both unary and streaming engine results, allowing
-/// uniform access to context information regardless of the operation type.
+/// 单次（unary）响应与流式响应都会实现该 trait，从而无论操作类型如何，
+/// 都能以统一方式访问上下文信息。
 pub trait AsyncEngineContextProvider: Send + Debug {
-    // 中文说明：
-    // 1. 返回当前对象关联的 `AsyncEngineContext`。
-    // 2. 调用方可以借此统一访问流或单次响应背后的生命周期控制对象。
+    /// 返回当前对象关联的 `AsyncEngineContext`，
+    /// 调用方可借此统一访问流或单次响应背后的生命周期控制对象。
     fn context(&self) -> Arc<dyn AsyncEngineContext>;
 }
 
-/// A unary (single-response) asynchronous engine operation.
+/// 一次性（单响应）的异步引擎操作。
 ///
-/// This trait combines `Future` semantics with context provider capabilities,
-/// representing a single async operation that produces one result.
+/// 该 trait 把 `Future` 语义与上下文提供能力结合在一起，
+/// 表示一次只产生单个结果的异步操作。
 pub trait AsyncEngineUnary<Resp: Data>:
     Future<Output = Resp> + AsyncEngineContextProvider + Send
 {
 }
 
-/// A streaming asynchronous engine operation.
+/// 流式异步引擎操作。
 ///
-/// This trait combines `Stream` semantics with context provider capabilities,
-/// representing a continuous async operation that produces multiple messages over time.
+/// 该 trait 把 `Stream` 语义与上下文提供能力结合在一起，
+/// 表示一个持续产生多条消息的异步操作。
 ///
-/// - **Output side:** wrapped as [`EngineStream<T>`] = `crate::pipeline::ManyOut<T>`
-///   — the stream of response chunks an engine emits.
-/// - **Input side:** same `EngineStream<T>` shape, exposed as
-///   `crate::pipeline::ManyIn<T>` for documentary clarity at the call site.
+/// - **输出侧：** 包装为 [`EngineStream<T>`] = `crate::pipeline::ManyOut<T>`，
+///   即引擎对外发出的响应分片流。
+/// - **输入侧：** 形状与之相同的 `EngineStream<T>`，在使用点上以
+///   `crate::pipeline::ManyIn<T>` 暴露，仅为提升文档可读性。
 ///
-/// [`ResponseStream`] is the canonical concrete implementor; [`RequestStream`]
-/// is a type alias of it for the input side.
+/// [`ResponseStream`] 是其规范的具体实现；[`RequestStream`] 则是它在输入侧的类型别名。
 pub trait AsyncEngineStream<T: Data>: Stream<Item = T> + AsyncEngineContextProvider + Send {}
 
-/// Engine is a trait that defines the interface for a streaming engine.
-/// The synchronous Engine version is does not need to be awaited.
+/// 定义流式引擎接口的 trait；其同步版本无需 `await`。
 ///
-/// This is the core trait for all async engine implementations. It provides:
-/// - Generic type parameters for request, response, and error types
-/// - Async generation capabilities with proper error handling
-/// - Thread-safe design with `Send + Sync` bounds
+/// 这是所有异步引擎实现的核心 trait，提供：
+/// - 请求、响应、错误三种类型的泛型参数；
+/// - 带完善错误处理的异步生成能力；
+/// - 通过 `Send + Sync` 约束保证的线程安全设计。
 ///
-/// ## Type Parameters
-/// - `Req`: The request type — required to be `Send + 'static`. The `Sync`
-///   bound was removed from `Req` for convenience: forcing `Sync` on `Req`
-///   propagates a `+ Sync` constraint onto every type that flows in (in
-///   particular, every input-side trait-object alias), and no
-///   existing implementation of `AsyncEngine` relies on the `Sync` nature of
-///   the request. Revisit if a future implementation genuinely needs
-///   shared-reference access to a request value across threads.
-/// - `Resp`: The response type that implements `AsyncEngineContextProvider`
-/// - `E`: The error type that implements `Data`
+/// ## 类型参数
+/// - `Req`：请求类型，要求满足 `Send + 'static`。出于便利，`Req` 上去掉了 `Sync`
+///   约束：若强制要求 `Req: Sync`，会把 `+ Sync` 约束传播到所有流入的类型上
+///   （尤其是每一个输入侧 trait 对象别名），而现有 `AsyncEngine` 实现都不依赖请求的
+///   `Sync` 特性。如果将来确有实现需要跨线程共享引用访问请求值，再重新评估。
+/// - `Resp`：实现了 `AsyncEngineContextProvider` 的响应类型；
+/// - `E`：实现了 `Data` 的错误类型。
 ///
-/// ## Implementation Notes
-/// Implementations should ensure proper error handling and resource management.
-/// The `generate` method should be cancellable via the response's context provider.
+/// ## 实现注意事项
+/// 实现方应保证完善的错误处理与资源管理，`generate` 方法应可通过响应的上下文提供者取消。
 #[async_trait]
 // === SECTION: AsyncEngine 与响应流 ===
 
 pub trait AsyncEngine<Req: Send + 'static, Resp: AsyncEngineContextProvider, E: Data>:
     Send + Sync
 {
-    /// Generate a stream of completion responses.
-    // 中文说明：
-    // 1. 接收一个请求对象并异步生成结果。
-    // 2. 成功时返回实现了上下文提供能力的响应对象，失败时返回对应错误类型。
+    /// 接收一个请求对象并异步生成结果：
+    /// 成功时返回实现了上下文提供能力的响应对象，失败时返回对应错误类型。
     async fn generate(&self, request: Req) -> Result<Resp, E>;
 }
 
-/// Adapter for a [`DataStream`] to a [`ResponseStream`].
+/// 把 [`DataStream`] 适配为 [`ResponseStream`] 的适配器。
 ///
-/// A common pattern is to consume the [`ResponseStream`] with standard stream combinators
-/// which produces a [`DataStream`] stream, then form a [`ResponseStream`] by propagating the
-/// original [`AsyncEngineContext`].
+/// 常见用法是：先用标准流组合子消费 [`ResponseStream`] 得到一个 [`DataStream`]，
+/// 再通过传递原始的 [`AsyncEngineContext`] 重新构成 [`ResponseStream`]。
 pub struct ResponseStream<R: Data> {
     stream: DataStream<R>,
     ctx: Arc<dyn AsyncEngineContext>,
@@ -304,22 +261,18 @@ impl<R: Data> Debug for ResponseStream<R> {
     // 4. 最后调用 `finish` 生成完整的调试结构输出。
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("ResponseStream");
-        // todo: add debug for stream - possibly propagate some information about what
-        // engine created the stream
-        // debug.field("stream", &self.stream);
+        // 待办：为 stream 补充调试输出，可考虑携带“由哪个引擎创建该流”等信息。
         debug.field("ctx", &self.ctx);
         debug.finish()
     }
 }
 
-/// Input-side type alias of [`ResponseStream`] — same struct, different name to
-/// signal role at the call site.
+/// [`ResponseStream`] 在输入侧的类型别名 —— 同一个结构体，仅以不同名称在使用点上标明角色。
 ///
-/// The shape is identical: a `(stream, ctx)` pair that implements [`Stream`],
-/// [`AsyncEngineContextProvider`], and [`AsyncEngineStream`]. Use `RequestStream`
-/// when you're constructing a value to feed into the `Req` slot of an engine,
-/// and [`ResponseStream`] when constructing a value to emit from the `Resp` slot.
-/// Functionally interchangeable.
+/// 其形状完全一致：一个 `(stream, ctx)` 组合，实现了 [`Stream`]、
+/// [`AsyncEngineContextProvider`] 和 [`AsyncEngineStream`]。当构造一个值要喂入引擎的
+/// `Req` 槽位时使用 `RequestStream`，当构造一个值要从 `Resp` 槽位发出时使用
+/// [`ResponseStream`]。二者功能上可互换。
 pub type RequestStream<R> = ResponseStream<R>;
 
 impl<T: Data> AsyncEngineContextProvider for Pin<Box<dyn AsyncEngineUnary<T>>> {
@@ -344,61 +297,51 @@ impl<T: Data> AsyncEngineContextProvider for Pin<Box<dyn AsyncEngineStream<T>>> 
     }
 }
 
-/// A type-erased `AsyncEngine`.
+/// 类型擦除后的 `AsyncEngine`。
 ///
-/// This trait enables storing heterogeneous `AsyncEngine` implementations in collections
-/// by erasing their specific generic type parameters. It provides runtime type information
-/// and safe downcasting capabilities.
+/// 该 trait 通过擦除具体泛型参数，使不同类型的 `AsyncEngine` 实现能够被放入同一集合；
+/// 它提供运行时类型信息与安全的下转型能力。
 ///
-/// ## Type Erasure Mechanism
-/// The trait uses `std::any::TypeId` to preserve type information at runtime, allowing
-/// safe downcasting back to the original `AsyncEngine<Req, Resp, E>` types.
+/// ## 类型擦除机制
+/// 该 trait 使用 `std::any::TypeId` 在运行时保留类型信息，
+/// 从而允许安全地下转型回原始的 `AsyncEngine<Req, Resp, E>` 类型。
 ///
-/// ## Safety Guarantees
-/// - Type IDs are preserved exactly as they were during type erasure
-/// - Downcasting is only possible to the original type combination
-/// - Incorrect downcasts return `None` rather than panicking
+/// ## 安全保证
+/// - 类型 ID 在类型擦除过程中被原样保留；
+/// - 只能下转型回原始的类型组合；
+/// - 错误的下转型返回 `None` 而不是 panic。
 ///
-/// ## Implementation Notes
-/// This trait is implemented by the internal `AnyEngineWrapper` struct. Users should
-/// not implement this trait directly - use the `AsAnyAsyncEngine` extension trait instead.
+/// ## 实现注意事项
+/// 该 trait 由内部的 `AnyEngineWrapper` 结构体实现。使用者不应直接实现该 trait，
+/// 而应使用 `AsAnyAsyncEngine` 扩展 trait。
 // === SECTION: 类型擦除 AnyAsyncEngine ===
 
 pub trait AnyAsyncEngine: Send + Sync {
-    /// Returns the `TypeId` of the request type used by this engine.
-    // 中文说明：
-    // 1. 返回当前被擦除引擎对应请求类型的运行时类型标识。
-    // 2. 调用方可用它在运行时做安全的类型匹配和下转型前检查。
+    /// 返回当前被擦除引擎对应请求类型的运行时类型标识（`TypeId`），
+    /// 调用方可用它在运行时做安全的类型匹配与下转型前检查。
     fn request_type_id(&self) -> TypeId;
 
-    /// Returns the `TypeId` of the response type used by this engine.
-    // 中文说明：
-    // 1. 返回当前被擦除引擎对应响应类型的运行时类型标识。
-    // 2. 它和请求、错误类型标识一起构成下转型的判定依据。
+    /// 返回当前被擦除引擎对应响应类型的 `TypeId`，
+    /// 它与请求、错误类型标识一起构成下转型的判定依据。
     fn response_type_id(&self) -> TypeId;
 
-    /// Returns the `TypeId` of the error type used by this engine.
-    // 中文说明：
-    // 1. 返回当前被擦除引擎对应错误类型的运行时类型标识。
-    // 2. 下转型逻辑会把它与目标错误类型一起做精确匹配。
+    /// 返回当前被擦除引擎对应错误类型的 `TypeId`，
+    /// 下转型逻辑会把它与目标错误类型一起做精确匹配。
     fn error_type_id(&self) -> TypeId;
 
-    /// Provides access to the underlying engine as a `dyn Any` for downcasting.
-    // 中文说明：
-    // 1. 以 `dyn Any` 的形式暴露底层被包装引擎。
-    // 2. 调用方随后可以在类型 id 校验通过后继续做安全下转型。
+    /// 以 `dyn Any` 的形式暴露底层被包装引擎，
+    /// 调用方随后可在类型 ID 校验通过后继续做安全下转型。
     fn as_any(&self) -> &dyn Any;
 }
 
-/// An internal wrapper to hold a typed `AsyncEngine` behind the `AnyAsyncEngine` trait object.
+/// 内部包装器，用于把带具体类型的 `AsyncEngine` 藏在 `AnyAsyncEngine` trait 对象背后。
 ///
-/// This struct uses `PhantomData<fn(Req, Resp, E)>` to maintain the type relationship
-/// without storing the types directly, enabling the type-erasure mechanism.
+/// 该结构体使用 `PhantomData<fn(Req, Resp, E)>` 在不直接存储类型的前提下保持类型关系，
+/// 从而支撑类型擦除机制。
 ///
-/// ## PhantomData Usage
-/// The `PhantomData<fn(Req, Resp, E)>` ensures that the compiler knows about the
-/// generic type parameters without requiring them to be `'static`, which would
-/// prevent storing non-static types in the engine.
+/// ## PhantomData 用法
+/// `PhantomData<fn(Req, Resp, E)>` 让编译器能感知这些泛型参数，而又不要求它们为 `'static`，
+/// 否则将无法在引擎中存储非 static 类型。
 struct AnyEngineWrapper<Req, Resp, E>
 where
     Req: Data,
@@ -448,12 +391,12 @@ where
     }
 }
 
-/// An extension trait that provides a convenient way to type-erase an `AsyncEngine`.
+/// 一个扩展 trait，为 `AsyncEngine` 提供便捷的类型擦除方式。
 ///
-/// This trait provides the `.into_any_engine()` method on any `Arc<dyn AsyncEngine<...>>`,
-/// enabling ergonomic type erasure without explicit wrapper construction.
+/// 该 trait 为任意 `Arc<dyn AsyncEngine<...>>` 提供 `.into_any_engine()` 方法，
+/// 从而无需显式构造包装器即可优雅地完成类型擦除。
 ///
-/// ## Usage
+/// ## 用法
 /// ```rust,ignore
 /// use crate::engine::AsAnyAsyncEngine;
 ///
@@ -463,10 +406,8 @@ where
 // === SECTION: 升入与下转辅助 trait ===
 
 pub trait AsAnyAsyncEngine {
-    /// Converts a typed `AsyncEngine` into a type-erased `AnyAsyncEngine`.
-    // 中文说明：
-    // 1. 把一个带具体泛型参数的引擎转换成类型擦除后的统一接口。
-    // 2. 调用方可以借此把不同类型的引擎放进同一个容器中管理。
+    /// 把一个带具体泛型参数的 `AsyncEngine` 转换为类型擦除后的 `AnyAsyncEngine`，
+    /// 调用方可借此把不同类型的引擎放进同一个容器中统一管理。
     fn into_any_engine(self) -> Arc<dyn AnyAsyncEngine>;
 }
 
@@ -490,33 +431,29 @@ where
     }
 }
 
-/// An extension trait that provides a convenient method to downcast an `AnyAsyncEngine`.
+/// 一个扩展 trait，为 `AnyAsyncEngine` 提供便捷的下转型方法。
 ///
-/// This trait provides the `.downcast<Req, Resp, E>()` method on `Arc<dyn AnyAsyncEngine>`,
-/// enabling safe downcasting back to the original typed engine.
+/// 该 trait 为 `Arc<dyn AnyAsyncEngine>` 提供 `.downcast<Req, Resp, E>()` 方法，
+/// 从而能安全地下转型回原始的具体引擎。
 ///
-/// ## Safety
-/// The downcast method performs runtime type checking using `TypeId` comparison.
-/// It will only succeed if the type parameters exactly match the original engine's types.
+/// ## 安全性
+/// 下转型方法通过比较 `TypeId` 在运行时做类型检查，
+/// 仅当类型参数与原始引擎类型完全一致时才会成功。
 ///
-/// ## Usage
+/// ## 用法
 /// ```rust,ignore
 /// use crate::engine::DowncastAnyAsyncEngine;
 ///
-/// let any_engine: Arc<dyn AnyAsyncEngine> = // ... from collection
+/// let any_engine: Arc<dyn AnyAsyncEngine> = // ... 从集合中取出
 /// if let Some(typed_engine) = any_engine.downcast::<String, String, ()>() {
-///     // Use the typed engine
+///     // 使用还原后的具体引擎
 ///     let result = typed_engine.generate("hello".to_string()).await;
 /// }
 /// ```
 pub trait DowncastAnyAsyncEngine {
-    /// Attempts to downcast an `AnyAsyncEngine` to a specific `AsyncEngine` type.
-    ///
-    /// Returns `Some(engine)` if the type parameters match the original engine,
-    /// or `None` if the types don't match.
-    // 中文说明：
-    // 1. 尝试把类型擦除后的引擎恢复成指定泛型参数的具体引擎接口。
-    // 2. 只有请求、响应和错误三种类型都与原始引擎完全一致时才会成功。
+    /// 尝试把 `AnyAsyncEngine` 下转型为指定的 `AsyncEngine` 类型：
+    /// 若类型参数匹配原引擎则返回 `Some(engine)`，类型不匹配则返回 `None`。
+    /// 只有请求、响应和错误三种类型都与原始引擎完全一致时才会成功。
     fn downcast<Req, Resp, E>(&self) -> Option<Arc<dyn AsyncEngine<Req, Resp, E>>>
     where
         Req: Data,
@@ -560,17 +497,17 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // 1. Define mock data structures
+    // 1. 定义模拟数据结构
     #[derive(Debug, PartialEq)]
     struct Req1(String);
 
     #[derive(Debug, PartialEq)]
     struct Resp1(String);
 
-    // Dummy context provider implementation for the response
+    // 为响应类型提供的占位用上下文提供者实现
     impl AsyncEngineContextProvider for Resp1 {
         fn context(&self) -> Arc<dyn AsyncEngineContext> {
-            // For this test, we don't need a real context.
+            // 本测试不需要真正的上下文。
             unimplemented!()
         }
     }
@@ -578,7 +515,7 @@ mod tests {
     #[derive(Debug)]
     struct Err1;
 
-    // A different set of types for testing failure cases
+    // 一组不同的类型，用于测试失败场景
     #[derive(Debug)]
     struct Req2;
     #[derive(Debug)]
@@ -589,7 +526,7 @@ mod tests {
         }
     }
 
-    // 2. Define a mock engine
+    // 2. 定义一个模拟引擎
     struct MockEngine;
 
     #[async_trait]
@@ -601,35 +538,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_type_erasure_and_downcast() {
-        // 3. Create a typed engine
+        // 3. 创建一个带类型的引擎
         let typed_engine: Arc<dyn AsyncEngine<Req1, Resp1, Err1>> = Arc::new(MockEngine);
 
-        // 4. Use the extension trait to erase the type
+        // 4. 使用扩展 trait 擦除类型
         let any_engine = typed_engine.into_any_engine();
 
-        // Check type IDs are preserved
+        // 检查类型 ID 被保留
         assert_eq!(any_engine.request_type_id(), TypeId::of::<Req1>());
         assert_eq!(any_engine.response_type_id(), TypeId::of::<Resp1>());
         assert_eq!(any_engine.error_type_id(), TypeId::of::<Err1>());
 
-        // 5. Use the new downcast method on the Arc
+        // 5. 在 Arc 上使用新的 downcast 方法
         let downcasted_engine = any_engine.downcast::<Req1, Resp1, Err1>();
 
-        // 6. Assert success
+        // 6. 断言成功
         assert!(downcasted_engine.is_some());
 
-        // We can even use the downcasted engine
+        // 甚至可以直接使用下转型后的引擎
         let response = downcasted_engine
             .unwrap()
             .generate(Req1("hello".to_string()))
             .await;
         assert_eq!(response.unwrap(), Resp1("response to hello".to_string()));
 
-        // 7. Assert failure for wrong types
+        // 7. 错误类型下转型应该失败
         let failed_downcast = any_engine.downcast::<Req2, Resp2, Err1>();
         assert!(failed_downcast.is_none());
 
-        // 8. HashMap usage test
+        // 8. HashMap 使用测试
         let mut engine_map: HashMap<String, Arc<dyn AnyAsyncEngine>> = HashMap::new();
         engine_map.insert("mock".to_string(), any_engine);
 

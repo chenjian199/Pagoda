@@ -21,7 +21,7 @@
 //! ## 实现要点
 //!
 //! - 查询匹配抽离到 [`QueryMatcher`]：把 `(Instance, Query)` 的所有跨类型 /
-//!   嵌套字段组合用方法链表达，避免历史版本上百行 `match` 嵌套；
+//!   嵌套字段组合用方法链表达，避免上百行 `match` 嵌套；
 //! - `list_and_watch` 内部用 [`diff_snapshots`] 计算 `Added` / `Removed`，
 //!   使主循环只剩“轮询 + emit”两步骨架；
 //! - 共享存储采用 `Arc<Mutex<Vec<...>>>`：`Mutex` 提供短临界区写保护，

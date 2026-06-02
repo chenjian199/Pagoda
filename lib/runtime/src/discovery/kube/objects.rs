@@ -10,9 +10,9 @@
 //!
 //! | Pagoda 对象      | K8s 原生对象              | 生命周期管理              |
 //! |-----------------|--------------------------|--------------------------|
-//! | `PortName`      | `Service` + `EndpointSlice` | Pod `ownerRef` → GC    |
-//! | `Model`         | `ConfigMap`              | Pod `ownerRef` → GC      |
-//! | `EventChannel`  | `Lease`                  | Pod `ownerRef` + TTL     |
+//! | `PortName`      | `Service` + `EndpointSlice` | 通过 Pod 的 `ownerRef` 交给 GC |
+//! | `Model`         | `ConfigMap`              | 通过 Pod 的 `ownerRef` 交给 GC |
+//! | `EventChannel`  | `Lease`                  | 通过 Pod 的 `ownerRef` 加上 TTL |
 //!
 //! ## 与 `service_registry` 的分工
 //!
@@ -95,7 +95,7 @@ const DATA_CARD_JSON: &str = "card.json";
 /// ## 设计意图
 ///
 /// 删除 K8s 对象时，对象已不存在（404）是合法状态，不应作为错误上报。
-/// 原版在每个删除函数中各写一遍 `match ... 404 => Ok(())` 的模式，
+/// 若在每个删除函数中各写一遍 `match ... 404 => Ok(())` 的模式会造成重复，
 /// 通过此 trait 将该逻辑提取为单一调用点，实现**去重**。
 ///
 /// ## 示例
@@ -125,8 +125,8 @@ impl<T> NotFoundOk for Result<T, kube::Error> {
 ///
 /// ## 设计意图
 ///
-/// 原版在每次解析 `EndpointSlice`、`Lease` 时都重复执行
-/// `let annotations = match meta.annotations { Some(v) => v, None => return Ok(None) };`
+/// 解析 `EndpointSlice`、`Lease` 时需要重复执行
+/// 典型写法是先从 `meta.annotations` 取出 map；如果为空，就直接返回 `Ok(None)`。
 /// 然后再 `annotations.get(KEY).ok_or_else(...)` 的两段式代码。
 ///
 /// `AnnotationReader` 将第一步（unwrap annotations map）封装到构造函数中，
@@ -944,7 +944,7 @@ mod tests {
         assert!(result.not_found_ok().is_err(), "非 404 错误应透传");
     }
 
-    // ── model_config_map_name ─────────────────────────────────────────────────
+    // ── Model ConfigMap 名称生成 ────────────────────────────────────────────
 
     /// 相同参数产生相同名称（确定性）。
     #[test]
@@ -977,7 +977,7 @@ mod tests {
         assert_eq!(none_name, empty_name, "空 suffix 与 None 应相同");
     }
 
-    // ── event_lease_name ──────────────────────────────────────────────────────
+    // ── EventChannel Lease 名称生成 ───────────────────────────────────────
 
     /// 相同参数产生相同名称（确定性）。
     #[test]
@@ -1032,7 +1032,7 @@ mod tests {
         assert_eq!(transport_port_hint(&t, 5555), 5555);
     }
 
-    // ── model_instance_from_config_map ────────────────────────────────────────
+    // ── 从 ConfigMap 恢复 Model 实例 ───────────────────────────────────────
 
     /// 缺少 KIND_LABEL 的 ConfigMap 被跳过（返回 None，不 Err）。
     #[test]
@@ -1096,7 +1096,7 @@ mod tests {
         }
     }
 
-    // ── event_instance_from_lease ─────────────────────────────────────────────
+    // ── 从 Lease 恢复 EventChannel 实例 ────────────────────────────────────
 
     /// 缺少 KIND_LABEL 的 Lease 被跳过（返回 None）。
     #[test]

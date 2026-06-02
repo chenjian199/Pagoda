@@ -9,7 +9,7 @@
 //! 推送响应流。
 //!
 //! ## 外部契约
-//! - 公开类型 / 方法完全一致；`SinkExt` / `StreamExt` 是连接上 `Framed` 必需。
+//! - 公开类型 / 方法是稳定契约；`SinkExt` / `StreamExt` 是连接上 `Framed` 必需。
 //! - 不额外暴露任何 helper；连接超时 / retry 由上层 router 处理。
 //!
 //! ## 实现要点
@@ -38,7 +38,7 @@ use crate::pipeline::network::{
 };
 use anyhow::{Context, Result, anyhow as error}; // Import SinkExt to use the `send` method
 
-// === SECTION: TcpClient public type ===
+// === SECTION: TcpClient 公开类型 ===
 #[allow(dead_code)]
 pub struct TcpClient {
     worker_id: String,
@@ -58,7 +58,7 @@ impl TcpClient {
     }
 
     async fn connect(address: &str) -> std::io::Result<TcpStream> {
-        // try to connect to the address; retry with linear backoff if AddrNotAvailable
+        // 尝试连接到目标地址；如果出现 AddrNotAvailable，则按线性退避重试。
         let backoff = std::time::Duration::from_millis(200);
         loop {
             match TcpStream::connect(address).await {
@@ -109,11 +109,10 @@ impl TcpClient {
         let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
 
-        // this is a oneshot channel that will be used to signal when the stream is closed
-        // when the stream sender is dropped, the bytes_rx will be closed and the forwarder task will exit
-        // the forwarder task will capture the alive_rx half of the oneshot channel; this will close the alive channel
-        // so the holder of the alive_tx half will be notified that the stream is closed; the alive_tx channel will be
-        // captured by the monitor task
+        // 这是一个 oneshot 通道，用来在流关闭时发出信号。
+        // 当流发送端被 drop 时，bytes_rx 会关闭，转发任务也会退出。
+        // 转发任务会持有 oneshot 通道的 alive_rx 半边，这会关闭 alive 通道，
+        // 从而通知 alive_tx 的持有者流已经关闭；alive_tx 随后会被监控任务持有。
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
 
         let reader_task = tokio::spawn(handle_reader(
@@ -123,7 +122,7 @@ impl TcpClient {
             cancellation_counter,
         ));
 
-        // transport specific handshake message
+        // 传输专用的握手消息。
         let handshake = CallHomeHandshake {
             subject: info.subject.clone(),
             stream_type: StreamType::Response,
@@ -139,16 +138,16 @@ impl TcpClient {
         };
         let msg = TwoPartMessage::from_header(handshake_bytes.into());
 
-        // issue the the first tcp handshake message
+        // 发送第一条 TCP 握手消息。
         framed_writer
             .send(msg)
             .await
             .map_err(|e| error!("failed to send handshake: {:?}", e))?;
 
-        // set up the channel to send bytes to the transport layer
+        // 建立向传输层发送字节的通道。
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel(64);
 
-        // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
+        // 把这个流发送出的字节转发到传输层；同时持有 oneshot 通道的 alive_rx 半边。
         let writer_context = context.clone();
         let writer_task = tokio::spawn(handle_writer(
             framed_writer,
@@ -159,8 +158,8 @@ impl TcpClient {
 
         let subject = info.subject.clone();
         let monitor_context = context;
-        // Spawn the connection monitor; errors are already logged inside
-        // wait_for_connection_tasks, so the Result is intentionally dropped.
+        // 启动连接监控任务；错误已经在 wait_for_connection_tasks 内部记录，
+        // 所以这里故意丢弃 Result。
         tokio::spawn(async move {
             let _ = wait_for_connection_tasks(
                 reader_task,
@@ -172,11 +171,11 @@ impl TcpClient {
             .await;
         });
 
-        // set up the prologue for the stream
-        // this might have transport specific metadata in the future
+        // 为流设置 prologue。
+        // 未来这里可能会加入传输专用元数据。
         let prologue = Some(ResponseStreamPrologue { error: None });
 
-        // create the stream sender
+        // 创建流发送端。
         let stream_sender = StreamSender {
             tx: bytes_tx,
             prologue,
@@ -186,7 +185,7 @@ impl TcpClient {
     }
 }
 
-// === SECTION: Connection / reader / writer task helpers ===
+// === SECTION: 连接 / reader / writer 任务辅助函数 ===
 async fn wait_for_connection_tasks(
     reader_task: tokio::task::JoinHandle<FramedRead<ReadHalf<TcpStream>, TwoPartCodec>>,
     writer_task: tokio::task::JoinHandle<Result<FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>>>,
@@ -242,7 +241,7 @@ async fn wait_for_connection_tasks(
                 writer_err = ?writer_err,
                 "both reader and writer tasks failed to join"
             );
-            // Surface the reader error; the writer error is captured above.
+            // 直接暴露 reader 错误；writer 错误已经在上面记录。
             Err(reader_err.into())
         }
     }
@@ -252,16 +251,16 @@ async fn wait_for_server_shutdown(
     mut stream: TcpStream,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<()> {
-    // `handle_writer` skips the closing sentinel on both `killed` and
-    // `stopped`, so the server has nothing to react to in either case;
-    // sitting in the read loop until the 10 s deadline would be dead time.
+    // `handle_writer` 在 `killed` 和 `stopped` 两种情况下都会跳过关闭哨兵，
+    // 所以服务端在这两种情况下都没有可响应的内容；如果一直停在读循环里等到
+    // 10 秒超时，就只是在浪费时间。
     if context.is_killed() || context.is_stopped() {
         tracing::debug!("stream context killed or stopped; skipping server FIN wait");
         return Ok(());
     }
 
-    // Await the tcp server to shutdown the socket connection, bounded by a
-    // timeout so normal sentinel shutdown cannot hang indefinitely.
+    // 等待 TCP 服务端关闭 socket 连接，并用超时包起来，避免正常的哨兵关闭
+    // 逻辑无限挂起。
     let mut buf = [0u8; 1024];
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -274,7 +273,7 @@ async fn wait_for_server_shutdown(
                 tracing::debug!(err = ?e, "failed to read from stream");
             })?;
         if n == 0 {
-            // Server has closed (FIN)
+            // 服务端已经关闭（FIN）。
             break;
         }
     }
@@ -290,7 +289,7 @@ async fn handle_reader(
 ) -> FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec> {
     let mut framed_reader = framed_reader;
     let mut alive_tx = alive_tx;
-    // Set on every cancellation arm; counted once after the loop.
+    // 在每个取消分支都会置位；循环结束后只统计一次。
     let mut cancellation_seen = false;
     loop {
         tokio::select! {
@@ -312,12 +311,10 @@ async fn handle_reader(
                                     }
                                 };
 
-                                // Stop/Kill intentionally do not `break`: the
-                                // reader keeps running so a later Kill can
-                                // upgrade an earlier Stop (and vice versa).
-                                // The loop still exits promptly via the
-                                // `alive_tx.closed()` arm once `handle_writer`
-                                // reacts to `context.stop()` / `context.kill()`.
+                                // Stop / Kill 故意不 `break`：reader 会继续运行，
+                                // 这样后来的 Kill 可以升级之前的 Stop（反之亦然）。
+                                // 一旦 `handle_writer` 对 `context.stop()` / `context.kill()`
+                                // 做出反应，循环仍会通过 `alive_tx.closed()` 分支及时退出。
                                 match msg {
                                     ControlMessage::Stop => {
                                         cancellation_seen = true;
@@ -348,8 +345,7 @@ async fn handle_reader(
                         }
                     }
                     Some(Err(e)) => {
-                        // Kill the engine context so the producer stops
-                        // generating responses that can no longer be delivered.
+                        // 关闭 engine context，让 producer 停止生成已经无法送达的响应。
                         tracing::warn!(err = ?e, "tcp stream read error, closing connection");
                         cancellation_seen = true;
                         context.kill();
@@ -379,7 +375,7 @@ async fn handle_writer(
     alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
-    // Only send sentinel for normal channel closure
+    // 只在正常通道关闭时发送 sentinel。
     let mut send_sentinel = true;
 
     loop {
@@ -419,7 +415,7 @@ async fn handle_writer(
         }
     }
 
-    // Send sentinel only on normal closure
+    // 仅在正常关闭时发送 sentinel。
     if send_sentinel {
         let message = serde_json::to_vec(&ControlMessage::Sentinel)?;
         let msg = TwoPartMessage::from_header(message.into());
@@ -430,7 +426,7 @@ async fn handle_writer(
     Ok(framed_writer)
 }
 
-// === SECTION: Tests — writer/reader behavior, control messages, cancellation ===
+// === SECTION: 测试 - writer/reader 行为、控制消息、取消 ===
 #[cfg(test)]
 mod tests {
     //! ## 测试矩阵
@@ -476,7 +472,7 @@ mod tests {
         controller: Arc<Controller>,
     }
 
-    /// Creates a reusable writer harness with paired TCP streams and test channels.
+    /// 创建一个可复用的 writer 测试支架，包含成对的 TCP 流和测试通道。
     async fn writer_harness() -> WriterHarness {
         let (client, server) = create_tcp_pair().await;
         let (_, write_half) = tokio::io::split(client);
@@ -554,7 +550,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_writer forwards messages from the channel to the framed writer
+    /// 测试 handle_writer 会把通道里的消息转发给 framed writer。
     #[tokio::test]
     async fn test_handle_writer_forwards_messages() {
         let WriterHarness {
@@ -567,18 +563,18 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Send test messages
+        // 发送测试消息。
         let test_msg = TwoPartMessage::from_data(Bytes::from("test data"));
         bytes_tx.send(test_msg).await.unwrap();
 
-        // Close the sender to trigger normal termination
+        // 关闭发送端以触发正常终止。
         drop(bytes_tx);
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
 
         assert!(result.is_ok());
 
-        // Decode from server side to verify data and sentinel were sent
+        // 从服务端侧解码，验证数据和 sentinel 都已发送。
         let mut reader = FramedRead::new(server, TwoPartCodec::default());
 
         let msg = recv_msg(&mut reader).await;
@@ -588,7 +584,7 @@ mod tests {
         assert_sentinel_message(sentinel);
     }
 
-    /// Test that handle_writer sends sentinel on normal channel closure
+    /// 测试 handle_writer 会在通道正常关闭时发送 sentinel。
     #[tokio::test]
     async fn test_handle_writer_sends_sentinel_on_normal_closure() {
         let WriterHarness {
@@ -601,21 +597,21 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Close the sender immediately to trigger normal termination
+        // 立即关闭发送端，以触发正常终止。
         drop(bytes_tx);
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
 
         assert!(result.is_ok());
 
-        // Read from server side to verify sentinel was sent
+        // 从服务端侧读取，验证 sentinel 已发送。
         let mut buffer = vec![0u8; 1024];
         let n = server.read(&mut buffer).await.unwrap();
 
-        // Buffer should contain the sentinel message
+        // 缓冲区中应该包含 sentinel 消息。
         assert!(n > 0, "Expected sentinel to be written to the TCP stream");
 
-        // Verify it contains the sentinel message by checking for the JSON
+        // 通过检查 JSON 片段来确认其中包含 sentinel 消息。
         let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
         assert!(
             buffer[..n]
@@ -626,7 +622,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_writer does NOT send sentinel when context is killed
+    /// 测试在 context 被 kill 时，handle_writer 不会发送 sentinel。
     #[tokio::test]
     async fn test_handle_writer_no_sentinel_on_context_killed() {
         let WriterHarness {
@@ -638,22 +634,21 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Kill the context
+        // kill 掉 context。
         controller.kill();
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
 
         assert!(result.is_ok());
 
-        // Drop the writer to close the connection, then try to read. Otherwise,
-        // the test will hang on `server.read()`
+        // 先 drop writer 关闭连接，再尝试读取，否则测试会卡在 `server.read()`。
         drop(result);
 
-        // Read from server side - should get no sentinel
+        // 从服务端侧读取，应该拿不到 sentinel。
         let mut buffer = vec![0u8; 1024];
         let n = server.read(&mut buffer).await.unwrap();
 
-        // Buffer should be empty (no sentinel sent)
+        // 缓冲区应该为空（没有发送 sentinel）。
         let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
         assert!(
             n == 0
@@ -664,7 +659,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_writer does NOT send sentinel when context is stopped
+    /// 测试在 context 被 stop 时，handle_writer 不会发送 sentinel。
     #[tokio::test]
     async fn test_handle_writer_no_sentinel_on_context_stopped() {
         let WriterHarness {
@@ -676,22 +671,21 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Stop the context
+        // stop 掉 context。
         controller.stop();
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
 
         assert!(result.is_ok());
 
-        // Drop the writer to close the connection, then try to read. Otherwise,
-        // the test will hang on `server.read()`
+        // 先 drop writer 关闭连接，再尝试读取，否则测试会卡在 `server.read()`。
         drop(result);
 
-        // Read from server side - should get no sentinel
+        // 从服务端侧读取，应该拿不到 sentinel。
         let mut buffer = vec![0u8; 1024];
         let n = server.read(&mut buffer).await.unwrap();
 
-        // Buffer should be empty (no sentinel sent)
+        // 缓冲区应该为空（没有发送 sentinel）。
         let sentinel_json = serde_json::to_vec(&ControlMessage::Sentinel).unwrap();
         assert!(
             n == 0
@@ -702,7 +696,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_writer handles multiple messages correctly
+    /// 测试 handle_writer 能正确处理多条消息。
     #[tokio::test]
     async fn test_handle_writer_multiple_messages() {
         let WriterHarness {
@@ -715,20 +709,20 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Send multiple messages
+        // 发送多条消息。
         for i in 0..5 {
             let test_msg = TwoPartMessage::from_data(Bytes::from(format!("message {}", i)));
             bytes_tx.send(test_msg).await.unwrap();
         }
 
-        // Close the sender to trigger normal termination
+        // 关闭发送端以触发正常终止。
         drop(bytes_tx);
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
 
         assert!(result.is_ok());
 
-        // Decode from server side to verify all messages plus sentinel
+        // 从服务端侧解码，验证所有消息以及 sentinel 都已发送。
         let mut reader = FramedRead::new(server, TwoPartCodec::default());
         for i in 0..5 {
             let msg = recv_msg(&mut reader).await;
@@ -739,7 +733,7 @@ mod tests {
         assert_sentinel_message(sentinel);
     }
 
-    /// Test that alive_rx is dropped after handle_writer completes
+    /// 测试 handle_writer 完成后 alive_rx 会被 drop。
     #[tokio::test]
     async fn test_handle_writer_drops_alive_rx() {
         let WriterHarness {
@@ -752,18 +746,18 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Close the sender to trigger normal termination
+        // 关闭发送端以触发正常终止。
         drop(bytes_tx);
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
 
         assert!(result.is_ok());
 
-        // alive_tx should now be closed because alive_rx was dropped
+        // 由于 alive_rx 已被 drop，alive_tx 现在应该已关闭。
         assert!(alive_tx.is_closed());
     }
 
-    /// Test handle_writer with header-only messages (control messages)
+    /// 测试仅头部消息（控制消息）的 handle_writer 行为。
     #[tokio::test]
     async fn test_handle_writer_header_only_messages() {
         let WriterHarness {
@@ -776,11 +770,11 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Send a header-only message
+        // 发送一条仅头部消息。
         let header_msg = TwoPartMessage::from_header(Bytes::from("header content"));
         bytes_tx.send(header_msg).await.unwrap();
 
-        // Close the sender
+        // 关闭发送端。
         drop(bytes_tx);
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
@@ -796,7 +790,7 @@ mod tests {
         assert_sentinel_message(sentinel);
     }
 
-    /// Test handle_writer with mixed header and data messages
+    /// 测试 handle_writer 处理头部消息和数据消息混合输入。
     #[tokio::test]
     async fn test_handle_writer_mixed_messages() {
         let WriterHarness {
@@ -809,7 +803,7 @@ mod tests {
             ..
         } = writer_harness().await;
 
-        // Send mixed messages
+        // 发送混合消息。
         bytes_tx
             .send(TwoPartMessage::from_header(Bytes::from("header1")))
             .await
@@ -826,7 +820,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Close the sender
+        // 关闭发送端。
         drop(bytes_tx);
 
         let result = handle_writer(framed_writer, bytes_rx, alive_rx, controller).await;
@@ -848,7 +842,7 @@ mod tests {
         assert_sentinel_message(sentinel);
     }
 
-    /// Killed or stopped contexts skip the server FIN deadline.
+    /// 被 kill 或 stop 的 context 会跳过服务端 FIN 等待时限。
     #[tokio::test]
     async fn test_wait_for_server_shutdown_skips_terminal_context() {
         for action in [Controller::kill as fn(&Controller), Controller::stop] {
@@ -871,7 +865,7 @@ mod tests {
         }
     }
 
-    /// Read error in the connection monitor kills the context and skips the FIN wait.
+    /// connection monitor 中的读错误会 kill context，并跳过 FIN 等待。
     #[tokio::test]
     async fn test_connection_monitor_skips_fin_wait_after_read_error_kills_context() {
         let (client, mut server) = create_tcp_pair().await;
@@ -891,9 +885,8 @@ mod tests {
             handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
         });
 
-        // Bypass the codec and write a complete but invalid TwoPartCodec
-        // header. This drives the client reader into Some(Err(_)) without
-        // closing the server side of the socket.
+        // 绕过 codec，写入一个完整但无效的 TwoPartCodec 头部。
+        // 这样可以让 client reader 进入 Some(Err(_))，同时不关闭服务端 socket。
         server.write_all(&[0xFF; 24]).await.unwrap();
 
         let monitor_context: Arc<dyn AsyncEngineContext> = controller.clone();
@@ -930,7 +923,7 @@ mod tests {
         controller: Arc<Controller>,
     }
 
-    /// Creates a reusable reader harness with paired TCP streams and test channels.
+    /// 创建一个可复用的 reader 测试支架，包含成对的 TCP 流和测试通道。
     async fn reader_harness() -> ReaderHarness {
         let (client, server) = create_tcp_pair().await;
         let (read_half, _write_half) = tokio::io::split(client);
@@ -955,7 +948,7 @@ mod tests {
         TwoPartMessage::from_header(Bytes::from(msg_bytes))
     }
 
-    /// Test that handle_reader handles Stop control message by calling context.stop()
+    /// 测试 handle_reader 会在收到 Stop 控制消息时调用 context.stop()。
     #[tokio::test]
     async fn test_handle_reader_stop_control_message() {
         let ReaderHarness {
@@ -966,32 +959,32 @@ mod tests {
             controller,
         } = reader_harness().await;
 
-        // Spawn the reader task
+        // 启动 reader 任务。
         let controller_clone = controller.clone();
         let reader_handle = tokio::spawn(async move {
             handle_reader(framed_reader, controller_clone, alive_tx, None).await
         });
 
-        // Send Stop control message from server
+        // 从服务端发送 Stop 控制消息。
         framed_server
             .send(control_message(&ControlMessage::Stop))
             .await
             .unwrap();
 
-        // Close the framed server to signal EOF to the client
+        // 关闭 framed server，向 client 发送 EOF 信号。
         framed_server.close().await.unwrap();
 
-        // Wait for reader to finish
+        // 等待 reader 结束。
         let _ = reader_handle.await.unwrap();
 
-        // Verify that stop was called on the controller
+        // 验证 controller 上的 stop 已被调用。
         assert!(
             controller.is_stopped(),
             "Controller should be stopped after receiving Stop message"
         );
     }
 
-    /// Test that handle_reader handles Kill control message by calling context.kill()
+    /// 测试 handle_reader 会在收到 Kill 控制消息时调用 context.kill()。
     #[tokio::test]
     async fn test_handle_reader_kill_control_message() {
         let ReaderHarness {
@@ -1002,32 +995,32 @@ mod tests {
             controller,
         } = reader_harness().await;
 
-        // Spawn the reader task
+        // 启动 reader 任务。
         let controller_clone = controller.clone();
         let reader_handle = tokio::spawn(async move {
             handle_reader(framed_reader, controller_clone, alive_tx, None).await
         });
 
-        // Send Kill control message from server
+        // 从服务端发送 Kill 控制消息。
         framed_server
             .send(control_message(&ControlMessage::Kill))
             .await
             .unwrap();
 
-        // Close the framed server to signal EOF to the client
+        // 关闭 framed server，向 client 发送 EOF 信号。
         framed_server.close().await.unwrap();
 
-        // Wait for reader to finish
+        // 等待 reader 结束。
         let _ = reader_handle.await.unwrap();
 
-        // Verify that kill was called on the controller
+        // 验证 controller 上的 kill 已被调用。
         assert!(
             controller.is_killed(),
             "Controller should be killed after receiving Kill message"
         );
     }
 
-    /// Test that handle_reader exits when alive channel is closed
+    /// 测试当 alive 通道关闭时，handle_reader 会退出。
     #[tokio::test]
     async fn test_handle_reader_exits_on_alive_channel_closed() {
         let ReaderHarness {
@@ -1038,16 +1031,16 @@ mod tests {
             ..
         } = reader_harness().await;
 
-        // Spawn the reader task
+        // 启动 reader 任务。
         let reader_handle =
             tokio::spawn(
                 async move { handle_reader(framed_reader, controller, alive_tx, None).await },
             );
 
-        // Drop the alive_rx to close the channel (simulating writer finishing)
+        // drop alive_rx 以关闭通道（模拟 writer 结束）。
         drop(alive_rx);
 
-        // Reader should exit due to alive channel closure
+        // reader 应该因为 alive 通道关闭而退出。
         let result = reader_handle.await;
 
         assert!(
@@ -1056,7 +1049,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_reader exits when TCP stream is closed
+    /// 测试当 TCP 流关闭时，handle_reader 会退出。
     #[tokio::test]
     async fn test_handle_reader_exits_on_stream_closed() {
         let ReaderHarness {
@@ -1067,16 +1060,16 @@ mod tests {
             controller,
         } = reader_harness().await;
 
-        // Spawn the reader task
+        // 启动 reader 任务。
         let reader_handle =
             tokio::spawn(
                 async move { handle_reader(framed_reader, controller, alive_tx, None).await },
             );
 
-        // Close the framed server to signal EOF to the client
+        // 关闭 framed server，向 client 发送 EOF 信号。
         framed_server.close().await.unwrap();
 
-        // Reader should exit due to stream closure
+        // reader 应该因为流关闭而退出。
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), reader_handle).await;
 
         assert!(
@@ -1085,7 +1078,7 @@ mod tests {
         );
     }
 
-    /// Test that handle_reader handles multiple control messages in sequence
+    /// 测试 handle_reader 能按顺序处理多条控制消息。
     #[tokio::test]
     async fn test_handle_reader_multiple_control_messages() {
         let ReaderHarness {
@@ -1096,13 +1089,13 @@ mod tests {
             controller,
         } = reader_harness().await;
 
-        // Spawn the reader task
+        // 启动 reader 任务。
         let controller_clone = controller.clone();
         let reader_handle = tokio::spawn(async move {
             handle_reader(framed_reader, controller_clone, alive_tx, None).await
         });
 
-        // Send multiple Stop messages (first one will stop, subsequent ones are no-ops)
+        // 发送多条 Stop 消息（第一条会 stop，后续消息都是 no-op）。
         framed_server
             .send(control_message(&ControlMessage::Stop))
             .await
@@ -1112,20 +1105,20 @@ mod tests {
             .await
             .unwrap();
 
-        // Close the framed server to signal EOF to the client
+        // 关闭 framed server，向 client 发送 EOF 信号。
         framed_server.close().await.unwrap();
 
-        // Wait for reader to finish
+        // 等待 reader 结束。
         let _ = reader_handle.await.unwrap();
 
-        // Verify that stop was called
+        // 验证 stop 已被调用。
         assert!(
             controller.is_stopped(),
             "Controller should be stopped after receiving Stop messages"
         );
     }
 
-    /// Test handle_reader with Stop followed by Kill
+    /// 测试 handle_reader 中 Stop 后接 Kill 的处理。
     #[tokio::test]
     async fn test_handle_reader_stop_then_kill() {
         let ReaderHarness {
@@ -1136,13 +1129,13 @@ mod tests {
             controller,
         } = reader_harness().await;
 
-        // Spawn the reader task
+        // 启动 reader 任务。
         let controller_clone = controller.clone();
         let reader_handle = tokio::spawn(async move {
             handle_reader(framed_reader, controller_clone, alive_tx, None).await
         });
 
-        // Send Stop first, then Kill
+        // 先发送 Stop，再发送 Kill。
         framed_server
             .send(control_message(&ControlMessage::Stop))
             .await
@@ -1152,20 +1145,20 @@ mod tests {
             .await
             .unwrap();
 
-        // Close the framed server to signal EOF to the client
+        // 关闭 framed server，向 client 发送 EOF 信号。
         framed_server.close().await.unwrap();
 
-        // Wait for reader to finish
+        // 等待 reader 结束。
         let _ = reader_handle.await.unwrap();
 
-        // Verify that kill was called (which sets killed state)
+        // 验证 kill 已被调用（它会把状态设为 killed）。
         assert!(
             controller.is_killed(),
             "Controller should be killed after receiving Kill message"
         );
     }
 
-    /// Read errors kill the context and are counted as cancellations.
+    /// 读错误会 kill context，并计入取消次数。
     #[tokio::test]
     async fn test_handle_reader_increments_cancellation_counter_on_read_error() {
         let ReaderHarness {
@@ -1210,8 +1203,7 @@ mod tests {
         );
     }
 
-    /// Drives `handle_reader` against a single message and returns the
-    /// controller + cancellation counter for assertions.
+    /// 用单条消息驱动 `handle_reader`，并返回 controller 与取消计数器供断言使用。
     async fn run_reader_with(
         msg: TwoPartMessage,
         counter_name: &str,
@@ -1243,10 +1235,10 @@ mod tests {
         (controller, counter)
     }
 
-    /// Each protocol-violating message variant must kill only this stream
-    /// (controller killed, cancellation counted once) and never panic the
-    /// worker. Covers the three non-read-error panic arms in `handle_reader`:
-    /// undecodable control bytes, server-sent Sentinel, and non-control
+    /// 每一种违反协议的消息都只能杀掉当前流（controller 进入 killed，
+    /// 取消计数只加一次），不能让 worker panic。覆盖 `handle_reader` 中
+    /// 三种非读错误的 panic 分支：无法解码的控制字节、服务端发送的 Sentinel，
+    /// 以及非控制类消息。
     /// (data-only) messages.
     #[tokio::test]
     async fn test_handle_reader_kills_on_protocol_violations() {

@@ -50,21 +50,20 @@ use uuid::Uuid;
 
 // === SECTION: TaskError ===
 
-/// Error type for task execution results
+/// 任务执行结果的错误类型
 ///
-/// This enum distinguishes between task cancellation and actual failures,
-/// enabling proper metrics tracking and error handling.
+/// 该枚举区分「任务取消」与「真实失败」，便于正确统计指标和处理错误。
 #[derive(Error, Debug)]
 pub enum TaskError {
-    /// Task was cancelled (either via cancellation token or tracker shutdown)
+    /// 任务被取消（来自取消 token 或 tracker 关停）
     #[error("Task was cancelled")]
     Cancelled,
 
-    /// Task failed with an error
+    /// 任务以错误结束
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
 
-    /// Cannot spawn task on a closed tracker
+    /// 无法在已关闭的 tracker 上派发任务
     #[error("Cannot spawn task on a closed tracker")]
     TrackerClosed,
 }
@@ -104,12 +103,12 @@ impl TaskError {
     }
 }
 
-/// A handle to a spawned task that provides both join functionality and cancellation control
+/// 指向已派发任务的句柄，同时提供 join 与取消控制能力
 ///
-/// `TaskHandle` wraps a `JoinHandle` and provides access to the task's individual cancellation token.
-/// This allows fine-grained control over individual tasks while maintaining the familiar `JoinHandle` API.
+/// `TaskHandle` 包装一个 `JoinHandle`，并暴露该任务专属的取消 token，
+/// 让调用方在保留熟悉的 `JoinHandle` API 的同时，对单个任务做细粒度控制。
 ///
-/// # Example
+/// # 示例
 /// ```rust
 /// # use pagoda_runtime::utils::tasks::tracker::*;
 /// # #[tokio::main]
@@ -120,13 +119,13 @@ impl TaskError {
 ///     Ok(42)
 /// });
 ///
-/// // Access the task's cancellation token
+/// // 获取该任务的取消 token
 /// let cancel_token = handle.cancellation_token();
 ///
-/// // Can cancel the specific task
+/// // 可以取消这个特定任务
 /// // cancel_token.cancel();
 ///
-/// // Await the task like a normal JoinHandle
+/// // 像普通 JoinHandle 一样 await 任务
 /// let result = handle.await?;
 /// assert_eq!(result?, 42);
 /// # Ok(())
@@ -153,8 +152,6 @@ impl<T> TaskHandle<T> {
     }
 
     /// 返回当前任务专属的取消 token。
-    // FIXME: The doctest previously here failed intermittently and may
-    // indicate a bug in either the doctest example or the implementation.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancel_token
     }
@@ -194,36 +191,34 @@ impl<T> std::fmt::Debug for TaskHandle<T> {
 
 // === SECTION: Continuation 与续作 ===
 
-/// Trait for continuation tasks that execute after a failure
+/// 在任务失败后执行的续作任务 trait
 ///
-/// This trait allows tasks to define what should happen next after a failure,
-/// eliminating the need for complex type erasure and executor management.
-/// Tasks implement this trait to provide clean continuation logic.
+/// 该 trait 让任务定义「失败之后该做什么」，从而免去复杂的类型擦除与
+/// 执行器管理。任务实现此 trait 以提供清晰的续作逻辑。
 #[async_trait]
 pub trait Continuation: Send + Sync + std::fmt::Debug + std::any::Any {
-    /// Execute the continuation task after a failure
+    /// 在任务失败后执行续作任务
     ///
-    /// This method is called when a task fails and a continuation is provided.
-    /// The implementation can perform retry logic, fallback operations,
-    /// transformations, or any other follow-up action.
-    /// Returns the result in a type-erased Box<dyn Any> for flexibility.
+    /// 当某个任务失败且提供了续作时调用此方法。实现可以执行重试逻辑、
+    /// 回退操作、结果转换或任何其他后续动作。
+    /// 为保证灵活性，结果以类型擦除的 Box<dyn Any> 形式返回。
     async fn execute(
         &self,
         cancel_token: CancellationToken,
     ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>>;
 }
 
-/// Error type that signals a task failed but provided a continuation
+/// 表示任务失败但提供了续作的错误类型
 ///
-/// This error type contains a continuation task that can be executed as a follow-up.
-/// The task defines its own continuation logic through the Continuation trait.
+/// 该错误类型携带一个可作为后续执行的续作任务。
+/// 任务通过 Continuation trait 定义自身的续作逻辑。
 #[derive(Error, Debug)]
 #[error("Task failed with continuation: {source}")]
 pub struct FailedWithContinuation {
-    /// The underlying error that caused the task to fail
+    /// 导致任务失败的底层错误
     #[source]
     pub source: anyhow::Error,
-    /// The continuation task for follow-up execution
+    /// 用于后续执行的续作任务
     pub continuation: Arc<dyn Continuation + Send + Sync + 'static>,
 }
 
@@ -250,13 +245,12 @@ impl FailedWithContinuation {
         anyhow::Error::new(continuation_error)
     }
 
-    /// Create a FailedWithContinuation from a simple async function (no cancellation support)
+    /// 从一个简单的异步函数创建 FailedWithContinuation（不支持取消）
     ///
-    /// This is a convenience method for creating continuation errors from simple async closures
-    /// that don't need to handle cancellation. The function will be executed when the
-    /// continuation is triggered.
+    /// 这是一个便捷方法，用于从无需处理取消的简单异步闭包创建续作错误。
+    /// 当续作被触发时会执行该函数。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::*;
     /// # use anyhow::anyhow;
@@ -283,13 +277,12 @@ impl FailedWithContinuation {
         Self::into_anyhow(source, continuation)
     }
 
-    /// Create a FailedWithContinuation from a cancellable async function
+    /// 从一个可取消的异步函数创建 FailedWithContinuation
     ///
-    /// This is a convenience method for creating continuation errors from async closures
-    /// that can handle cancellation. The function receives a CancellationToken
-    /// and should check it periodically for cooperative cancellation.
+    /// 这是一个便捷方法，用于从能处理取消的异步闭包创建续作错误。
+    /// 该函数会收到一个 CancellationToken，应周期性地检查它以配合取消。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::*;
     /// # use anyhow::anyhow;
@@ -320,18 +313,16 @@ impl FailedWithContinuation {
     }
 }
 
-/// Extension trait for extracting FailedWithContinuation from anyhow::Error
+/// 从 anyhow::Error 中提取 FailedWithContinuation 的扩展 trait
 ///
-/// This trait provides methods to detect and extract continuation tasks
-/// from the type-erased anyhow::Error system.
+/// 该 trait 提供从类型擦除的 anyhow::Error 体系中检测并提取续作任务的方法。
 pub trait FailedWithContinuationExt {
-    /// Extract a continuation task if this error contains one
+    /// 若该错误携带续作则提取它
     ///
-    /// Returns the continuation task if the error is a FailedWithContinuation,
-    /// None otherwise.
+    /// 若错误是 FailedWithContinuation 则返回其续作任务，否则返回 None。
     fn extract_continuation(&self) -> Option<Arc<dyn Continuation + Send + Sync + 'static>>;
 
-    /// Check if this error has a continuation
+    /// 判断该错误是否携带续作
     fn has_continuation(&self) -> bool;
 }
 
@@ -348,7 +339,7 @@ impl FailedWithContinuationExt for anyhow::Error {
     }
 }
 
-/// Implementation of Continuation for simple async functions (no cancellation support)
+/// 针对简单异步函数的 Continuation 实现（不支持取消）
 struct FnContinuation<F> {
     f: Box<F>,
 }
@@ -382,7 +373,7 @@ where
     }
 }
 
-/// Implementation of Continuation for cancellable async functions
+/// 针对可取消异步函数的 Continuation 实现
 struct CancellableFnContinuation<F> {
     f: Box<F>,
 }
@@ -418,346 +409,177 @@ where
 
 // === SECTION: SchedulingPolicy ===
 
-/// Common scheduling policies for task execution
+/// \u4efb\u52a1\u6267\u884c\u7684\u5e38\u7528\u8c03\u5ea6\u7b56\u7565
 ///
-/// These enums provide convenient access to built-in scheduling policies
-/// without requiring manual construction of policy objects.
+/// \u8be5\u679a\u4e3e\u63d0\u4f9b\u5bf9\u5185\u7f6e\u8c03\u5ea6\u7b56\u7565\u7684\u4fbf\u6377\u8bbf\u95ee\uff0c\u65e0\u9700\u624b\u52a8\u6784\u9020\u7b56\u7565\u5bf9\u8c61\u3002
 ///
-/// ## Cancellation Semantics
+/// ## \u53d6\u6d88\u8bed\u4e49
 ///
-/// All schedulers follow the same cancellation behavior:
-/// - Respect cancellation tokens before resource allocation (permits, etc.)
-/// - Once task execution begins, always await completion
-/// - Let tasks handle their own cancellation internally
+/// \u6240\u6709\u8c03\u5ea6\u5668\u9075\u5faa\u76f8\u540c\u7684\u53d6\u6d88\u884c\u4e3a\uff1a
+/// - \u5728\u5206\u914d\u8d44\u6e90\uff08\u8bb8\u53ef\u7b49\uff09\u4e4b\u524d\u5c0a\u91cd\u53d6\u6d88 token
+/// - \u4e00\u65e6\u4efb\u52a1\u5f00\u59cb\u6267\u884c\uff0c\u59cb\u7ec8\u7b49\u5f85\u5176\u5b8c\u6210
+/// - \u8ba9\u4efb\u52a1\u5728\u5185\u90e8\u81ea\u884c\u5904\u7406\u53d6\u6d88
 #[derive(Debug, Clone)]
 pub enum SchedulingPolicy {
-    /// No concurrency limits - execute all tasks immediately
+    /// \u65e0\u5e76\u53d1\u9650\u5236 \u2014 \u7acb\u5373\u6267\u884c\u6240\u6709\u4efb\u52a1
     Unlimited,
-    /// Semaphore-based concurrency limiting
+    /// \u57fa\u4e8e\u4fe1\u53f7\u91cf\u7684\u5e76\u53d1\u9650\u5236
     Semaphore(usize),
-    // TODO: Future scheduling policies to implement
-    //
-    // /// Token bucket rate limiting with burst capacity
-    // /// Implementation: Use tokio::time::interval for refill, AtomicU64 for tokens.
-    // /// acquire() decrements tokens, schedule() waits for refill if empty.
-    // /// Burst allows temporary spikes above steady rate.
-    // /// struct: { rate: f64, burst: usize, tokens: AtomicU64, last_refill: Mutex<Instant> }
-    // /// Example: TokenBucket { rate: 10.0, burst: 5 } = 10 tasks/sec, burst up to 5
-    // TokenBucket { rate: f64, burst: usize },
-    //
-    // /// Weighted fair scheduling across multiple priority classes
-    // /// Implementation: Maintain separate VecDeque for each priority class.
-    // /// Use weighted round-robin: serve N tasks from high, M from normal, etc.
-    // /// Track deficit counters to ensure fairness over time.
-    // /// struct: { queues: HashMap<String, VecDeque<Task>>, weights: Vec<(String, u32)> }
-    // /// Example: WeightedFair { weights: vec![("high", 70), ("normal", 20), ("low", 10)] }
-    // WeightedFair { weights: Vec<(String, u32)> },
-    //
-    // /// Memory-aware scheduling that limits tasks based on available memory
-    // /// Implementation: Monitor system memory via /proc/meminfo or sysinfo crate.
-    // /// Pause scheduling when available memory < threshold, resume when memory freed.
-    // /// Use exponential backoff for memory checks to avoid overhead.
-    // /// struct: { max_memory_mb: usize, check_interval: Duration, semaphore: Semaphore }
-    // MemoryAware { max_memory_mb: usize },
-    //
-    // /// CPU-aware scheduling that adjusts concurrency based on CPU load
-    // /// Implementation: Sample system load via sysinfo crate every N seconds.
-    // /// Dynamically resize internal semaphore permits based on load average.
-    // /// Use PID controller for smooth adjustments, avoid oscillation.
-    // /// struct: { max_cpu_percent: f32, permits: Arc<Semaphore>, sampler: tokio::task }
-    // CpuAware { max_cpu_percent: f32 },
-    //
-    // /// Adaptive scheduler that automatically adjusts concurrency based on performance
-    // /// Implementation: Track task latency and throughput in sliding windows.
-    // /// Increase permits if latency low & throughput stable, decrease if latency spikes.
-    // /// Use additive increase, multiplicative decrease (AIMD) algorithm.
-    // /// struct: { permits: AtomicUsize, latency_tracker: RingBuffer, throughput_tracker: RingBuffer }
-    // Adaptive { initial_permits: usize },
-    //
-    // /// Throttling scheduler that enforces minimum time between task starts
-    // /// Implementation: Store last_execution time in AtomicU64 (unix timestamp).
-    // /// Before scheduling, check elapsed time and tokio::time::sleep if needed.
-    // /// Useful for rate-limiting API calls to external services.
-    // /// struct: { min_interval: Duration, last_execution: AtomicU64 }
-    // Throttling { min_interval_ms: u64 },
-    //
-    // /// Batch scheduler that groups tasks and executes them together
-    // /// Implementation: Collect tasks in Vec<Task>, use tokio::time::timeout for max_wait.
-    // /// Execute batch when size reached OR timeout expires, whichever first.
-    // /// Use futures::future::join_all for parallel execution within batch.
-    // /// struct: { batch_size: usize, max_wait: Duration, pending: Mutex<Vec<Task>> }
-    // Batch { batch_size: usize, max_wait_ms: u64 },
-    //
-    // /// Priority-based scheduler with separate queues for different priority levels
-    // /// Implementation: Three separate semaphores for high/normal/low priorities.
-    // /// Always serve high before normal, normal before low (strict priority).
-    // /// Add starvation protection: promote normal->high after timeout.
-    // /// struct: { high_sem: Semaphore, normal_sem: Semaphore, low_sem: Semaphore }
-    // Priority { high: usize, normal: usize, low: usize },
-    //
-    // /// Backpressure-aware scheduler that monitors downstream capacity
-    // /// Implementation: Track external queue depth via provided callback/metric.
-    // /// Pause scheduling when queue_threshold exceeded, resume after pause_duration.
-    // /// Use exponential backoff for repeated backpressure events.
-    // /// struct: { queue_checker: Arc<dyn Fn() -> usize>, threshold: usize, pause_duration: Duration }
-    // Backpressure { queue_threshold: usize, pause_duration_ms: u64 },
 }
 
-/// Trait for implementing error handling policies
+/// 实现错误处理策略的 trait
 ///
-/// Error policies are lightweight, synchronous decision-makers that analyze task failures
-/// and return an ErrorResponse telling the TaskTracker what action to take. The TaskTracker
-/// handles all the actual work (cancellation, metrics, etc.) based on the policy's response.
+/// 错误策略是轻量、同步的决策者，它分析任务失败并返回一个 ErrorResponse，
+/// 告诉 TaskTracker 该采取何种动作。TaskTracker 根据策略的响应完成实际工作
+/// （取消、指标统计等）。
 ///
-/// ## Key Design Principles
-/// - **Synchronous**: Policies make fast decisions without async operations
-/// - **Stateless where possible**: TaskTracker manages cancellation tokens and state
-/// - **Composable**: Policies can be combined and nested in hierarchies
-/// - **Focused**: Each policy handles one specific error pattern or strategy
+/// ## 核心设计原则
+/// - **同步**：策略不依赖异步操作即可快速决策
+/// - **尽可能无状态**：TaskTracker 负责管理取消 token 与状态
+/// - **可组合**：策略可以组合并在层级中嵌套
+/// - **职责单一**：每个策略只处理一种特定的错误模式或策略
 ///
-/// Per-task error handling context
+/// 单个任务的错误处理上下文
 ///
-/// Provides context information and state management for error policies.
-/// The state field allows policies to maintain per-task state across multiple error attempts.
+/// 为错误策略提供上下文信息与状态管理。
+/// state 字段让策略在多次错误尝试间维护每任务状态。
 pub struct OnErrorContext {
-    /// Number of times this task has been attempted (starts at 1)
+    /// 该任务已尝试的次数（从 1 开始）
     pub attempt_count: u32,
-    /// Unique identifier of the failed task
+    /// 失败任务的唯一标识
     pub task_id: TaskId,
-    /// Full execution context with access to scheduler, metrics, etc.
+    /// 完整的执行上下文，可访问调度器、指标等
     pub execution_context: TaskExecutionContext,
-    /// Optional per-task state managed by the policy (None for stateless policies)
+    /// 由策略管理的可选每任务状态（无状态策略为 None）
     pub state: Option<Box<dyn std::any::Any + Send + 'static>>,
 }
 
 // === SECTION: OnErrorPolicy / ErrorPolicy ===
 
-/// Error handling policy trait for task failures
+/// 任务失败的错误处理策略 trait
 ///
-/// Policies define how the TaskTracker responds to task failures.
-/// They can be stateless (like LogOnlyPolicy) or maintain per-task state
-/// (like ThresholdCancelPolicy with per-task failure counters).
+/// 策略定义 TaskTracker 如何响应任务失败。
+/// 它们可以是无状态的（如 LogOnlyPolicy），也可以维护每任务状态
+/// （如带每任务失败计数器的 ThresholdCancelPolicy）。
 pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
-    /// Create a child policy for a child tracker
+    /// 为子 tracker 创建子策略
     ///
-    /// This allows policies to maintain hierarchical relationships,
-    /// such as child cancellation tokens or shared circuit breaker state.
+    /// 该方法让策略保持层级关系，比如子取消 token 或共享的熔断器状态。
     fn create_child(&self) -> Arc<dyn OnErrorPolicy>;
 
-    /// Create per-task context state (None if policy is stateless)
+    /// 创建每任务的上下文状态（策略无状态时返回 None）
     ///
-    /// This method is called once per task when the first error occurs.
-    /// Stateless policies should return None to avoid unnecessary heap allocations.
-    /// Stateful policies should return Some(Box::new(initial_state)).
+    /// 当某任务首次出错时，每任务调用一次此方法。
+    /// 无状态策略应返回 None，以避免不必要的堆分配。
+    /// 有状态策略应返回 Some(Box::new(initial_state))。
     ///
-    /// # Returns
-    /// * `None` - Policy doesn't need per-task state (no heap allocation)
-    /// * `Some(state)` - Initial state for this task (heap allocated when needed)
+    /// # 返回值
+    /// * `None` — 策略不需要每任务状态（无堆分配）
+    /// * `Some(state)` — 该任务的初始状态（按需堆分配）
     fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>>;
 
-    /// Handle a task failure and return the desired response
+    /// 处理任务失败并返回期望的响应
     ///
-    /// # Arguments
-    /// * `error` - The error that occurred
-    /// * `context` - Mutable context with attempt count, task info, and optional state
+    /// # 参数
+    /// * `error` — 发生的错误
+    /// * `context` — 可变上下文，包含尝试次数、任务信息及可选状态
     ///
-    /// # Returns
-    /// ErrorResponse indicating how the TaskTracker should handle this failure
+    /// # 返回值
+    /// 表示 TaskTracker 应如何处理本次失败的 ErrorResponse
     fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse;
 
-    /// Should continuations be allowed for this error?
+    /// 是否允许针对本错误使用续作？
     ///
-    /// This method is called before checking if a task provided a continuation to determine
-    /// whether the policy allows continuation-based retries at all. If this returns `false`,
-    /// any `FailedWithContinuation` will be ignored and the error will be handled through
-    /// the normal policy response.
+    /// 该方法在检查任务是否提供续作之前被调用，用于决定策略是否允许
+    /// 基于续作的重试。若返回 `false`，任何 `FailedWithContinuation` 都会被忽略，
+    /// 错误将按普通策略响应处理。
     ///
-    /// # Arguments
-    /// * `error` - The error that occurred
-    /// * `context` - Per-task context with attempt count and state
+    /// # 参数
+    /// * `error` — 发生的错误
+    /// * `context` — 包含尝试次数与状态的每任务上下文
     ///
-    /// # Returns
-    /// * `true` - Allow continuations, check for `FailedWithContinuation` (default)
-    /// * `false` - Reject continuations, handle through normal policy response
+    /// # 返回值
+    /// * `true` — 允许续作，检查 `FailedWithContinuation`（默认）
+    /// * `false` — 拒绝续作，按普通策略响应处理
     fn allow_continuation(&self, _error: &anyhow::Error, _context: &OnErrorContext) -> bool {
         const ALLOW: bool = true;
         ALLOW
     }
 
-    /// Should this continuation be rescheduled through the scheduler?
+    /// 该续作是否应重新经调度器调度？
     ///
-    /// This method is called when a continuation is about to be executed to determine
-    /// whether it should go through the scheduler's acquisition process again or execute
-    /// immediately with the current execution permission.
+    /// 当某续作即将执行时调用此方法，用于决定它是否需要再次走调度器的
+    /// 资源获取流程，还是以当前执行许可立即执行。
     ///
-    /// **What this means:**
-    /// - **Don't reschedule (`false`)**: Execute continuation immediately with current permission
-    /// - **Reschedule (`true`)**: Release current permission, go through scheduler again
+    /// **含义：**
+    /// - **不重新调度（`false`）**：以当前许可立即执行续作
+    /// - **重新调度（`true`）**：释放当前许可，再次经调度器调度
     ///
-    /// Rescheduling means the continuation will be subject to the scheduler's policies
-    /// again (rate limiting, concurrency limits, backoff delays, etc.).
+    /// 重新调度意味着续作会再次受调度器策略约束（限流、并发限制、退避延迟等）。
     ///
-    /// # Arguments
-    /// * `error` - The error that triggered this retry decision
-    /// * `context` - Per-task context with attempt count and state
+    /// # 参数
+    /// * `error` — 触发本次重试决策的错误
+    /// * `context` — 包含尝试次数与状态的每任务上下文
     ///
-    /// # Returns
-    /// * `false` - Execute continuation immediately (default, efficient)
-    /// * `true` - Reschedule through scheduler (for delays, rate limiting, backoff)
+    /// # 返回值
+    /// * `false` — 立即执行续作（默认，高效）
+    /// * `true` — 重新经调度器调度（用于延迟、限流、退避）
     fn should_reschedule(&self, _error: &anyhow::Error, _context: &OnErrorContext) -> bool {
         const RESCHEDULE: bool = false;
         RESCHEDULE
     }
 }
 
-/// Common error handling policies for task failure management
+/// 用于任务失败管理的常用错误处理策略
 ///
-/// These enums provide convenient access to built-in error handling policies
-/// without requiring manual construction of policy objects.
+/// 该枚举提供对内置错误处理策略的便捷访问，无需手动构造策略对象。
 #[derive(Debug, Clone)]
 pub enum ErrorPolicy {
-    /// Log errors but continue execution - no cancellation
+    /// 记录错误但继续执行 — 不取消
     LogOnly,
-    /// Cancel all tasks on any error (using default error patterns)
+    /// 任何错误都取消所有任务（使用默认错误模式）
     CancelOnError,
-    /// Cancel all tasks when specific error patterns are encountered
+    /// 遇到特定错误模式时取消所有任务
     CancelOnPatterns(Vec<String>),
-    /// Cancel after a threshold number of failures
+    /// 失败次数超过阈值后取消
     CancelOnThreshold { max_failures: usize },
-    /// Cancel when failure rate exceeds threshold within time window
+    /// 时间窗口内失败率超过阈值时取消
     CancelOnRate {
         max_failure_rate: f32,
         window_secs: u64,
     },
-    // TODO: Future error policies to implement
-    //
-    // /// Retry failed tasks with exponential backoff
-    // /// Implementation: Store original task in retry queue with attempt count.
-    // /// Use tokio::time::sleep for delays: backoff_ms * 2^attempt.
-    // /// Spawn retry as new task, preserve original task_id for tracing.
-    // /// Need task cloning support in scheduler interface.
-    // /// struct: { max_attempts: usize, backoff_ms: u64, retry_queue: VecDeque<(Task, u32)> }
-    // Retry { max_attempts: usize, backoff_ms: u64 },
-    //
-    // /// Send failed tasks to a dead letter queue for later processing
-    // /// Implementation: Use tokio::sync::mpsc::channel for queue.
-    // /// Serialize task info (id, error, payload) for persistence.
-    // /// Background worker drains queue to external storage (Redis/DB).
-    // /// Include retry count and timestamps for debugging.
-    // /// struct: { queue: mpsc::Sender<DeadLetterItem>, storage: Arc<dyn DeadLetterStorage> }
-    // DeadLetter { queue_name: String },
-    //
-    // /// Execute fallback logic when tasks fail
-    // /// Implementation: Store fallback closure in Arc for thread-safety.
-    // /// Execute fallback in same context as failed task (inherit cancel token).
-    // /// Track fallback success/failure separately from original task metrics.
-    // /// Consider using enum for common fallback patterns (default value, noop, etc).
-    // /// struct: { fallback_fn: Arc<dyn Fn(TaskId, Error) -> BoxFuture<Result<()>>> }
-    // Fallback { fallback_fn: Arc<dyn Fn() -> BoxFuture<'static, Result<()>>> },
-    //
-    // /// Circuit breaker pattern - stop executing after threshold failures
-    // /// Implementation: Track state (Closed/Open/HalfOpen) with AtomicU8.
-    // /// Use failure window (last N tasks) or time window for threshold.
-    // /// In Open state, reject tasks immediately, use timer for recovery.
-    // /// In HalfOpen, allow one test task to check if issues resolved.
-    // /// struct: { state: AtomicU8, failure_count: AtomicU64, last_failure: AtomicU64 }
-    // CircuitBreaker { failure_threshold: usize, timeout_secs: u64 },
-    //
-    // /// Resource protection policy that monitors memory/CPU usage
-    // /// Implementation: Background task samples system resources via sysinfo.
-    // /// Cancel tracker when memory > threshold, use process-level monitoring.
-    // /// Implement graceful degradation: warn at 80%, cancel at 90%.
-    // /// Include both system-wide and process-specific thresholds.
-    // /// struct: { monitor_task: JoinHandle, thresholds: ResourceThresholds, cancel_token: CancellationToken }
-    // ResourceProtection { max_memory_mb: usize },
-    //
-    // /// Timeout policy that cancels tasks exceeding maximum duration
-    // /// Implementation: Wrap each task with tokio::time::timeout.
-    // /// Store task start time, check duration in on_error callback.
-    // /// Distinguish timeout errors from other task failures in metrics.
-    // /// Consider per-task or global timeout strategies.
-    // /// struct: { max_duration: Duration, timeout_tracker: HashMap<TaskId, Instant> }
-    // Timeout { max_duration_secs: u64 },
-    //
-    // /// Sampling policy that only logs a percentage of errors
-    // /// Implementation: Use thread-local RNG for sampling decisions.
-    // /// Hash task_id for deterministic sampling (same task always sampled).
-    // /// Store sample rate as f32, compare with rand::random::<f32>().
-    // /// Include rate in log messages for context.
-    // /// struct: { sample_rate: f32, rng: ThreadLocal<RefCell<SmallRng>> }
-    // Sampling { sample_rate: f32 },
-    //
-    // /// Aggregating policy that batches error reports
-    // /// Implementation: Collect errors in Vec, flush on size or time trigger.
-    // /// Use tokio::time::interval for periodic flushing.
-    // /// Group errors by type/pattern for better insights.
-    // /// Include error frequency and rate statistics in reports.
-    // /// struct: { window: Duration, batch: Mutex<Vec<ErrorEntry>>, flush_task: JoinHandle }
-    // Aggregating { window_secs: u64, max_batch_size: usize },
-    //
-    // /// Alerting policy that sends notifications on error patterns
-    // /// Implementation: Use reqwest for webhook HTTP calls.
-    // /// Rate-limit alerts to prevent spam (max N per minute).
-    // /// Include error context, task info, and system metrics in payload.
-    // /// Support multiple notification channels (webhook, email, slack).
-    // /// struct: { client: reqwest::Client, rate_limiter: RateLimiter, alert_config: AlertConfig }
-    // Alerting { webhook_url: String, severity_threshold: String },
 }
 
-/// Response type for error handling policies
+/// 错误处理策略的响应类型
 ///
-/// This enum defines how the TaskTracker should respond to task failures.
-/// Currently provides minimal functionality with planned extensions for common patterns.
+/// 该枚举定义 TaskTracker 应如何响应任务失败。
 #[derive(Debug)]
 pub enum ErrorResponse {
-    /// Just fail this task - error will be logged/counted, but tracker continues
+    /// 仅让本任务失败 — 错误会被记录/计数，但 tracker 继续运行
     Fail,
 
-    /// Shutdown this tracker and all child trackers
+    /// 关停本 tracker 及所有子 tracker
     Shutdown,
 
-    /// Execute custom error handling logic with full context access
+    /// 执行自定义错误处理逻辑，可完整访问上下文
     Custom(Box<dyn OnErrorAction>),
-    // TODO: Future specialized error responses to implement:
-    //
-    // /// Retry the failed task with configurable strategy
-    // /// Implementation: Add RetryStrategy trait with delay(), should_continue(attempt_count),
-    // /// release_and_reacquire_resources() methods. TaskTracker handles retry loop with
-    // /// attempt counting and resource management. Supports exponential backoff, jitter.
-    // /// Usage: ErrorResponse::Retry(Box::new(ExponentialBackoff { max_attempts: 3, base_delay: 100ms }))
-    // Retry(Box<dyn RetryStrategy>),
-    //
-    // /// Execute fallback logic, then follow secondary action
-    // /// Implementation: Add FallbackAction trait with execute(error, task_id) -> Result<(), Error>.
-    // /// Execute fallback first, then recursively handle the 'then' response based on fallback result.
-    // /// Enables patterns like: try fallback, if it works continue, if it fails retry original task.
-    // /// Usage: ErrorResponse::Fallback { fallback: Box::new(DefaultValue(42)), then: Box::new(ErrorResponse::Continue) }
-    // Fallback { fallback: Box<dyn FallbackAction>, then: Box<ErrorResponse> },
-    //
-    // /// Restart task with preserved state (for long-running/stateful tasks)
-    // /// Implementation: Add TaskState trait for serialize/deserialize state, RestartStrategy trait
-    // /// with create_continuation_task(state) -> Future. Task saves checkpoints during execution,
-    // /// on error returns StatefulTaskError containing preserved state. Policy can restart from checkpoint.
-    // /// Usage: ErrorResponse::RestartWithState { state: checkpointed_state, strategy: Box::new(CheckpointRestart { ... }) }
-    // RestartWithState { state: Box<dyn TaskState>, strategy: Box<dyn RestartStrategy> },
 }
 
-/// Trait for implementing custom error handling actions
+/// 用于实现自定义错误处理动作的 trait
 ///
-/// This provides full access to the task execution context for complex error handling
-/// scenarios that don't fit into the built-in response patterns.
+/// 它提供对任务执行上下文的完整访问，用于那些不适合内置响应模式的复杂错误处理场景。
 #[async_trait]
 pub trait OnErrorAction: Send + Sync + std::fmt::Debug {
-    /// Execute custom error handling logic
+    /// 执行自定义错误处理逻辑
     ///
-    /// # Arguments
-    /// * `error` - The error that caused the task to fail
-    /// * `task_id` - Unique identifier of the failed task
-    /// * `attempt_count` - Number of times this task has been attempted (starts at 1)
-    /// * `context` - Full execution context with access to scheduler, metrics, etc.
+    /// # 参数
+    /// * `error` — 导致任务失败的错误
+    /// * `task_id` — 失败任务的唯一标识
+    /// * `attempt_count` — 该任务已尝试的次数（从 1 开始）
+    /// * `context` — 完整执行上下文，可访问调度器、指标等
     ///
-    /// # Returns
-    /// ActionResult indicating what the TaskTracker should do next
+    /// # 返回值
+    /// 表示 TaskTracker 接下来该做什么的 ActionResult
     async fn execute(
         &self,
         error: &anyhow::Error,
@@ -767,86 +589,78 @@ pub trait OnErrorAction: Send + Sync + std::fmt::Debug {
     ) -> ActionResult;
 }
 
-/// Scheduler execution guard state for conditional re-acquisition during task retry loops
+/// 任务重试循环中用于条件性重新获取资源的调度器执行护卫状态
 ///
-/// This controls whether a continuation should reuse the current scheduler execution permission
-/// or go through the scheduler's acquisition process again.
+/// 它控制续作是复用当前调度器执行许可，还是再次经历调度器的获取流程。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GuardState {
-    /// Keep the current scheduler execution permission for immediate continuation
+    /// 保留当前调度器执行许可，以便立即续作
     ///
-    /// The continuation will execute immediately without going through the scheduler again.
-    /// This is efficient for simple retries that don't need delays or rate limiting.
+    /// 续作将立即执行，不再走调度器。
+    /// 这对于无需延迟或限流的简单重试更高效。
     Keep,
 
-    /// Release current permission and re-acquire through scheduler before continuation
+    /// 释放当前许可，在续作前重新经调度器获取
     ///
-    /// The continuation will be subject to the scheduler's policies again (concurrency limits,
-    /// rate limiting, backoff delays, etc.). Use this for implementing retry delays or
-    /// when the scheduler needs to apply its policies to the retry attempt.
+    /// 续作将再次受调度器策略约束（并发限制、限流、退避延迟等）。
+    /// 用于实现重试延迟，或需要调度器对重试尝试应用其策略的场景。
     Reschedule,
 }
 
-/// Result of a custom error action execution
+/// 自定义错误动作执行的结果
 #[derive(Debug)]
 pub enum ActionResult {
-    /// Just fail this task (error was logged/handled by policy)
+    /// 仅让本任务失败（错误已由策略记录/处理）
     ///
-    /// This means the policy has handled the error appropriately (e.g., logged it,
-    /// updated metrics, etc.) and the task should fail with this error.
-    /// The task execution terminates here.
+    /// 表示策略已适当处理该错误（如记录、更新指标等），
+    /// 任务应以此错误失败。任务执行在此终止。
     Fail,
 
-    /// Continue execution with the provided task
+    /// 使用提供的任务继续执行
     ///
-    /// This provides a new executable to continue the retry loop with.
-    /// The task execution continues with the provided continuation.
+    /// 提供一个新的可执行体以继续重试循环。
+    /// 任务执行将以提供的续作继续。
     Continue {
         continuation: Arc<dyn Continuation + Send + Sync + 'static>,
     },
 
-    /// Shutdown this tracker and all child trackers
+    /// 关停本 tracker 及所有子 tracker
     ///
-    /// This triggers shutdown of the entire tracker hierarchy.
-    /// All running and pending tasks will be cancelled.
+    /// 这会触发整个 tracker 层级的关停。
+    /// 所有运行中和待处理的任务都将被取消。
     Shutdown,
 }
 
-/// Execution context provided to custom error actions
+/// 提供给自定义错误动作的执行上下文
 ///
-/// This gives custom actions full access to the task execution environment
-/// for implementing complex error handling scenarios.
+/// 它让自定义动作完整访问任务执行环境，以实现复杂的错误处理场景。
 pub struct TaskExecutionContext {
-    /// Scheduler for reacquiring resources or checking state
+    /// 用于重新获取资源或检查状态的调度器
     pub scheduler: Arc<dyn TaskScheduler>,
 
-    /// Metrics for custom tracking
+    /// 用于自定义统计的指标
     pub metrics: Arc<dyn HierarchicalTaskMetrics>,
-    // TODO: Future context additions:
-    // pub guard: Box<dyn ResourceGuard>,    // Current resource guard (needs Debug impl)
-    // pub cancel_token: CancellationToken,  // For implementing custom cancellation
-    // pub task_recreation: Box<dyn TaskRecreator>, // For implementing retry/restart
 }
 
-/// Result of task execution - unified for both regular and cancellable tasks
+/// 任务执行结果 — 普通任务与可取消任务统一使用
 #[derive(Debug)]
 pub enum TaskExecutionResult<T> {
-    /// Task completed successfully
+    /// 任务成功完成
     Success(T),
-    /// Task was cancelled (only possible for cancellable tasks)
+    /// 任务被取消（仅可取消任务可能出现）
     Cancelled,
-    /// Task failed with an error
+    /// 任务以错误结束
     Error(anyhow::Error),
 }
 
-/// Trait for executing different types of tasks in a unified way
+/// 以统一方式执行不同类型任务的 trait
 #[async_trait]
 trait TaskExecutor<T>: Send {
-    /// Execute the task with the given cancellation token
+    /// 使用给定的取消 token 执行任务
     async fn execute(&mut self, cancel_token: CancellationToken) -> TaskExecutionResult<T>;
 }
 
-/// Task executor for regular (non-cancellable) tasks
+/// 针对普通（不可取消）任务的执行器
 struct RegularTaskExecutor<F, T>
 where
     F: Future<Output = Result<T>> + Send + 'static,
@@ -891,7 +705,7 @@ where
     }
 }
 
-/// Task executor for cancellable tasks
+/// 针对可取消任务的执行器
 struct CancellableTaskExecutor<F, Fut, T>
 where
     F: FnMut(CancellationToken) -> Fut + Send + 'static,
@@ -932,18 +746,18 @@ where
     }
 }
 
-/// Common functionality for policy Arc construction
+/// 策略 Arc 构造的通用能力
 ///
-/// This trait provides a standardized `new_arc()` method for all policy types,
-/// eliminating the need for manual `Arc::new()` calls in client code.
+/// 该 trait 为所有策略类型提供统一的 `new_arc()` 方法，
+/// 免去在调用代码中手动 `Arc::new()`。
 pub trait ArcPolicy: Sized + Send + Sync + 'static {
-    /// Create an Arc-wrapped instance of this policy
+    /// 创建由 Arc 包装的策略实例
     fn new_arc(self) -> Arc<Self> {
         Arc::new(self)
     }
 }
 
-/// Unique identifier for a task
+/// 任务的唯一标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(Uuid);
 
@@ -960,90 +774,84 @@ impl std::fmt::Display for TaskId {
     }
 }
 
-/// Result of task execution
+/// 任务执行的结果状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompletionStatus {
-    /// Task completed successfully
+    /// 任务成功完成
     Ok,
-    /// Task was cancelled before or during execution
+    /// 任务在执行前或执行中被取消
     Cancelled,
-    /// Task failed with an error
+    /// 任务以错误结束
     Failed(String),
 }
 
-/// Result type for cancellable tasks that explicitly tracks cancellation
+/// 显式跟踪取消状态的可取消任务结果类型
 #[derive(Debug)]
 pub enum CancellableTaskResult<T> {
-    /// Task completed successfully
+    /// 任务成功完成
     Ok(T),
-    /// Task was cancelled (either via token or shutdown)
+    /// 任务被取消（来自 token 或关停）
     Cancelled,
-    /// Task failed with an error
+    /// 任务以错误结束
     Err(anyhow::Error),
 }
 
-/// Result of scheduling a task
+/// 调度任务的结果
 #[derive(Debug)]
 pub enum SchedulingResult<T> {
-    /// Task was executed and completed
+    /// 任务已执行并完成
     Execute(T),
-    /// Task was cancelled before execution
+    /// 任务在执行前被取消
     Cancelled,
-    /// Task was rejected due to scheduling policy
+    /// 任务因调度策略被拒绝
     Rejected(String),
 }
 
-/// Resource guard that manages task execution
+/// 管理任务执行的资源护卫
 ///
-/// This trait enforces proper cancellation semantics by separating resource
-/// management from task execution. Once a guard is acquired, task execution
-/// must always run to completion.
-/// Resource guard for task execution
+/// 该 trait 通过将资源管理与任务执行分离来强制正确的取消语义。
+/// 一旦获取护卫，任务执行就必须运行至完成。
+/// 资源护卫代表从调度器获取、并需在任务执行期间持有的资源
+/// （许可、槽位等）。护卫在被 drop 时自动释放资源，实现正确的 RAII 语义。
 ///
-/// This trait represents resources (permits, slots, etc.) acquired from a scheduler
-/// that must be held during task execution. The guard automatically releases
-/// resources when dropped, implementing proper RAII semantics.
-///
-/// Guards are returned by `TaskScheduler::acquire_execution_slot()` and must
-/// be held in scope while the task executes to ensure resources remain allocated.
+/// 护卫由 `TaskScheduler::acquire_execution_slot()` 返回，应在任务执行期间保持在作用域内，
+/// 以确保资源保持分配。
 pub trait ResourceGuard: Send + 'static {
-    // Marker trait - resources are released via Drop on the concrete type
+    // 标记 trait — 资源通过具体类型的 Drop 释放
 }
 
-/// Trait for implementing task scheduling policies
+/// 用于实现任务调度策略的 trait
 ///
-/// This trait enforces proper cancellation semantics by splitting resource
-/// acquisition (which can be cancelled) from task execution (which cannot).
+/// 该 trait 通过将资源获取（可取消）与任务执行（不可取消）拆分，
+/// 来强制正确的取消语义。
 ///
-/// ## Design Philosophy
+/// ## 设计理念
 ///
-/// Tasks may or may not support cancellation (depending on whether they were
-/// created with `spawn_cancellable` or regular `spawn`). This split design ensures:
+/// 任务可能支持也可能不支持取消（取决于它是由 `spawn_cancellable` 还是
+/// 普通 `spawn` 创建）。这种拆分设计确保：
 ///
-/// - **Resource acquisition**: Can respect cancellation tokens to avoid unnecessary allocation
-/// - **Task execution**: Always runs to completion; tasks handle their own cancellation
+/// - **资源获取**：可以尊重取消 token，避免不必要的分配
+/// - **任务执行**：始终运行至完成；任务自行处理取消
 ///
-/// This makes it impossible to accidentally interrupt task execution with `tokio::select!`.
+/// 这使得无法意外地用 `tokio::select!` 中断任务执行。
 #[async_trait]
 pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
-    /// Acquire resources needed for task execution and return a guard
+    /// 获取任务执行所需的资源并返回一个护卫
     ///
-    /// This method handles resource allocation (permits, queue slots, etc.) and
-    /// can respect cancellation tokens to avoid unnecessary resource consumption.
+    /// 该方法处理资源分配（许可、队列槽位等），并可尊重取消 token 以避免不必要的资源消耗。
     ///
-    /// ## Cancellation Behavior
+    /// ## 取消行为
     ///
-    /// The `cancel_token` is used for scheduler-level cancellation (e.g., "don't start new work").
-    /// If cancellation is requested before or during resource acquisition, this method
-    /// should return `SchedulingResult::Cancelled`.
+    /// `cancel_token` 用于调度器级别的取消（如「不要启动新工作」）。
+    /// 若在资源获取前或过程中请求了取消，该方法应返回 `SchedulingResult::Cancelled`。
     ///
-    /// # Arguments
-    /// * `cancel_token` - [`CancellationToken`] for scheduler-level cancellation
+    /// # 参数
+    /// * `cancel_token` — 用于调度器级别取消的 [`CancellationToken`]
     ///
-    /// # Returns
-    /// * `SchedulingResult::Execute(guard)` - Resources acquired, ready to execute
-    /// * `SchedulingResult::Cancelled` - Cancelled before or during resource acquisition
-    /// * `SchedulingResult::Rejected(reason)` - Resources unavailable or policy violation
+    /// # 返回值
+    /// * `SchedulingResult::Execute(guard)` — 资源已获取，可以执行
+    /// * `SchedulingResult::Cancelled` — 在资源获取前或过程中被取消
+    /// * `SchedulingResult::Rejected(reason)` — 资源不可用或违反策略
     async fn acquire_execution_slot(
         &self,
         cancel_token: CancellationToken,
@@ -1052,84 +860,84 @@ pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
 
 // === SECTION: HierarchicalTaskMetrics / PrometheusTaskMetrics ===
 
-/// Trait for hierarchical task metrics that supports aggregation up the tracker tree
+/// 支持沿 tracker 树向上聚合的层级化任务指标 trait
 ///
-/// This trait provides different implementations for root and child trackers:
-/// - Root trackers integrate with Prometheus metrics for observability
-/// - Child trackers chain metric updates up to their parents for aggregation
-/// - All implementations maintain thread-safe atomic operations
+/// 该 trait 为根 tracker 与子 tracker 提供不同实现：
+/// - 根 tracker 与 Prometheus 指标集成以便可观测
+/// - 子 tracker 将指标更新向上传递给父级以聚合
+/// - 所有实现均保持线程安全的原子操作
 pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
-    /// Increment issued task counter
+    /// 递增已发布任务计数
     fn increment_issued(&self);
 
-    /// Increment started task counter
+    /// 递增已启动任务计数
     fn increment_started(&self);
 
-    /// Increment success counter
+    /// 递增成功计数
     fn increment_success(&self);
 
-    /// Increment cancelled counter
+    /// 递增取消计数
     fn increment_cancelled(&self);
 
-    /// Increment failed counter
+    /// 递增失败计数
     fn increment_failed(&self);
 
-    /// Increment rejected counter
+    /// 递增拒绝计数
     fn increment_rejected(&self);
 
-    /// Get current issued count (local to this tracker)
+    /// 获取当前已发布计数（仅本 tracker）
     fn issued(&self) -> u64;
 
-    /// Get current started count (local to this tracker)
+    /// 获取当前已启动计数（仅本 tracker）
     fn started(&self) -> u64;
 
-    /// Get current success count (local to this tracker)
+    /// 获取当前成功计数（仅本 tracker）
     fn success(&self) -> u64;
 
-    /// Get current cancelled count (local to this tracker)
+    /// 获取当前取消计数（仅本 tracker）
     fn cancelled(&self) -> u64;
 
-    /// Get current failed count (local to this tracker)
+    /// 获取当前失败计数（仅本 tracker）
     fn failed(&self) -> u64;
 
-    /// Get current rejected count (local to this tracker)
+    /// 获取当前拒绝计数（仅本 tracker）
     fn rejected(&self) -> u64;
 
-    /// Get total completed tasks (success + cancelled + failed + rejected)
+    /// 获取已完成任务总数（成功 + 取消 + 失败 + 拒绝）
     fn total_completed(&self) -> u64 {
         self.success() + self.cancelled() + self.failed() + self.rejected()
     }
 
-    /// Get number of pending tasks (issued - completed)
+    /// 获取待处理任务数（已发布 - 已完成）
     fn pending(&self) -> u64 {
         self.issued().saturating_sub(self.total_completed())
     }
 
-    /// Get the number of tasks that are currently active (started - completed)
+    /// 获取当前处于活跃状态的任务数（已开始 - 已完成）
     fn active(&self) -> u64 {
         self.started().saturating_sub(self.total_completed())
     }
 
-    /// Get number of tasks queued in scheduler (issued - started)
+    /// 获取在调度器中排队的任务数（已发布 - 已开始）
     fn queued(&self) -> u64 {
         self.issued().saturating_sub(self.started())
     }
 }
 
-/// Task execution metrics for a tracker
+/// 某个 tracker 的任务执行指标
 #[derive(Debug, Default)]
 pub struct TaskMetrics {
-    /// Number of tasks issued/submitted (via spawn methods)
+    /// 已发布/提交的任务数（通过 spawn 系列方法）
     pub issued_count: AtomicU64,
-    /// Number of tasks that have started execution
+    /// 已开始执行的任务数
     pub started_count: AtomicU64,
-    /// Number of successfully completed tasks
+    /// 成功完成的任务数
     pub success_count: AtomicU64,
-    /// Number of cancelled tasks
+    /// 被取消的任务数
     pub cancelled_count: AtomicU64,
-    /// Number of failed tasks
+    /// 失败的任务数
     pub failed_count: AtomicU64,
-    /// Number of rejected tasks (by scheduler)
+    /// 被（调度器）拒绝的任务数
     pub rejected_count: AtomicU64,
 }
 
@@ -1142,81 +950,80 @@ fn read_counter(counter: &AtomicU64) -> u64 {
 }
 
 impl TaskMetrics {
-    /// Create new metrics instance
+    /// 创建新的指标实例
     pub fn new() -> Self {
         Default::default()
     }
 }
 
 impl HierarchicalTaskMetrics for TaskMetrics {
-    /// Increment issued task counter
+    /// 递增已发布任务计数
     fn increment_issued(&self) {
         increment_counter(&self.issued_count);
     }
 
-    /// Increment started task counter
+    /// 递增已启动任务计数
     fn increment_started(&self) {
         increment_counter(&self.started_count);
     }
 
-    /// Increment success counter
+    /// 递增成功计数
     fn increment_success(&self) {
         increment_counter(&self.success_count);
     }
 
-    /// Increment cancelled counter
+    /// 递增取消计数
     fn increment_cancelled(&self) {
         increment_counter(&self.cancelled_count);
     }
 
-    /// Increment failed counter
+    /// 递增失败计数
     fn increment_failed(&self) {
         increment_counter(&self.failed_count);
     }
 
-    /// Increment rejected counter
+    /// 递增拒绝计数
     fn increment_rejected(&self) {
         increment_counter(&self.rejected_count);
     }
 
-    /// Get current issued count
+    /// 获取当前已发布计数
     fn issued(&self) -> u64 {
         read_counter(&self.issued_count)
     }
 
-    /// Get current started count
+    /// 获取当前已启动计数
     fn started(&self) -> u64 {
         read_counter(&self.started_count)
     }
 
-    /// Get current success count
+    /// 获取当前成功计数
     fn success(&self) -> u64 {
         read_counter(&self.success_count)
     }
 
-    /// Get current cancelled count
+    /// 获取当前取消计数
     fn cancelled(&self) -> u64 {
         read_counter(&self.cancelled_count)
     }
 
-    /// Get current failed count
+    /// 获取当前失败计数
     fn failed(&self) -> u64 {
         read_counter(&self.failed_count)
     }
 
-    /// Get current rejected count
+    /// 获取当前拒绝计数
     fn rejected(&self) -> u64 {
         read_counter(&self.rejected_count)
     }
 }
 
-/// Root tracker metrics with Prometheus integration
+/// 带 Prometheus 集成的根 tracker 指标
 ///
-/// This implementation maintains local counters and exposes them as Prometheus metrics
-/// through the provided MetricsRegistry.
+/// 该实现维护本地计数器，并通过提供的 MetricsRegistry 将其暴露为 Prometheus 指标。
 #[derive(Debug)]
 pub struct PrometheusTaskMetrics {
-    /// Prometheus metrics integration
+    /// Prometheus 指标集成
     prometheus_issued: prometheus::IntCounter,
     prometheus_started: prometheus::IntCounter,
     prometheus_success: prometheus::IntCounter,
@@ -1226,13 +1033,13 @@ pub struct PrometheusTaskMetrics {
 }
 
 impl PrometheusTaskMetrics {
-    /// Create new root metrics with Prometheus integration
+    /// 创建带 Prometheus 集成的新根指标
     ///
-    /// # Arguments
-    /// * `registry` - MetricsRegistry for creating Prometheus metrics
-    /// * `servicegroup_name` - Name for the servicegroup/tracker (used in metric names)
+    /// # 参数
+    /// * `registry` — 用于创建 Prometheus 指标的 MetricsRegistry
+    /// * `servicegroup_name` — servicegroup/tracker 的名称（用于指标名）
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use pagoda_runtime::utils::tasks::tracker::PrometheusTaskMetrics;
@@ -1341,17 +1148,16 @@ impl HierarchicalTaskMetrics for PrometheusTaskMetrics {
     }
 }
 
-/// Child tracker metrics that chain updates to parent
+/// 将更新向上传递给父级的子 tracker 指标
 ///
-/// This implementation maintains local counters and automatically forwards
-/// all metric updates to the parent tracker for hierarchical aggregation.
-/// Holds a strong reference to parent metrics for optimal performance.
+/// 该实现维护本地计数器，并自动将所有指标更新转发给父 tracker 以进行层级聚合。
+/// 持有对父指标的强引用以获得最佳性能。
 #[derive(Debug)]
 struct ChildTaskMetrics {
-    /// Local metrics for this tracker
+    /// 本 tracker 的本地指标
     local_metrics: TaskMetrics,
-    /// Strong reference to parent metrics for fast chaining
-    /// Safe to hold since metrics don't own trackers - no circular references
+    /// 对父指标的强引用，用于快速传递
+    /// 因为指标不拥有 tracker，不会形成循环引用，持有是安全的
     parent_metrics: Arc<dyn HierarchicalTaskMetrics>,
 }
 
@@ -1421,10 +1227,9 @@ impl HierarchicalTaskMetrics for ChildTaskMetrics {
     }
 }
 
-/// Builder for creating child trackers with custom policies
+/// 用于创建带自定义策略的子 tracker 的构造器
 ///
-/// Allows flexible customization of scheduling and error handling policies
-/// for child trackers while maintaining parent-child relationships.
+/// 允许灵活定制子 tracker 的调度与错误处理策略，同时保持父子关系。
 pub struct ChildTrackerBuilder<'parent> {
     parent: &'parent TaskTracker,
     scheduler: Option<Arc<dyn TaskScheduler>>,
@@ -1432,7 +1237,7 @@ pub struct ChildTrackerBuilder<'parent> {
 }
 
 impl<'parent> ChildTrackerBuilder<'parent> {
-    /// Create a new ChildTrackerBuilder
+    /// 创建一个新的 ChildTrackerBuilder
     pub fn new(parent: &'parent TaskTracker) -> Self {
         Self {
             parent,
@@ -1441,14 +1246,14 @@ impl<'parent> ChildTrackerBuilder<'parent> {
         }
     }
 
-    /// Set custom scheduler for the child tracker
+    /// 为子 tracker 设置自定义调度器
     ///
-    /// If not set, the child will inherit the parent's scheduler.
+    /// 若未设置，子 tracker 将继承父级的调度器。
     ///
-    /// # Arguments
-    /// * `scheduler` - The scheduler to use for this child tracker
+    /// # 参数
+    /// * `scheduler` — 该子 tracker 使用的调度器
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
@@ -1464,15 +1269,15 @@ impl<'parent> ChildTrackerBuilder<'parent> {
         self
     }
 
-    /// Set custom error policy for the child tracker
+    /// 为子 tracker 设置自定义错误策略
     ///
-    /// If not set, the child will get a child policy from the parent's error policy
-    /// (via `OnErrorPolicy::create_child()`).
+    /// 若未设置，子 tracker 将从父级错误策略获得子策略
+    /// （通过 `OnErrorPolicy::create_child()`）。
     ///
-    /// # Arguments
-    /// * `error_policy` - The error policy to use for this child tracker
+    /// # 参数
+    /// * `error_policy` — 该子 tracker 使用的错误策略
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, LogOnlyPolicy};
@@ -1487,20 +1292,20 @@ impl<'parent> ChildTrackerBuilder<'parent> {
         self
     }
 
-    /// Build the child tracker with the specified configuration
+    /// 按指定配置构建子 tracker
     ///
-    /// Creates a new child tracker with:
-    /// - Custom or inherited scheduler
-    /// - Custom or child error policy
-    /// - Hierarchical metrics that chain to parent
-    /// - Child cancellation token from the parent
-    /// - Independent lifecycle from parent
+    /// 创建一个新的子 tracker，具备：
+    /// - 自定义或继承的调度器
+    /// - 自定义或子错误策略
+    /// - 向父级传递的层级化指标
+    /// - 来自父级的子取消 token
+    /// - 与父级独立的生命周期
     ///
-    /// # Returns
-    /// A new `Arc<TaskTracker>` configured as a child of the parent
+    /// # 返回值
+    /// 一个新的 `Arc<TaskTracker>`，配置为父级的子节点
     ///
-    /// # Errors
-    /// Returns an error if the parent tracker is already closed
+    /// # 错误
+    /// 若父 tracker 已关闭则返回错误
     pub fn build(self) -> anyhow::Result<TaskTracker> {
         if self.parent.is_closed() {
             return Err(anyhow::anyhow!(
@@ -1522,7 +1327,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
 
         let child = Arc::new(TaskTrackerInner {
             tokio_tracker: TokioTaskTracker::new(),
-            parent: None, // No parent reference needed for hierarchical operations
+            parent: None, // 层级化操作无需父引用
             scheduler,
             error_policy,
             metrics: child_metrics,
@@ -1530,7 +1335,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
             children: RwLock::new(Vec::new()),
         });
 
-        // Register this child with the parent for hierarchical operations
+        // 将该子节点注册到父级，以便进行层级化操作
         parent_inner
             .children
             .write()
@@ -1543,48 +1348,48 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     }
 }
 
-/// Internal data for TaskTracker
+/// TaskTracker 的内部数据
 ///
-/// This struct contains all the actual state and functionality of a TaskTracker.
-/// TaskTracker itself is just a wrapper around Arc<TaskTrackerInner>.
+/// 该结构体包含 TaskTracker 的全部实际状态与功能。
+/// TaskTracker 本身只是 Arc<TaskTrackerInner> 的包装。
 struct TaskTrackerInner {
-    /// Tokio's task tracker for lifecycle management
+    /// 用于生命周期管理的 tokio 任务跟踪器
     tokio_tracker: TokioTaskTracker,
-    /// Parent tracker (None for root)
+    /// 父 tracker（根节点为 None）
     parent: Option<Arc<TaskTrackerInner>>,
-    /// Scheduling policy (shared with children by default)
+    /// 调度策略（默认与子节点共享）
     scheduler: Arc<dyn TaskScheduler>,
-    /// Error handling policy (child-specific via create_child)
+    /// 错误处理策略（通过 create_child 生成子节点专属策略）
     error_policy: Arc<dyn OnErrorPolicy>,
-    /// Metrics for this tracker
+    /// 本 tracker 的指标
     metrics: Arc<dyn HierarchicalTaskMetrics>,
-    /// Cancellation token for this tracker (always present)
+    /// 本 tracker 的取消 token（总是存在）
     cancel_token: CancellationToken,
-    /// List of child trackers for hierarchical operations
+    /// 用于层级化操作的子 tracker 列表
     children: RwLock<Vec<Weak<TaskTrackerInner>>>,
 }
 
 // === SECTION: TaskTracker ===
 
-/// Hierarchical task tracker with pluggable scheduling and error policies
+/// 带可插拔调度与错误策略的层级化任务跟踪器
 ///
-/// TaskTracker provides a composable system for managing background tasks with:
-/// - Configurable scheduling via [`TaskScheduler`] implementations
-/// - Flexible error handling via [`OnErrorPolicy`] implementations
-/// - Parent-child relationships with independent metrics
-/// - Cancellation propagation and isolation
-/// - Built-in cancellation token support
+/// TaskTracker 提供一套可组合的后台任务管理系统，具备：
+/// - 通过 [`TaskScheduler`] 实现可配置调度
+/// - 通过 [`OnErrorPolicy`] 实现灵活错误处理
+/// - 带独立指标的父子关系
+/// - 取消的传播与隔离
+/// - 内置取消 token 支持
 ///
-/// Built on top of `tokio_util::task::TaskTracker` for robust task lifecycle management.
+/// 基于 `tokio_util::task::TaskTracker` 构建，以获得稳健的任务生命周期管理。
 ///
-/// # Example
+/// # 示例
 ///
 /// ```rust
 /// # use std::sync::Arc;
 /// # use tokio::sync::Semaphore;
 /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy, CancellableTaskResult};
 /// # async fn example() -> anyhow::Result<()> {
-/// // Create a task tracker with semaphore-based scheduling
+/// // 创建一个基于信号量调度的任务跟踪器
 /// let scheduler = SemaphoreScheduler::with_permits(3);
 /// let policy = LogOnlyPolicy::new();
 /// let root = TaskTracker::builder()
@@ -1592,11 +1397,11 @@ struct TaskTrackerInner {
 ///     .error_policy(policy)
 ///     .build()?;
 ///
-/// // Spawn some tasks
+/// // 派发一些任务
 /// let handle1 = root.spawn(async { Ok(1) });
 /// let handle2 = root.spawn(async { Ok(2) });
 ///
-/// // Get results and join all tasks
+/// // 获取结果并 join 所有任务
 /// let result1 = handle1.await.unwrap().unwrap();
 /// let result2 = handle2.await.unwrap().unwrap();
 /// assert_eq!(result1, 1);
@@ -1607,7 +1412,7 @@ struct TaskTrackerInner {
 #[derive(Clone)]
 pub struct TaskTracker(Arc<TaskTrackerInner>);
 
-/// Builder for TaskTracker
+/// TaskTracker 的构造器
 #[derive(Default)]
 pub struct TaskTrackerBuilder {
     scheduler: Option<Arc<dyn TaskScheduler>>,
@@ -1617,31 +1422,31 @@ pub struct TaskTrackerBuilder {
 }
 
 impl TaskTrackerBuilder {
-    /// Set the scheduler for this TaskTracker
+    /// 为该 TaskTracker 设置调度器
     pub fn scheduler(mut self, scheduler: Arc<dyn TaskScheduler>) -> Self {
         self.scheduler = Some(scheduler);
         self
     }
 
-    /// Set the error policy for this TaskTracker
+    /// 为该 TaskTracker 设置错误策略
     pub fn error_policy(mut self, error_policy: Arc<dyn OnErrorPolicy>) -> Self {
         self.error_policy = Some(error_policy);
         self
     }
 
-    /// Set custom metrics for this TaskTracker
+    /// 为该 TaskTracker 设置自定义指标
     pub fn metrics(mut self, metrics: Arc<dyn HierarchicalTaskMetrics>) -> Self {
         self.metrics = Some(metrics);
         self
     }
 
-    /// Set the cancellation token for this TaskTracker
+    /// 为该 TaskTracker 设置取消 token
     pub fn cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = Some(cancel_token);
         self
     }
 
-    /// Build the TaskTracker
+    /// 构建 TaskTracker
     pub fn build(self) -> anyhow::Result<TaskTracker> {
         let scheduler = match self.scheduler {
             Some(scheduler) => scheduler,
@@ -1671,11 +1476,11 @@ impl TaskTrackerBuilder {
 }
 
 impl TaskTracker {
-    /// Create a new root task tracker using the builder pattern
+    /// 使用构造器模式创建一个新的根任务跟踪器
     ///
-    /// This is the preferred way to create new task trackers.
+    /// 这是创建新任务跟踪器的首选方式。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
@@ -1694,16 +1499,16 @@ impl TaskTracker {
         TaskTrackerBuilder::default()
     }
 
-    /// Create a new root task tracker with simple parameters (legacy)
+    /// 使用简单参数创建新的根任务跟踪器（旧接口）
     ///
-    /// This method is kept for backward compatibility. Use `builder()` for new code.
-    /// Uses default metrics (no Prometheus integration).
+    /// 保留该方法以兼容旧代码。新代码请使用 `builder()`。
+    /// 使用默认指标（无 Prometheus 集成）。
     ///
-    /// # Arguments
-    /// * `scheduler` - Scheduling policy to use for all tasks
-    /// * `error_policy` - Error handling policy for this tracker
+    /// # 参数
+    /// * `scheduler` — 用于所有任务的调度策略
+    /// * `error_policy` — 该 tracker 的错误处理策略
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
@@ -1723,15 +1528,15 @@ impl TaskTracker {
         builder.scheduler(scheduler).error_policy(error_policy).build()
     }
 
-    /// Create a new root task tracker with Prometheus metrics integration
+    /// 创建带 Prometheus 指标集成的新根任务跟踪器
     ///
-    /// # Arguments
-    /// * `scheduler` - Scheduling policy to use for all tasks
-    /// * `error_policy` - Error handling policy for this tracker
-    /// * `registry` - MetricsRegistry for Prometheus integration
-    /// * `servicegroup_name` - Name for this tracker servicegroup
+    /// # 参数
+    /// * `scheduler` — 用于所有任务的调度策略
+    /// * `error_policy` — 该 tracker 的错误处理策略
+    /// * `registry` — 用于 Prometheus 集成的 MetricsRegistry
+    /// * `servicegroup_name` — 该 tracker servicegroup 的名称
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
@@ -1764,26 +1569,26 @@ impl TaskTracker {
         builder.build()
     }
 
-    /// Create a child tracker that inherits scheduling policy
+    /// 创建一个继承调度策略的子 tracker
     ///
-    /// The child tracker:
-    /// - Gets its own independent tokio TaskTracker
-    /// - Inherits the parent's scheduler
-    /// - Gets a child error policy via `create_child()`
-    /// - Has hierarchical metrics that chain to parent
-    /// - Gets a child cancellation token from the parent
-    /// - Is independent for cancellation (child cancellation doesn't affect parent)
+    /// 该子 tracker：
+    /// - 拥有自己独立的 tokio TaskTracker
+    /// - 继承父级的调度器
+    /// - 通过 `create_child()` 获得子错误策略
+    /// - 具备向父级传递的层级化指标
+    /// - 从父级获得子取消 token
+    /// - 取消互相独立（子节点取消不影响父级）
     ///
-    /// # Errors
-    /// Returns an error if the parent tracker is already closed
+    /// # 错误
+    /// 若父 tracker 已关闭则返回错误
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(root_tracker: TaskTracker) -> anyhow::Result<()> {
     /// let child_tracker = root_tracker.child_tracker()?;
-    /// // Child inherits parent's policies but has separate metrics and lifecycle
+    /// // 子节点继承父级策略，但拥有独立的指标与生命周期
     /// # Ok(())
     /// # }
     /// ```
@@ -1792,61 +1597,59 @@ impl TaskTracker {
         Ok(TaskTracker(child))
     }
 
-    /// Create a child tracker builder for flexible customization
+    /// 创建子 tracker 构造器以进行灵活定制
     ///
-    /// The builder allows you to customize scheduling and error policies for the child tracker.
-    /// If not specified, policies are inherited from the parent.
+    /// 该构造器允许你定制子 tracker 的调度与错误策略。
+    /// 若未指定，策略从父级继承。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
     /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn example(root_tracker: TaskTracker) {
-    /// // Custom scheduler, inherit error policy
+    /// // 自定义调度器，继承错误策略
     /// let child1 = root_tracker.child_tracker_builder()
     ///     .scheduler(SemaphoreScheduler::with_permits(5))
     ///     .build().unwrap();
     ///
-    /// // Custom error policy, inherit scheduler
+    /// // 自定义错误策略，继承调度器
     /// let child2 = root_tracker.child_tracker_builder()
     ///     .error_policy(LogOnlyPolicy::new())
     ///     .build().unwrap();
     ///
-    /// // Both custom
+    /// // 两者都自定义
     /// let child3 = root_tracker.child_tracker_builder()
     ///     .scheduler(SemaphoreScheduler::with_permits(3))
     ///     .error_policy(LogOnlyPolicy::new())
     ///     .build().unwrap();
     /// # }
     /// ```
-    /// Spawn a new task
+    /// 派发一个新任务
     ///
-    /// The task will be wrapped with scheduling and error handling logic,
-    /// then executed according to the configured policies. For tasks that
-    /// need to inspect cancellation tokens, use [`spawn_cancellable`] instead.
+    /// 任务会被包装上调度与错误处理逻辑，然后按配置的策略执行。
+    /// 对于需要检查取消 token 的任务，请改用 [`spawn_cancellable`]。
     ///
-    /// # Arguments
-    /// * `future` - The async task to execute
+    /// # 参数
+    /// * `future` — 要执行的异步任务
     ///
-    /// # Returns
-    /// A [`TaskHandle`] that can be used to await completion and access the task's cancellation token
+    /// # 返回值
+    /// 一个 [`TaskHandle`]，可用于等待完成并访问任务的取消 token
     ///
     /// # Panics
-    /// Panics if the tracker has been closed. This indicates a programming error
-    /// where tasks are being spawned after the tracker lifecycle has ended.
+    /// 若 tracker 已关闭则 panic。这表明在 tracker 生命周期结束后还在派发任务，属于编程错误。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
     /// let handle = tracker.spawn(async {
-    ///     // Your async work here
+    ///     // 在此编写你的异步工作
     ///     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     ///     Ok(42)
     /// });
     ///
-    /// // Access the task's cancellation token
+    /// // 获取任务的取消 token
     /// let cancel_token = handle.cancellation_token();
     ///
     /// let result = handle.await?;
@@ -1864,24 +1667,22 @@ impl TaskTracker {
         }
     }
 
-    /// Spawn a cancellable task that receives a cancellation token
+    /// 派发一个接收取消 token 的可取消任务
     ///
-    /// This is useful for tasks that need to inspect the cancellation token
-    /// and gracefully handle cancellation within their logic. The task function
-    /// must return a `CancellableTaskResult` to properly track cancellation vs errors.
+    /// 适用于需要检查取消 token 并在其逻辑内优雅处理取消的任务。
+    /// 任务函数必须返回 `CancellableTaskResult`，以正确区分取消与错误。
     ///
-    /// # Arguments
+    /// # 参数
     ///
-    /// * `task_fn` - Function that takes a cancellation token and returns a future that resolves to `CancellableTaskResult<T>`
+    /// * `task_fn` — 接收取消 token 并返回解析为 `CancellableTaskResult<T>` 的 future 的函数
     ///
-    /// # Returns
-    /// A [`TaskHandle`] that can be used to await completion and access the task's cancellation token
+    /// # 返回值
+    /// 一个 [`TaskHandle`]，可用于等待完成并访问任务的取消 token
     ///
     /// # Panics
-    /// Panics if the tracker has been closed. This indicates a programming error
-    /// where tasks are being spawned after the tracker lifecycle has ended.
+    /// 若 tracker 已关闭则 panic。这表明在 tracker 生命周期结束后还在派发任务，属于编程错误。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, CancellableTaskResult};
     /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
@@ -1894,7 +1695,7 @@ impl TaskTracker {
     ///     }
     /// });
     ///
-    /// // Access the task's individual cancellation token
+    /// // 访问该任务自身的取消 token
     /// let task_cancel_token = handle.cancellation_token();
     ///
     /// let result = handle.await?;
@@ -1913,12 +1714,11 @@ impl TaskTracker {
         }
     }
 
-    /// Get metrics for this tracker
+    /// 获取该 tracker 的指标
     ///
-    /// Metrics are specific to this tracker and do not include
-    /// metrics from parent or child trackers.
+    /// 指标仅针对该 tracker，不包含父级或子 tracker 的指标。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(tracker: &TaskTracker) {
@@ -1930,16 +1730,16 @@ impl TaskTracker {
         self.0.metrics.as_ref()
     }
 
-    /// Cancel this tracker and all its tasks
+    /// 取消该 tracker 及其所有任务
     ///
-    /// This will signal cancellation to all currently running tasks and prevent new tasks from being spawned.
-    /// The cancellation is immediate and forceful.
+    /// 这会向所有当前运行中的任务发出取消信号，并阻止派发新任务。
+    /// 取消是立即且强制的。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
-    /// // Spawn a long-running task
+    /// // 派发一个长时间运行的任务
     /// let handle = tracker.spawn_cancellable(|cancel_token| async move {
     ///     tokio::select! {
     ///         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
@@ -1951,7 +1751,7 @@ impl TaskTracker {
     ///     }
     /// }).await?;
     ///
-    /// // Cancel the tracker (and thus the task)
+    /// // 取消 tracker（进而取消任务）
     /// tracker.cancel();
     /// # Ok(())
     /// # }
@@ -1960,21 +1760,21 @@ impl TaskTracker {
         self.0.cancel();
     }
 
-    /// Check if this tracker is closed
+    /// 检查该 tracker 是否已关闭
     pub fn is_closed(&self) -> bool {
         self.0.is_closed()
     }
 
-    /// Get the cancellation token for this tracker
+    /// 获取该 tracker 的取消 token
     ///
-    /// This allows external code to observe or trigger cancellation of this tracker.
+    /// 允许外部代码观察或触发该 tracker 的取消。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(tracker: &TaskTracker) {
     /// let token = tracker.cancellation_token();
-    /// // Can check cancellation state or cancel manually
+    /// // 可检查取消状态或手动取消
     /// if !token.is_cancelled() {
     ///     token.cancel();
     /// }
@@ -1985,12 +1785,12 @@ impl TaskTracker {
         token
     }
 
-    /// Get the number of active child trackers
+    /// 获取活跃子 tracker 的数量
     ///
-    /// This counts only child trackers that are still alive (not dropped).
-    /// Dropped child trackers are automatically cleaned up.
+    /// 仅统计仍存活（未被 drop）的子 tracker。
+    /// 已 drop 的子 tracker 会被自动清理。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # fn example(tracker: &TaskTracker) {
@@ -2002,29 +1802,28 @@ impl TaskTracker {
         self.0.child_count()
     }
 
-    /// Create a child tracker builder with custom configuration
+    /// 创建带自定义配置的子 tracker 构造器
     ///
-    /// This provides fine-grained control over child tracker creation,
-    /// allowing you to override the scheduler or error policy while
-    /// maintaining the parent-child relationship.
+    /// 它提供对子 tracker 创建的细粒度控制，允许你覆盖调度器或错误策略，
+    /// 同时保持父子关系。
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
     /// # use pagoda_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn example(parent: &TaskTracker) {
-    /// // Custom scheduler, inherit error policy
+    /// // 自定义调度器，继承错误策略
     /// let child1 = parent.child_tracker_builder()
     ///     .scheduler(SemaphoreScheduler::with_permits(5))
     ///     .build().unwrap();
     ///
-    /// // Custom error policy, inherit scheduler
+    /// // 自定义错误策略，继承调度器
     /// let child2 = parent.child_tracker_builder()
     ///     .error_policy(LogOnlyPolicy::new())
     ///     .build().unwrap();
     ///
-    /// // Inherit both policies from parent
+    /// // 从父级继承两种策略
     /// let child3 = parent.child_tracker_builder()
     ///     .build().unwrap();
     /// # }
@@ -2034,21 +1833,21 @@ impl TaskTracker {
         ChildTrackerBuilder::new(tracker)
     }
 
-    /// Join this tracker and all child trackers
+    /// Join 该 tracker 及所有子 tracker
     ///
-    /// This method gracefully shuts down the entire tracker hierarchy by:
-    /// 1. Closing all trackers (preventing new task spawning)
-    /// 2. Waiting for all existing tasks to complete
+    /// 该方法通过以下步骤优雅关停整个 tracker 层级：
+    /// 1. 关闭所有 tracker（阻止派发新任务）
+    /// 2. 等待所有现有任务完成
     ///
-    /// Uses stack-safe traversal to prevent stack overflow in deep hierarchies.
-    /// Children are processed before parents to ensure proper shutdown order.
+    /// 使用栈安全的遍历避免深层层级中的栈溢出。
+    /// 先处理子节点再处理父节点，以确保正确的关停顺序。
     ///
-    /// **Hierarchical Behavior:**
-    /// - Processes children before parents to ensure proper shutdown order
-    /// - Each tracker is closed before waiting (Tokio requirement)
-    /// - Leaf trackers simply close and wait for their own tasks
+    /// **层级化行为：**
+    /// - 先处理子节点再处理父节点，以确保正确的关停顺序
+    /// - 每个 tracker 在等待前先关闭（Tokio 要求）
+    /// - 叶节点 tracker 仅关闭并等待自身的任务
     ///
-    /// # Example
+    /// # 示例
     /// ```rust
     /// # use pagoda_runtime::utils::tasks::tracker::TaskTracker;
     /// # async fn example(tracker: TaskTracker) {
@@ -2062,7 +1861,7 @@ impl TaskTracker {
 }
 
 impl TaskTrackerInner {
-    /// Creates child tracker with inherited scheduler/policy, independent metrics, and hierarchical cancellation
+    /// 创建子 tracker：继承调度器/策略、独立指标，并具备层级化取消
     fn child_tracker(self: &Arc<Self>) -> anyhow::Result<Arc<TaskTrackerInner>> {
         if self.is_closed() {
             return Err(anyhow::anyhow!(
@@ -2091,7 +1890,7 @@ impl TaskTrackerInner {
         Ok(child)
     }
 
-    /// Spawn implementation - validates tracker state, generates task ID, applies policies, and tracks execution
+    /// spawn 实现 — 校验 tracker 状态、生成任务 ID、应用策略并跟踪执行
     fn spawn<F, T>(self: &Arc<Self>, future: F) -> Result<TaskHandle<T>, TaskError>
     where
         F: Future<Output = Result<T>> + Send + 'static,
@@ -2114,7 +1913,7 @@ impl TaskTrackerInner {
         Ok(TaskHandle::new(join_handle, task_cancel_token))
     }
 
-    /// Spawn cancellable implementation - validates state, provides cancellation token, handles CancellableTaskResult
+    /// spawn_cancellable 实现 — 校验状态、提供取消 token、处理 CancellableTaskResult
     fn spawn_cancellable<F, Fut, T>(
         self: &Arc<Self>,
         task_fn: F,
@@ -2141,34 +1940,34 @@ impl TaskTrackerInner {
         Ok(TaskHandle::new(join_handle, task_cancel_token))
     }
 
-    /// Cancel this tracker and all its tasks - implementation
+    /// 取消该 tracker 及其所有任务 — 实现
     fn cancel(&self) {
         self.cancel_token.cancel();
         self.tokio_tracker.close();
     }
 
-    /// Returns true if the underlying tokio tracker is closed
+    /// 若底层 tokio tracker 已关闭则返回 true
     fn is_closed(&self) -> bool {
         self.tokio_tracker.is_closed()
     }
 
-    /// Generates a unique task ID using TaskId::new()
+    /// 使用 TaskId::new() 生成唯一任务 ID
     fn generate_task_id(&self) -> TaskId {
         TaskId::new()
     }
 
-    /// Removes dead weak references from children list to prevent memory leaks
+    /// 从子节点列表中移除失效的弱引用，以防止内存泄漏
     fn cleanup_dead_children(&self) {
         let mut children_guard = self.children.write().unwrap();
         children_guard.retain(|child| child.strong_count() > 0);
     }
 
-    /// Returns a clone of the cancellation token
+    /// 返回取消 token 的克隆
     fn cancellation_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
 
-    /// Counts active child trackers (filters out dead weak references)
+    /// 统计活跃子 tracker 数量（过滤失效的弱引用）
     fn child_count(&self) -> usize {
         let children_guard = self.children.read().unwrap();
         children_guard.iter().fold(0usize, |count, child| {
@@ -2180,7 +1979,7 @@ impl TaskTrackerInner {
         })
     }
 
-    /// Join implementation - closes all trackers in hierarchy then waits for task completion using stack-safe traversal
+    /// join 实现 — 关闭层级中所有 tracker，然后用栈安全遍历等待任务完成
     async fn join(self: &Arc<Self>) {
         if self.children.read().unwrap().is_empty() {
             self.tokio_tracker.close();
@@ -2194,7 +1993,7 @@ impl TaskTrackerInner {
         }
     }
 
-    /// Collects hierarchy using iterative DFS, returns Vec in post-order (children before parents) for safe shutdown
+    /// 用迭代 DFS 采集层级，以后序（子节点在父节点之前）返回 Vec，以便安全关停
     fn collect_hierarchy(self: &Arc<TaskTrackerInner>) -> Vec<Arc<TaskTrackerInner>> {
         let mut hierarchy = Vec::new();
         let mut stack = vec![self.clone()];
@@ -2216,7 +2015,7 @@ impl TaskTrackerInner {
         hierarchy
     }
 
-    /// Execute a regular task with scheduling and error handling policies
+    /// 以调度与错误处理策略执行一个普通任务
     #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
     async fn execute_with_policies<F, T>(
         task_id: TaskId,
@@ -2237,7 +2036,7 @@ impl TaskTrackerInner {
         .await
     }
 
-    /// Execute a cancellable task with scheduling and error handling policies
+    /// 以调度与错误处理策略执行一个可取消任务
     #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
     async fn execute_cancellable_with_policies<F, Fut, T>(
         task_id: TaskId,
@@ -2259,7 +2058,7 @@ impl TaskTrackerInner {
         .await
     }
 
-    /// Core execution loop with retry support - unified for both task types
+    /// 带重试支持的核心执行循环 — 两种任务类型统一使用
     #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
     async fn execute_with_retry_loop<E, T>(
         task_id: TaskId,
@@ -2273,7 +2072,7 @@ impl TaskTrackerInner {
     {
         debug!("Starting task execution");
 
-        // RAII guard for active counter - increments on creation, decrements on drop
+        // 活跃计数器的 RAII 护卫 — 创建时递增，drop 时递减
         struct ActiveCountGuard {
             metrics: Arc<dyn HierarchicalTaskMetrics>,
             is_active: bool,
@@ -2295,7 +2094,7 @@ impl TaskTrackerInner {
             }
         }
 
-        // Current executable - either the original TaskExecutor or a Continuation
+        // 当前可执行体 — 要么是原始 TaskExecutor，要么是 Continuation
         enum CurrentExecutable<E>
         where
             E: Send + 'static,
@@ -2425,7 +2224,7 @@ impl TaskTrackerInner {
         }
     }
 
-    /// Handle task errors through the error policy and return the action to take
+    /// 通过错误策略处理任务错误并返回要采取的动作
     async fn handle_task_error(
         error: &anyhow::Error,
         error_context: &mut Option<OnErrorContext>,
@@ -2495,42 +2294,41 @@ impl TaskTrackerInner {
     }
 }
 
-// Blanket implementation for all schedulers
+// 针对所有调度器的概括实现
 impl ArcPolicy for UnlimitedScheduler {}
 impl ArcPolicy for SemaphoreScheduler {}
 
-// Blanket implementation for all error policies
+// 针对所有错误策略的概括实现
 impl ArcPolicy for LogOnlyPolicy {}
 impl ArcPolicy for CancelOnError {}
 impl ArcPolicy for ThresholdCancelPolicy {}
 impl ArcPolicy for RateCancelPolicy {}
 
-/// Resource guard for unlimited scheduling
+/// 用于无限调度的资源护卫
 ///
-/// This guard represents "unlimited" resources - no actual resource constraints.
-/// Since there are no resources to manage, this guard is essentially a no-op.
+/// 该护卫代表「无限」资源 — 没有实际的资源约束。
+/// 因为无资源需要管理，该护卫本质上是空操作。
 #[derive(Debug)]
 pub struct UnlimitedGuard;
 
 impl ResourceGuard for UnlimitedGuard {
-    // No resources to manage - marker trait implementation only
+    // 无资源需要管理 — 仅实现标记 trait
 }
 
 // === SECTION: 调度器实现 ===
 
-/// Unlimited task scheduler that executes all tasks immediately
+/// 立即执行所有任务的无限任务调度器
 ///
-/// This scheduler provides no concurrency limits and executes all submitted tasks
-/// immediately. Useful for testing, high-throughput scenarios, or when external
-/// systems provide the concurrency control.
+/// 该调度器不设并发限制，立即执行所有提交的任务。
+/// 适用于测试、高吞吐场景，或由外部系统提供并发控制的场景。
 ///
-/// ## Cancellation Behavior
+/// ## 取消行为
 ///
-/// - Respects cancellation tokens before resource acquisition
-/// - Once execution begins (via ResourceGuard), always awaits task completion
-/// - Tasks handle their own cancellation internally (if created with `spawn_cancellable`)
+/// - 在资源获取前尊重取消 token
+/// - 一旦开始执行（通过 ResourceGuard），始终等待任务完成
+/// - 任务在内部自行处理取消（若由 `spawn_cancellable` 创建）
 ///
-/// # Example
+/// # 示例
 /// ```rust
 /// # use pagoda_runtime::utils::tasks::tracker::UnlimitedScheduler;
 /// let scheduler = UnlimitedScheduler::new();
@@ -2539,7 +2337,7 @@ impl ResourceGuard for UnlimitedGuard {
 pub struct UnlimitedScheduler;
 
 impl UnlimitedScheduler {
-    /// Create a new unlimited scheduler returning Arc
+    /// 创建一个新的无限调度器并返回 Arc
     pub fn new() -> Arc<Self> {
         Self.new_arc()
     }
@@ -2570,41 +2368,39 @@ impl TaskScheduler for UnlimitedScheduler {
     }
 }
 
-/// Resource guard for semaphore-based scheduling
+/// 用于基于信号量调度的资源护卫
 ///
-/// This guard holds a semaphore permit and enforces that task execution
-/// always runs to completion. The permit is automatically released when
-/// the guard is dropped.
+/// 该护卫持有一个信号量许可，并确保任务执行始终运行至完成。
+/// 许可在护卫被 drop 时自动释放。
 #[derive(Debug)]
 pub struct SemaphoreGuard {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl ResourceGuard for SemaphoreGuard {
-    // Permit is automatically released when the guard is dropped
+    // 许可在护卫被 drop 时自动释放
 }
 
-/// Semaphore-based task scheduler
+/// 基于信号量的任务调度器
 ///
-/// Limits concurrent task execution using a [`tokio::sync::Semaphore`].
-/// Tasks will wait for an available permit before executing.
+/// 使用 [`tokio::sync::Semaphore`] 限制并发任务执行。
+/// 任务会等待可用许可后再执行。
 ///
-/// ## Cancellation Behavior
+/// ## 取消行为
 ///
-/// - Respects cancellation tokens before and during permit acquisition
-/// - Once a permit is acquired (via ResourceGuard), always awaits task completion
-/// - Holds the permit until the task completes (regardless of cancellation)
-/// - Tasks handle their own cancellation internally (if created with `spawn_cancellable`)
+/// - 在许可获取前与过程中尊重取消 token
+/// - 一旦获取许可（通过 ResourceGuard），始终等待任务完成
+/// - 持有许可直到任务完成（无论是否取消）
+/// - 任务在内部自行处理取消（若由 `spawn_cancellable` 创建）
 ///
-/// This ensures that permits are not leaked when tasks are cancelled, while still
-/// allowing cancellable tasks to terminate gracefully on their own.
+/// 这确保任务被取消时许可不会泄漏，同时仍允许可取消任务自行优雅终止。
 ///
 /// # Example
 /// ```rust
 /// # use std::sync::Arc;
 /// # use tokio::sync::Semaphore;
 /// # use pagoda_runtime::utils::tasks::tracker::SemaphoreScheduler;
-/// // Allow up to 5 concurrent tasks
+/// // 允许最多 5 个并发任务
 /// let semaphore = Arc::new(Semaphore::new(5));
 /// let scheduler = SemaphoreScheduler::new(semaphore);
 /// ```
@@ -2614,22 +2410,22 @@ pub struct SemaphoreScheduler {
 }
 
 impl SemaphoreScheduler {
-    /// Create a new semaphore scheduler
+    /// 创建一个新的信号量调度器
     ///
-    /// # Arguments
-    /// * `semaphore` - Semaphore to use for concurrency control
+    /// # 参数
+    /// * `semaphore` - 用于并发控制的信号量
     pub fn new(semaphore: Arc<Semaphore>) -> Self {
         let permits = semaphore;
         Self { semaphore: permits }
     }
 
-    /// Create a semaphore scheduler with the specified number of permits, returning Arc
+    /// 以指定许可数创建信号量调度器，返回 Arc
     pub fn with_permits(permits: usize) -> Arc<Self> {
         let semaphore = Arc::new(Semaphore::new(permits));
         Self::new(semaphore).new_arc()
     }
 
-    /// Get the number of available permits
+    /// 获取可用许可数
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
     }
@@ -2668,21 +2464,21 @@ impl TaskScheduler for SemaphoreScheduler {
     }
 }
 
-/// Error policy that triggers cancellation based on error patterns
+/// 根据错误模式触发取消的错误策略
 ///
-/// This policy analyzes error messages and returns `ErrorResponse::Shutdown` when:
-/// - No patterns are specified (cancels on any error)
-/// - Error message matches one of the specified patterns
+/// 该策略分析错误信息，并在以下情况返回 `ErrorResponse::Shutdown`：
+/// - 未指定任何模式（任何错误都取消）
+/// - 错误信息匹配指定模式之一
 ///
-/// The TaskTracker handles the actual cancellation - this policy just makes the decision.
+/// 实际取消由 TaskTracker 处理 — 该策略仅做决策。
 ///
-/// # Example
+/// # 示例
 /// ```rust
 /// # use pagoda_runtime::utils::tasks::tracker::CancelOnError;
-/// // Cancel on any error
+/// // 对任何错误取消
 /// let policy = CancelOnError::new();
 ///
-/// // Cancel only on specific error patterns
+/// // 仅对特定错误模式取消
 /// let (policy, _token) = CancelOnError::with_patterns(
 ///     vec!["OutOfMemory".to_string(), "DeviceError".to_string()]
 /// );
@@ -2693,10 +2489,9 @@ pub struct CancelOnError {
 }
 
 impl CancelOnError {
-    /// Create a new cancel-on-error policy that cancels on any error
+    /// 创建一个对任何错误都取消的策略
     ///
-    /// Returns a policy with no error patterns, meaning it will cancel the TaskTracker
-    /// on any task failure.
+    /// 返回一个无错误模式的策略，意味着任何任务失败都会取消 TaskTracker。
     pub fn new() -> Arc<Self> {
         Self {
             error_patterns: Vec::new(),
@@ -2704,10 +2499,10 @@ impl CancelOnError {
         .new_arc()
     }
 
-    /// Create a new cancel-on-error policy with custom error patterns, returning Arc and token
+    /// 以自定义错误模式创建取消策略，返回 Arc 与 token
     ///
-    /// # Arguments
-    /// * `error_patterns` - List of error message patterns that trigger cancellation
+    /// # 参数
+    /// * `error_patterns` - 触发取消的错误信息模式列表
     pub fn with_patterns(error_patterns: Vec<String>) -> (Arc<Self>, CancellationToken) {
         let token = CancellationToken::new();
         let policy = Self { error_patterns }.new_arc();
@@ -2725,7 +2520,7 @@ impl OnErrorPolicy for CancelOnError {
     }
 
     fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-        None // Stateless policy - no heap allocation
+        None // 无状态策略 — 无堆分配
     }
 
     fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
@@ -2750,15 +2545,14 @@ impl OnErrorPolicy for CancelOnError {
 
 // === SECTION: 错误策略实现 ===
 
-/// Simple error policy that only logs errors
+/// 仅记录错误的简单错误策略
 ///
-/// This policy does not trigger cancellation and is useful for
-/// non-critical tasks or when you want to handle errors externally.
+/// 该策略不触发取消，适用于非关键任务，或希望在外部处理错误的场景。
 #[derive(Debug)]
 pub struct LogOnlyPolicy;
 
 impl LogOnlyPolicy {
-    /// Create a new log-only policy returning Arc
+    /// 创建一个新的仅记录策略，返回 Arc
     pub fn new() -> Arc<Self> {
         Self.new_arc()
     }
@@ -2776,7 +2570,7 @@ impl OnErrorPolicy for LogOnlyPolicy {
     }
 
     fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-        None // Stateless policy - no heap allocation
+        None // 无状态策略 — 无堆分配
     }
 
     fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
@@ -2785,16 +2579,15 @@ impl OnErrorPolicy for LogOnlyPolicy {
     }
 }
 
-/// Error policy that cancels tasks after a threshold number of failures
+/// 在失败次数达到阈值后取消任务的错误策略
 ///
-/// This policy tracks the number of failed tasks and triggers cancellation
-/// when the failure count exceeds the specified threshold. Useful for
-/// preventing cascading failures in distributed systems.
+/// 该策略跟踪失败任务数，并在失败计数超过指定阈值时触发取消。
+/// 适用于防止分布式系统中的连锁故障。
 ///
-/// # Example
+/// # 示例
 /// ```rust
 /// # use pagoda_runtime::utils::tasks::tracker::ThresholdCancelPolicy;
-/// // Cancel after 5 failures
+/// // 5 次失败后取消
 /// let policy = ThresholdCancelPolicy::with_threshold(5);
 /// ```
 #[derive(Debug)]
@@ -2804,10 +2597,10 @@ pub struct ThresholdCancelPolicy {
 }
 
 impl ThresholdCancelPolicy {
-    /// Create a new threshold cancel policy with specified failure threshold, returning Arc and token
+    /// 以指定失败阈值创建阈值取消策略，返回 Arc 与 token
     ///
-    /// # Arguments
-    /// * `max_failures` - Maximum number of failures before cancellation
+    /// # 参数
+    /// * `max_failures` - 取消前的最大失败次数
     pub fn with_threshold(max_failures: usize) -> Arc<Self> {
         Self {
             max_failures,
@@ -2816,21 +2609,20 @@ impl ThresholdCancelPolicy {
         .new_arc()
     }
 
-    /// Get the current failure count
+    /// 获取当前失败计数
     pub fn failure_count(&self) -> u64 {
         read_counter(&self.failure_count)
     }
 
-    /// Reset the failure count to zero
+    /// 将失败计数重置为零
     ///
-    /// This is primarily useful for testing scenarios where you want to reset
-    /// the policy state between test cases.
+    /// 这主要用于需要在测试用例间重置策略状态的测试场景。
     pub fn reset_failure_count(&self) {
         self.failure_count.store(0, Ordering::Relaxed);
     }
 }
 
-/// Per-task state for ThresholdCancelPolicy
+/// ThresholdCancelPolicy 的每任务状态
 #[derive(Debug)]
 struct ThresholdState {
     failure_count: u32,
@@ -2885,16 +2677,15 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
     }
 }
 
-/// Error policy that cancels tasks when failure rate exceeds threshold within time window
+/// 在时间窗口内失败率超过阈值时取消任务的错误策略
 ///
-/// This policy tracks failures over a rolling time window and triggers cancellation
-/// when the failure rate exceeds the specified threshold. More sophisticated than
-/// simple count-based thresholds as it considers the time dimension.
+/// 该策略在滑动时间窗口内跟踪失败，并在失败率超过指定阈值时触发取消。
+/// 相比简单的计数阈值更复杂，因为它考虑了时间维度。
 ///
-/// # Example
+/// # 示例
 /// ```rust
 /// # use pagoda_runtime::utils::tasks::tracker::RateCancelPolicy;
-/// // Cancel if more than 50% of tasks fail within any 60-second window
+/// // 若任意 60 秒窗口内超过 50% 的任务失败则取消
 /// let (policy, token) = RateCancelPolicy::builder()
 ///     .rate(0.5)
 ///     .window_secs(60)
@@ -2905,18 +2696,18 @@ pub struct RateCancelPolicy {
     cancel_token: CancellationToken,
     max_failure_rate: f32,
     window_secs: u64,
-    // TODO: Implement time-window tracking when needed
-    // For now, this is a placeholder structure with the interface defined
+    // TODO: 需要时实现时间窗口跟踪
+    // 目前这是一个定义了接口的占位结构
 }
 
 impl RateCancelPolicy {
-    /// Create a builder for rate-based cancel policy
+    /// 创建基于失败率的取消策略构建器
     pub fn builder() -> RateCancelPolicyBuilder {
         RateCancelPolicyBuilder::new()
     }
 }
 
-/// Builder for RateCancelPolicy
+/// RateCancelPolicy 的构建器
 pub struct RateCancelPolicyBuilder {
     max_failure_rate: Option<f32>,
     window_secs: Option<u64>,
@@ -2930,19 +2721,19 @@ impl RateCancelPolicyBuilder {
         }
     }
 
-    /// Set the maximum failure rate (0.0 to 1.0) before cancellation
+    /// 设置取消前的最大失败率（0.0 到 1.0）
     pub fn rate(mut self, max_failure_rate: f32) -> Self {
         self.max_failure_rate = Some(max_failure_rate);
         self
     }
 
-    /// Set the time window in seconds for rate calculation
+    /// 设置用于速率计算的时间窗口（秒）
     pub fn window_secs(mut self, window_secs: u64) -> Self {
         self.window_secs = Some(window_secs);
         self
     }
 
-    /// Build the policy, returning Arc and cancellation token
+    /// 构建策略，返回 Arc 与取消 token
     pub fn build(self) -> (Arc<RateCancelPolicy>, CancellationToken) {
         let max_failure_rate = self.max_failure_rate.expect("rate must be set");
         let window_secs = self.window_secs.expect("window_secs must be set");
@@ -2970,14 +2761,14 @@ impl OnErrorPolicy for RateCancelPolicy {
     }
 
     fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-        None // Stateless policy for now (TODO: add time-window state)
+        None // 目前为无状态策略（TODO：添加时间窗口状态）
     }
 
     fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
         error!(?context.task_id, "Task failed - {error:?}");
 
-        // TODO: Implement time-window failure rate calculation
-        // For now, just log the error and continue
+        // TODO: 实现时间窗口失败率计算
+        // 目前仅记录错误并继续
         warn!(
             ?context.task_id,
             max_failure_rate = self.max_failure_rate,
@@ -2989,10 +2780,10 @@ impl OnErrorPolicy for RateCancelPolicy {
     }
 }
 
-/// Custom action that triggers a cancellation token when executed
+/// 执行时触发取消 token 的自定义动作
 ///
-/// This action demonstrates the ErrorResponse::Custom behavior by capturing
-/// an external cancellation token and triggering it when executed.
+/// 该动作通过捕获外部取消 token 并在执行时触发它，
+/// 演示了 ErrorResponse::Custom 的行为。
 #[derive(Debug)]
 pub struct TriggerCancellationTokenAction {
     cancel_token: CancellationToken,
@@ -3024,20 +2815,19 @@ impl OnErrorAction for TriggerCancellationTokenAction {
     }
 }
 
-/// Test error policy that triggers a custom cancellation token on any error
+/// 在任何错误时触发自定义取消 token 的测试错误策略
 ///
-/// This policy demonstrates the ErrorResponse::Custom behavior by capturing
-/// an external cancellation token and triggering it when any error occurs.
-/// Used for testing custom error handling actions.
+/// 该策略通过捕获外部取消 token 并在发生任何错误时触发它，
+/// 演示了 ErrorResponse::Custom 的行为。用于测试自定义错误处理动作。
 ///
-/// # Example
+/// # 示例
 /// ```rust
 /// # use tokio_util::sync::CancellationToken;
 /// # use pagoda_runtime::utils::tasks::tracker::TriggerCancellationTokenOnError;
 /// let cancel_token = CancellationToken::new();
 /// let policy = TriggerCancellationTokenOnError::new(cancel_token.clone());
 ///
-/// // Policy will trigger the token on any error via ErrorResponse::Custom
+/// // 策略会通过 ErrorResponse::Custom 在任何错误时触发该 token
 /// ```
 #[derive(Debug)]
 pub struct TriggerCancellationTokenOnError {
@@ -3045,7 +2835,7 @@ pub struct TriggerCancellationTokenOnError {
 }
 
 impl TriggerCancellationTokenOnError {
-    /// Create a new policy that triggers the given cancellation token on errors
+    /// 创建一个在错误时触发给定取消 token 的策略
     pub fn new(cancel_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self { cancel_token })
     }
@@ -3059,7 +2849,7 @@ impl OnErrorPolicy for TriggerCancellationTokenOnError {
     }
 
     fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-        None // Stateless policy - no heap allocation
+        None // 无状态策略 — 无堆分配
     }
 
     fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
@@ -3082,7 +2872,7 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::time::Duration;
 
-    // Test fixtures using rstest
+    // 使用 rstest 的测试 fixture
     #[fixture]
     fn semaphore_scheduler() -> Arc<SemaphoreScheduler> {
         Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))))
@@ -3115,25 +2905,24 @@ mod tests {
     #[tokio::test]
     async fn test_basic_task_execution(basic_tracker: TaskTracker) {
         // 测试基础任务执行与成功指标统计。
-        // Test successful task execution
         let (tx, rx) = tokio::sync::oneshot::channel();
         let handle = basic_tracker.spawn(async {
-            // Wait for signal to complete instead of sleep
+            // 等待完成信号而非使用 sleep
             rx.await.ok();
             Ok(42)
         });
 
-        // Signal task to complete
+        // 通知任务完成
         tx.send(()).ok();
 
-        // Verify task completes successfully
+        // 验证任务成功完成
         let result = handle
             .await
             .expect("Task should complete")
             .expect("Task should succeed");
         assert_eq!(result, 42);
 
-        // Verify metrics
+        // 验证指标
         assert_eq!(basic_tracker.metrics().success(), 1);
         assert_eq!(basic_tracker.metrics().failed(), 0);
         assert_eq!(basic_tracker.metrics().cancelled(), 0);
@@ -3147,7 +2936,6 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试任务失败后的错误传播与指标统计。
-        // Test task failure handling
         let tracker = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         let handle = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("test error")) });
@@ -3156,7 +2944,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TaskError::Failed(_)));
 
-        // Verify metrics
+        // 验证指标
         assert_eq!(tracker.metrics().success(), 0);
         assert_eq!(tracker.metrics().failed(), 1);
         assert_eq!(tracker.metrics().cancelled(), 0);
@@ -3166,34 +2954,33 @@ mod tests {
     #[tokio::test]
     async fn test_semaphore_concurrency_limit(log_policy: Arc<LogOnlyPolicy>) {
         // 测试信号量调度器的并发上限控制。
-        // Test that semaphore limits concurrent execution
-        let limited_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // Only 2 concurrent tasks
+        let limited_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // 仅允许 2 个并发任务
         let tracker = TaskTracker::new(limited_scheduler, log_policy).unwrap();
 
         let counter = Arc::new(AtomicU32::new(0));
         let max_concurrent = Arc::new(AtomicU32::new(0));
 
-        // Use broadcast channel to coordinate all tasks
+        // 使用广播通道协调所有任务
         let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut handles = Vec::new();
 
-        // Spawn 5 tasks that will track concurrency
+        // 启动 5 个跟踪并发的任务
         for _ in 0..5 {
             let counter_clone = counter.clone();
             let max_clone = max_concurrent.clone();
             let mut rx = tx.subscribe();
 
             let handle = tracker.spawn(async move {
-                // Increment active counter
+                // 递增活跃计数器
                 let current = counter_clone.fetch_add(1, Ordering::Relaxed) + 1;
 
-                // Track max concurrent
+                // 跟踪最大并发数
                 max_clone.fetch_max(current, Ordering::Relaxed);
 
-                // Wait for signal to complete instead of sleep
+                // 等待完成信号而非使用 sleep
                 rx.recv().await.ok();
 
-                // Decrement when done
+                // 完成时递减
                 counter_clone.fetch_sub(1, Ordering::Relaxed);
 
                 Ok(())
@@ -3201,22 +2988,22 @@ mod tests {
             handles.push(handle);
         }
 
-        // Give tasks time to start and register concurrency
+        // 给任务时间启动并登记并发
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
-        // Signal all tasks to complete
+        // 通知所有任务完成
         tx.send(()).ok();
 
-        // Wait for all tasks to complete
+        // 等待所有任务完成
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
 
-        // Verify that no more than 2 tasks ran concurrently
+        // 验证同时运行的任务不超过 2 个
         assert!(max_concurrent.load(Ordering::Relaxed) <= 2);
 
-        // Verify all tasks completed successfully
+        // 验证所有任务成功完成
         assert_eq!(tracker.metrics().success(), 5);
         assert_eq!(tracker.metrics().failed(), 0);
     }
@@ -3225,23 +3012,22 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_on_error_policy() {
         // 测试 CancelOnError 策略会触发 tracker 取消。
-        // Test that CancelOnError policy works correctly
         let error_policy = cancel_policy();
         let scheduler = semaphore_scheduler();
         let tracker = TaskTracker::new(scheduler, error_policy).unwrap();
 
-        // Spawn a task that will trigger cancellation
+        // 启动一个会触发取消的任务
         let handle =
             tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("OutOfMemory error occurred")) });
 
-        // Wait for the error to occur
+        // 等待错误发生
         let result = handle.await.unwrap();
         assert!(result.is_err());
 
-        // Give cancellation time to propagate
+        // 给取消时间传播
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Verify the cancel token was triggered
+        // 验证取消 token 已被触发
         assert!(tracker.cancellation_token().is_cancelled());
     }
 
@@ -3249,16 +3035,15 @@ mod tests {
     #[tokio::test]
     async fn test_tracker_cancellation() {
         // 测试手动取消 tracker 后任务的表现。
-        // Test manual cancellation of tracker with CancelOnError policy
         let error_policy = cancel_policy();
         let scheduler = semaphore_scheduler();
         let tracker = TaskTracker::new(scheduler, error_policy).unwrap();
         let cancel_token = tracker.cancellation_token().child_token();
 
-        // Use oneshot channel instead of sleep for deterministic timing
+        // 使用 oneshot 通道而非 sleep 以获得确定性时序
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-        // Spawn a task that respects cancellation
+        // 启动一个尊重取消的任务
         let handle = tracker.spawn({
             let cancel_token = cancel_token.clone();
             async move {
@@ -3269,10 +3054,10 @@ mod tests {
             }
         });
 
-        // Cancel the tracker
+        // 取消 tracker
         tracker.cancel();
 
-        // Task should be cancelled
+        // 任务应被取消
         let result = handle.await.unwrap();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
@@ -3285,22 +3070,21 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试子 tracker 生命周期独立于父 tracker。
-        // Test that child tracker has independent lifecycle
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         let child = parent.child_tracker().unwrap();
 
-        // Both should be operational initially
+        // 初始时两者均应可用
         assert!(!parent.is_closed());
         assert!(!child.is_closed());
 
-        // Cancel child only
+        // 仅取消子节点
         child.cancel();
 
-        // Parent should remain operational
+        // 父节点应保持可用
         assert!(!parent.is_closed());
 
-        // Parent can still spawn tasks
+        // 父节点仍可启动任务
         let handle = parent.spawn(async { Ok(42) });
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
@@ -3313,44 +3097,42 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试父子 tracker 的指标隔离与汇总关系。
-        // Test that parent and child have independent metrics
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
-        // Run tasks in parent
+        // 在父节点运行任务
         let handle1 = parent.spawn(async { Ok(1) });
         handle1.await.unwrap().unwrap();
 
-        // Run tasks in child
+        // 在子节点运行任务
         let handle2 = child.spawn(async { Ok(2) });
         handle2.await.unwrap().unwrap();
 
-        // Each should have their own metrics, but parent sees aggregated
-        assert_eq!(parent.metrics().success(), 2); // Parent sees its own + child's
-        assert_eq!(child.metrics().success(), 1); // Child sees only its own
-        assert_eq!(parent.metrics().total_completed(), 2); // Parent sees aggregated total
-        assert_eq!(child.metrics().total_completed(), 1); // Child sees only its own
+        // 每个节点有自己的指标，但父节点看到的是汇总值
+        assert_eq!(parent.metrics().success(), 2); // 父节点看到自身 + 子节点
+        assert_eq!(child.metrics().success(), 1); // 子节点仅看到自身
+        assert_eq!(parent.metrics().total_completed(), 2); // 父节点看到汇总总数
+        assert_eq!(child.metrics().total_completed(), 1); // 子节点仅看到自身
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_cancel_on_error_hierarchy() {
         // 测试子级错误策略触发的取消不会反向影响父级。
-        // Test that child error policy cancellation doesn't affect parent
         let parent_error_policy = cancel_policy();
         let scheduler = semaphore_scheduler();
         let parent = TaskTracker::new(scheduler, parent_error_policy).unwrap();
         let parent_policy_token = parent.cancellation_token().child_token();
         let child = parent.child_tracker().unwrap();
 
-        // Initially nothing should be cancelled
+        // 初始时不应有任何取消
         assert!(!parent_policy_token.is_cancelled());
 
-        // Use explicit synchronization instead of sleep
+        // 使用显式同步而非 sleep
         let (error_tx, error_rx) = tokio::sync::oneshot::channel();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
-        // Spawn a monitoring task to watch for the parent policy token cancellation
+        // 启动一个监控任务观察父级策略 token 的取消
         let parent_token_monitor = parent_policy_token.clone();
         let monitor_handle = tokio::spawn(async move {
             tokio::select! {
@@ -3363,27 +3145,27 @@ mod tests {
             }
         });
 
-        // Spawn a task in the child that will trigger cancellation
+        // 在子节点启动一个会触发取消的任务
         let handle = child.spawn(async move {
             let result = Err::<(), _>(anyhow::anyhow!("OutOfMemory in child"));
-            error_tx.send(()).ok(); // Signal that the error has occurred
+            error_tx.send(()).ok(); // 通知错误已发生
             result
         });
 
-        // Wait for the error to occur
+        // 等待错误发生
         let error_result = handle.await.unwrap();
         assert!(error_result.is_err());
 
-        // Wait for our error signal
+        // 等待我们的错误信号
         error_rx.await.ok();
 
-        // Check if parent policy token was cancelled within timeout
+        // 检查父级策略 token 是否在超时内被取消
         let was_cancelled = cancel_rx.await.unwrap_or(false);
         monitor_handle.await.ok();
 
-        // Based on hierarchical design: child errors should NOT affect parent
-        // The child gets its own policy with a child token, and child cancellation
-        // should not propagate up to the parent policy token
+        // 基于层级化设计：子节点错误不应影响父节点。
+        // 子节点获得带子 token 的自有策略，子节点取消
+        // 不应向上传播到父级策略 token
         assert!(
             !was_cancelled,
             "Parent policy token should not be cancelled by child errors"
@@ -3401,37 +3183,36 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试 join 会等待已有任务优雅完成。
-        // Test graceful shutdown with close()
         let tracker = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
-        // Use broadcast channel to coordinate task completion
+        // 使用广播通道协调任务完成
         let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut handles = Vec::new();
 
-        // Spawn some tasks
+        // 启动一些任务
         for i in 0..3 {
             let mut rx = tx.subscribe();
             let handle = tracker.spawn(async move {
-                // Wait for signal instead of sleep
+                // 等待信号而不是使用 sleep
                 rx.recv().await.ok();
                 Ok(i)
             });
             handles.push(handle);
         }
 
-        // Signal all tasks to complete before closing
+        // 在关闭前通知所有任务完成
         tx.send(()).ok();
 
-        // Close tracker and wait for completion
+        // 关闭 tracker 并等待完成
         tracker.join().await;
 
-        // All tasks should complete successfully
+        // 所有任务应成功完成
         for handle in handles {
             let result = handle.await.unwrap().unwrap();
             assert!(result < 3);
         }
 
-        // Tracker should be closed
+        // tracker 应已关闭
         assert!(tracker.is_closed());
     }
 
@@ -3439,45 +3220,44 @@ mod tests {
     #[tokio::test]
     async fn test_semaphore_scheduler_permit_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // 测试信号量调度器的 permit 占用与释放追踪。
-        // Test that SemaphoreScheduler properly tracks permits
         let semaphore = Arc::new(Semaphore::new(3));
         let scheduler = Arc::new(SemaphoreScheduler::new(semaphore.clone()));
         let tracker = TaskTracker::new(scheduler.clone(), log_policy).unwrap();
 
-        // Initially all permits should be available
+        // 初始时所有许可应可用
         assert_eq!(scheduler.available_permits(), 3);
 
-        // Use broadcast channel to coordinate task completion
+        // 使用广播通道协调任务完成
         let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut handles = Vec::new();
 
-        // Spawn 3 tasks that will hold permits
+        // 启动 3 个持有许可的任务
         for _ in 0..3 {
             let mut rx = tx.subscribe();
             let handle = tracker.spawn(async move {
-                // Wait for signal to complete
+                // 等待完成信号
                 rx.recv().await.ok();
                 Ok(())
             });
             handles.push(handle);
         }
 
-        // Give tasks time to acquire permits
+        // 给任务时间获取许可
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
-        // All permits should be taken
+        // 所有许可应被占用
         assert_eq!(scheduler.available_permits(), 0);
 
-        // Signal all tasks to complete
+        // 通知所有任务完成
         tx.send(()).ok();
 
-        // Wait for tasks to complete
+        // 等待任务完成
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
 
-        // All permits should be available again
+        // 所有许可应再次可用
         assert_eq!(scheduler.available_permits(), 3);
     }
 
@@ -3485,7 +3265,6 @@ mod tests {
     #[tokio::test]
     async fn test_builder_pattern(log_policy: Arc<LogOnlyPolicy>) {
         // 测试 TaskTracker builder 的创建流程。
-        // Test that TaskTracker builder works correctly
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
         let error_policy = log_policy;
 
@@ -3495,11 +3274,11 @@ mod tests {
             .build()
             .unwrap();
 
-        // Tracker should have a cancellation token
+        // tracker 应拥有一个取消 token
         let token = tracker.cancellation_token();
         assert!(!token.is_cancelled());
 
-        // Should be able to spawn tasks
+        // 应能够启动任务
         let handle = tracker.spawn(async { Ok(42) });
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
@@ -3509,13 +3288,12 @@ mod tests {
     #[tokio::test]
     async fn test_all_trackers_have_cancellation_tokens(log_policy: Arc<LogOnlyPolicy>) {
         // 测试根、子、孙 tracker 的取消 token 级联传播。
-        // Test that all trackers (root and children) have cancellation tokens
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
         let root = TaskTracker::new(scheduler, log_policy).unwrap();
         let child = root.child_tracker().unwrap();
         let grandchild = child.child_tracker().unwrap();
 
-        // All should have cancellation tokens
+        // 所有节点都应拥有取消 token
         let root_token = root.cancellation_token();
         let child_token = child.cancellation_token();
         let grandchild_token = grandchild.cancellation_token();
@@ -3524,16 +3302,16 @@ mod tests {
         assert!(!child_token.is_cancelled());
         assert!(!grandchild_token.is_cancelled());
 
-        // Child tokens should be different from parent
-        // (We can't directly compare tokens, but we can test behavior)
+        // 子 token 应与父 token 不同
+        // （无法直接比较 token，但可以测试行为）
         root_token.cancel();
 
-        // Give cancellation time to propagate
+        // 给取消时间传播
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // Root should be cancelled
+        // 根节点应被取消
         assert!(root_token.is_cancelled());
-        // Children should also be cancelled (because they are child tokens)
+        // 子节点也应被取消（因为它们是子 token）
         assert!(child_token.is_cancelled());
         assert!(grandchild_token.is_cancelled());
     }
@@ -3542,17 +3320,16 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_cancellable_task(log_policy: Arc<LogOnlyPolicy>) {
         // 测试可取消任务的派发、成功完成和取消路径。
-        // Test cancellable task spawning with proper result handling
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Test successful completion
+        // 测试成功完成
         let (tx, rx) = tokio::sync::oneshot::channel();
         let rx = Arc::new(tokio::sync::Mutex::new(Some(rx)));
         let handle = tracker.spawn_cancellable(move |_cancel_token| {
             let rx = rx.clone();
             async move {
-                // Wait for signal instead of sleep
+                // 等待信号而非 sleep
                 if let Some(rx) = rx.lock().await.take() {
                     rx.await.ok();
                 }
@@ -3560,14 +3337,14 @@ mod tests {
             }
         });
 
-        // Signal task to complete
+        // 通知任务完成
         tx.send(()).ok();
 
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
         assert_eq!(tracker.metrics().success(), 1);
 
-        // Test cancellation handling
+        // 测试取消处理
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
         let rx = Arc::new(tokio::sync::Mutex::new(Some(rx)));
         let handle = tracker.spawn_cancellable(move |cancel_token| {
@@ -3584,7 +3361,7 @@ mod tests {
             }
         });
 
-        // Cancel the tracker
+        // 取消 tracker
         tracker.cancel();
 
         let result = handle.await.unwrap();
@@ -3596,16 +3373,15 @@ mod tests {
     #[tokio::test]
     async fn test_cancellable_task_metrics_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // 测试可取消任务会计入 cancelled 而非 failed 指标。
-        // Test that properly cancelled tasks increment cancelled metrics, not failed metrics
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Baseline metrics
+        // 基准指标
         assert_eq!(tracker.metrics().cancelled(), 0);
         assert_eq!(tracker.metrics().failed(), 0);
         assert_eq!(tracker.metrics().success(), 0);
 
-        // Test 1: Task that executes and THEN gets cancelled during execution
+        // 测试 1：任务先执行，随后在执行中被取消
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
         let (_continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -3619,12 +3395,12 @@ mod tests {
             let start_tx = start_tx_for_task.clone();
             let continue_rx = continue_rx_for_task.clone();
             async move {
-                // Signal that we've started executing
+                // 通知我们已开始执行
                 if let Some(tx) = start_tx.lock().await.take() {
                     tx.send(()).ok();
                 }
 
-                // Wait for either continuation signal or cancellation
+                // 等待继续信号或取消
                 tokio::select! {
                     _ = async {
                         if let Some(rx) = continue_rx.lock().await.take() {
@@ -3639,17 +3415,17 @@ mod tests {
             }
         });
 
-        // Wait for task to start executing
+        // 等待任务开始执行
         start_rx.await.ok();
 
-        // Now cancel while the task is running
+        // 现在在任务运行时取消
         println!("Cancelling tracker while task is executing...");
         tracker.cancel();
 
-        // Wait for the task to complete
+        // 等待任务完成
         let result = handle.await.unwrap();
 
-        // Debug output
+        // 调试输出
         println!("Task result: {:?}", result);
         println!(
             "Cancelled: {}, Failed: {}, Success: {}",
@@ -3658,11 +3434,11 @@ mod tests {
             tracker.metrics().success()
         );
 
-        // The task should be properly cancelled and counted correctly
+        // 该任务应被正确取消并正确计数
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
 
-        // Verify proper metrics: should be counted as cancelled, not failed
+        // 验证指标正确：应计入 cancelled 而非 failed
         assert_eq!(
             tracker.metrics().cancelled(),
             1,
@@ -3679,11 +3455,10 @@ mod tests {
     #[tokio::test]
     async fn test_cancellable_vs_error_metrics_distinction(log_policy: Arc<LogOnlyPolicy>) {
         // 测试取消与真实错误在指标上的区分。
-        // Test that we properly distinguish between cancellation and actual errors
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Test 1: Actual error should increment failed count
+        // 测试 1：真实错误应计入 failed
         let handle1 = tracker.spawn_cancellable(|_cancel_token| async move {
             CancellableTaskResult::<i32>::Err(anyhow::anyhow!("This is a real error"))
         });
@@ -3694,7 +3469,7 @@ mod tests {
         assert_eq!(tracker.metrics().failed(), 1);
         assert_eq!(tracker.metrics().cancelled(), 0);
 
-        // Test 2: Cancellation should increment cancelled count
+        // 测试 2：取消应计入 cancelled
         let handle2 = tracker.spawn_cancellable(|_cancel_token| async move {
             CancellableTaskResult::<i32>::Cancelled
         });
@@ -3702,19 +3477,18 @@ mod tests {
         let result2 = handle2.await.unwrap();
         assert!(result2.is_err());
         assert!(matches!(result2.unwrap_err(), TaskError::Cancelled));
-        assert_eq!(tracker.metrics().failed(), 1); // Still 1 from before
-        assert_eq!(tracker.metrics().cancelled(), 1); // Now 1 from cancellation
+        assert_eq!(tracker.metrics().failed(), 1); // 仍为之前的 1
+        assert_eq!(tracker.metrics().cancelled(), 1); // 现在因取消变为 1
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_spawn_cancellable_error_handling(log_policy: Arc<LogOnlyPolicy>) {
         // 测试可取消任务返回错误时的处理路径。
-        // Test error handling in cancellable tasks
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Test error result
+        // 测试错误结果
         let handle = tracker.spawn_cancellable(|_cancel_token| async move {
             CancellableTaskResult::<i32>::Err(anyhow::anyhow!("test error"))
         });
@@ -3729,28 +3503,27 @@ mod tests {
     #[tokio::test]
     async fn test_cancellation_before_execution(log_policy: Arc<LogOnlyPolicy>) {
         // 测试关闭后的 tracker 再派发任务会触发 panic。
-        // Test that spawning on a cancelled tracker panics (new behavior)
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(1))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Cancel the tracker first
+        // 先取消 tracker
         tracker.cancel();
 
-        // Give cancellation time to propagate to the inner tracker
+        // 给取消时间传播到内部 tracker
         tokio::time::sleep(Duration::from_millis(5)).await;
 
-        // Now try to spawn a task - it should panic since tracker is closed
+        // 现在尝试派发任务 — 由于 tracker 已关闭应 panic
         let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tracker.spawn(async { Ok(42) })
         }));
 
-        // Should panic with our new API
+        // 使用新 API 应发生 panic
         assert!(
             panic_result.is_err(),
             "spawn() should panic when tracker is closed"
         );
 
-        // Verify the panic message contains expected text
+        // 验证 panic 信息包含预期文本
         if let Err(panic_payload) = panic_result {
             if let Some(panic_msg) = panic_payload.downcast_ref::<String>() {
                 assert!(
@@ -3772,34 +3545,33 @@ mod tests {
     #[tokio::test]
     async fn test_semaphore_scheduler_with_cancellation(log_policy: Arc<LogOnlyPolicy>) {
         // 测试等待 permit 的任务会响应取消信号。
-        // Test that SemaphoreScheduler respects cancellation tokens
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(1))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Start a long-running task to occupy the semaphore
+        // 启动一个长时任务以占用信号量
         let blocker_token = tracker.cancellation_token();
         let _blocker_handle = tracker.spawn(async move {
-            // Wait for cancellation
+            // 等待取消
             blocker_token.cancelled().await;
             Ok(())
         });
 
-        // Give the blocker time to acquire the permit
+        // 给阻塞任务时间获取 permit
         tokio::task::yield_now().await;
 
-        // Use oneshot channel for the second task
+        // 为第二个任务使用 oneshot 通道
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-        // Spawn another task that will wait for semaphore
+        // 启动另一个将等待信号量的任务
         let handle = tracker.spawn(async {
             rx.await.ok();
             Ok(42)
         });
 
-        // Cancel the tracker while second task is waiting for permit
+        // 在第二个任务等待 permit 时取消 tracker
         tracker.cancel();
 
-        // The waiting task should be cancelled
+        // 等待中的任务应被取消
         let result = handle.await.unwrap();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
@@ -3812,23 +3584,22 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试取消子 tracker 不会影响父 tracker。
-        // Test that child tracker cancellation doesn't affect parent
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
-        // Cancel only the child
+        // 仅取消子节点
         child.cancel();
 
-        // Parent should still be operational
+        // 父节点应仍可用
         let parent_token = parent.cancellation_token();
         assert!(!parent_token.is_cancelled());
 
-        // Parent can still spawn tasks
+        // 父节点仍可启动任务
         let handle = parent.spawn(async { Ok(42) });
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
 
-        // Child should be cancelled
+        // 子节点应被取消
         let child_token = child.cancellation_token();
         assert!(child_token.is_cancelled());
     }
@@ -3840,19 +3611,18 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试父 tracker 的取消会向所有子级传播。
-        // Test that parent cancellation propagates to all children
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child1 = parent.child_tracker().unwrap();
         let child2 = parent.child_tracker().unwrap();
         let grandchild = child1.child_tracker().unwrap();
 
-        // Cancel the parent
+        // 取消父节点
         parent.cancel();
 
-        // Give cancellation time to propagate
+        // 给取消时间传播
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        // All should be cancelled
+        // 所有节点应被取消
         assert!(parent.cancellation_token().is_cancelled());
         assert!(child1.cancellation_token().is_cancelled());
         assert!(child2.cancellation_token().is_cancelled());
@@ -3863,59 +3633,57 @@ mod tests {
     #[tokio::test]
     async fn test_issued_counter_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // 测试 issued、pending 等计数器的更新。
-        // Test that issued counter is incremented when tasks are spawned
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2))));
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Initially no tasks issued
+        // 初始时未发出任务
         assert_eq!(tracker.metrics().issued(), 0);
         assert_eq!(tracker.metrics().pending(), 0);
 
-        // Spawn some tasks
+        // 启动一些任务
         let handle1 = tracker.spawn(async { Ok(1) });
         let handle2 = tracker.spawn(async { Ok(2) });
         let handle3 = tracker.spawn_cancellable(|_| async { CancellableTaskResult::Ok(3) });
 
-        // Issued counter should be incremented immediately
+        // issued 计数器应立即递增
         assert_eq!(tracker.metrics().issued(), 3);
-        assert_eq!(tracker.metrics().pending(), 3); // None completed yet
+        assert_eq!(tracker.metrics().pending(), 3); // 尚未有任务完成
 
-        // Complete the tasks
+        // 完成任务
         assert_eq!(handle1.await.unwrap().unwrap(), 1);
         assert_eq!(handle2.await.unwrap().unwrap(), 2);
         assert_eq!(handle3.await.unwrap().unwrap(), 3);
 
-        // Check final accounting
+        // 检查最终计数
         assert_eq!(tracker.metrics().issued(), 3);
         assert_eq!(tracker.metrics().success(), 3);
         assert_eq!(tracker.metrics().total_completed(), 3);
-        assert_eq!(tracker.metrics().pending(), 0); // All completed
+        assert_eq!(tracker.metrics().pending(), 0); // 全部完成
 
-        // Test hierarchical accounting
+        // 测试层级计数
         let child = tracker.child_tracker().unwrap();
         let child_handle = child.spawn(async { Ok(42) });
 
-        // Both parent and child should see the issued task
+        // 父子都应看到发出的任务
         assert_eq!(child.metrics().issued(), 1);
-        assert_eq!(tracker.metrics().issued(), 4); // Parent sees all
+        assert_eq!(tracker.metrics().issued(), 4); // 父节点看到全部
 
         child_handle.await.unwrap().unwrap();
 
-        // Final hierarchical check
+        // 最终层级检查
         assert_eq!(child.metrics().pending(), 0);
         assert_eq!(tracker.metrics().pending(), 0);
-        assert_eq!(tracker.metrics().success(), 4); // Parent sees all successes
+        assert_eq!(tracker.metrics().success(), 4); // 父节点看到所有成功
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_child_tracker_builder(log_policy: Arc<LogOnlyPolicy>) {
         // 测试子 tracker builder 能覆写策略并正常工作。
-        // Test that child tracker builder allows custom policies
         let parent_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
         let parent = TaskTracker::new(parent_scheduler, log_policy).unwrap();
 
-        // Create child with custom error policy
+        // 以自定义错误策略创建子节点
         let child_error_policy = CancelOnError::new();
         let child = parent
             .child_tracker_builder()
@@ -3923,28 +3691,27 @@ mod tests {
             .build()
             .unwrap();
 
-        // Test that child works
+        // 测试子节点可用
         let handle = child.spawn(async { Ok(42) });
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
 
-        // Child should have its own metrics
+        // 子节点应拥有自己的指标
         assert_eq!(child.metrics().success(), 1);
-        assert_eq!(parent.metrics().total_completed(), 1); // Parent sees aggregated
+        assert_eq!(parent.metrics().total_completed(), 1); // 父节点看到汇总
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_hierarchical_metrics_aggregation(log_policy: Arc<LogOnlyPolicy>) {
         // 测试多个子 tracker 的指标会向父级聚合。
-        // Test that child metrics aggregate up to parent
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
         let parent = TaskTracker::new(scheduler, log_policy.clone()).unwrap();
 
-        // Create child1 with default settings
+        // 以默认设置创建 child1
         let child1 = parent.child_tracker().unwrap();
 
-        // Create child2 with custom error policy
+        // 以自定义错误策略创建 child2
         let child_error_policy = CancelOnError::new();
         let child2 = parent
             .child_tracker_builder()
@@ -3952,7 +3719,7 @@ mod tests {
             .build()
             .unwrap();
 
-        // Test both custom schedulers and policies
+        // 同时测试自定义调度器与策略
         let another_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(3))));
         let another_error_policy = CancelOnError::new();
         let child3 = parent
@@ -3962,10 +3729,10 @@ mod tests {
             .build()
             .unwrap();
 
-        // Test that all children are properly registered
+        // 测试所有子节点都被正确注册
         assert_eq!(parent.child_count(), 3);
 
-        // Test that custom schedulers work
+        // 测试自定义调度器可用
         let handle1 = child1.spawn(async { Ok(1) });
         let handle2 = child2.spawn(async { Ok(2) });
         let handle3 = child3.spawn(async { Ok(3) });
@@ -3974,8 +3741,8 @@ mod tests {
         assert_eq!(handle2.await.unwrap().unwrap(), 2);
         assert_eq!(handle3.await.unwrap().unwrap(), 3);
 
-        // Verify metrics still work
-        assert_eq!(parent.metrics().success(), 3); // All child successes roll up
+        // 验证指标仍然正常
+        assert_eq!(parent.metrics().success(), 3); // 所有子节点的成功向上汇总
         assert_eq!(child1.metrics().success(), 1);
         assert_eq!(child2.metrics().success(), 1);
         assert_eq!(child3.metrics().success(), 1);
@@ -3985,24 +3752,23 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_queue_depth_calculation(log_policy: Arc<LogOnlyPolicy>) {
         // 测试 active、queued、pending 等排队指标的计算。
-        // Test that we can calculate tasks queued in scheduler
-        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // Only 2 concurrent tasks
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // 仅允许 2 个并发任务
         let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Initially no tasks
+        // 初始时无任务
         assert_eq!(tracker.metrics().issued(), 0);
         assert_eq!(tracker.metrics().active(), 0);
         assert_eq!(tracker.metrics().queued(), 0);
         assert_eq!(tracker.metrics().pending(), 0);
 
-        // Use a channel to control when tasks complete
+        // 使用通道控制任务何时完成
         let (complete_tx, _complete_rx) = tokio::sync::broadcast::channel(1);
 
-        // Spawn 2 tasks that will hold semaphore permits
+        // 启动 2 个持有信号量 permit 的任务
         let handle1 = tracker.spawn({
             let mut rx = complete_tx.subscribe();
             async move {
-                // Wait for completion signal
+                // 等待完成信号
                 rx.recv().await.ok();
                 Ok(1)
             }
@@ -4010,29 +3776,29 @@ mod tests {
         let handle2 = tracker.spawn({
             let mut rx = complete_tx.subscribe();
             async move {
-                // Wait for completion signal
+                // 等待完成信号
                 rx.recv().await.ok();
                 Ok(2)
             }
         });
 
-        // Give tasks time to start and acquire permits
+        // 给任务时间启动并获取 permit
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
-        // Should have 2 active tasks, 0 queued
+        // 应有 2 个活跃任务，0 个排队
         assert_eq!(tracker.metrics().issued(), 2);
         assert_eq!(tracker.metrics().active(), 2);
         assert_eq!(tracker.metrics().queued(), 0);
         assert_eq!(tracker.metrics().pending(), 2);
 
-        // Spawn a third task - should be queued since semaphore is full
+        // 启动第三个任务 — 由于信号量已满应被排队
         let handle3 = tracker.spawn(async move { Ok(3) });
 
-        // Give time for task to be queued
+        // 给任务时间进入排队
         tokio::task::yield_now().await;
 
-        // Should have 2 active, 1 queued
+        // 应有 2 个活跃，1 个排队
         assert_eq!(tracker.metrics().issued(), 3);
         assert_eq!(tracker.metrics().active(), 2);
         assert_eq!(
@@ -4041,7 +3807,7 @@ mod tests {
         );
         assert_eq!(tracker.metrics().pending(), 3);
 
-        // Complete all tasks by sending the signal
+        // 通过发送信号完成所有任务
         complete_tx.send(()).ok();
 
         let result1 = handle1.await.unwrap().unwrap();
@@ -4052,7 +3818,7 @@ mod tests {
         assert_eq!(result2, 2);
         assert_eq!(result3, 3);
 
-        // All tasks should be completed
+        // 所有任务应完成
         assert_eq!(tracker.metrics().success(), 3);
         assert_eq!(tracker.metrics().active(), 0);
         assert_eq!(tracker.metrics().queued(), 0);
@@ -4066,24 +3832,23 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试失败指标也会向父级聚合。
-        // Test that failed task metrics aggregate up to parent
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
-        // Run some successful and some failed tasks
+        // 运行一些成功与失败的任务
         let success_handle = child.spawn(async { Ok(42) });
         let failure_handle = child.spawn(async { Err::<(), _>(anyhow::anyhow!("test error")) });
 
-        // Wait for tasks to complete
+        // 等待任务完成
         let _success_result = success_handle.await.unwrap().unwrap();
         let _failure_result = failure_handle.await.unwrap().unwrap_err();
 
-        // Check child metrics
+        // 检查子节点指标
         assert_eq!(child.metrics().success(), 1, "Child should have 1 success");
         assert_eq!(child.metrics().failed(), 1, "Child should have 1 failure");
 
-        // Parent should see the aggregated metrics
-        // Note: Due to hierarchical aggregation, these metrics propagate up
+        // 父节点应看到汇总指标
+        // 注：由于层级聚合，这些指标会向上传播
     }
 
     #[rstest]
@@ -4093,18 +3858,17 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试不同 tracker 实例之间的指标互不影响。
-        // Test that different tracker instances have independent metrics
         let tracker1 = TaskTracker::new(semaphore_scheduler.clone(), log_policy.clone()).unwrap();
         let tracker2 = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
-        // Run tasks in both trackers
+        // 在两个 tracker 中运行任务
         let handle1 = tracker1.spawn(async { Ok(1) });
         let handle2 = tracker2.spawn(async { Ok(2) });
 
         handle1.await.unwrap().unwrap();
         handle2.await.unwrap().unwrap();
 
-        // Each tracker should only see its own metrics
+        // 每个 tracker 应只看到自身的指标
         assert_eq!(tracker1.metrics().success(), 1);
         assert_eq!(tracker2.metrics().success(), 1);
         assert_eq!(tracker1.metrics().total_completed(), 1);
@@ -4115,23 +3879,22 @@ mod tests {
     #[tokio::test]
     async fn test_hierarchical_join_waits_for_all(log_policy: Arc<LogOnlyPolicy>) {
         // 测试父级 join 会等待整棵层级树中的任务全部完成。
-        // Test that parent.join() waits for child tasks too
         let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
         let parent = TaskTracker::new(scheduler, log_policy).unwrap();
         let child1 = parent.child_tracker().unwrap();
         let child2 = parent.child_tracker().unwrap();
         let grandchild = child1.child_tracker().unwrap();
 
-        // Verify parent tracks children
+        // 验证父节点跟踪子节点
         assert_eq!(parent.child_count(), 2);
         assert_eq!(child1.child_count(), 1);
         assert_eq!(child2.child_count(), 0);
         assert_eq!(grandchild.child_count(), 0);
 
-        // Track completion order
+        // 跟踪完成顺序
         let completion_order = Arc::new(Mutex::new(Vec::new()));
 
-        // Spawn tasks with different durations
+        // 启动不同耗时的任务
         let order_clone = completion_order.clone();
         let parent_handle = parent.spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -4160,26 +3923,26 @@ mod tests {
             Ok(())
         });
 
-        // Test hierarchical join - should wait for ALL tasks in hierarchy
+        // 测试层级 join — 应等待层级中所有任务
         println!("[TEST] About to call parent.join()");
         let start = std::time::Instant::now();
-        parent.join().await; // This should wait for ALL tasks
+        parent.join().await; // 应等待所有任务
         let elapsed = start.elapsed();
         println!("[TEST] parent.join() completed in {:?}", elapsed);
 
-        // Should have waited for the longest task (grandchild at 125ms)
+        // 应等待最长任务（grandchild 耗时 125ms）
         assert!(
             elapsed >= Duration::from_millis(120),
             "Hierarchical join should wait for longest task"
         );
 
-        // All tasks should be complete
+        // 所有任务应完成
         assert!(parent_handle.is_finished());
         assert!(child1_handle.is_finished());
         assert!(child2_handle.is_finished());
         assert!(grandchild_handle.is_finished());
 
-        // Verify all tasks completed
+        // 验证所有任务已完成
         let final_order = completion_order.lock().unwrap();
         assert_eq!(final_order.len(), 4);
         assert!(final_order.contains(&"parent"));
@@ -4195,11 +3958,10 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试 join 会等待子 tracker 中较慢的任务完成。
-        // Test that join() waits for child tasks (hierarchical behavior)
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
-        // Spawn a quick parent task and slow child task
+        // 启动一个快速的父任务和一个较慢的子任务
         let _parent_handle = parent.spawn(async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             Ok(())
@@ -4210,12 +3972,12 @@ mod tests {
             Ok(())
         });
 
-        // Hierarchical join should wait for both parent and child tasks
+        // 层级 join 应等待父与子任务
         let start = std::time::Instant::now();
-        parent.join().await; // Should wait for both (hierarchical by default)
+        parent.join().await; // 应等待两者（默认层级化）
         let elapsed = start.elapsed();
 
-        // Should have waited for the longer child task (100ms)
+        // 应等待较长的子任务（100ms）
         assert!(
             elapsed >= Duration::from_millis(90),
             "Hierarchical join should wait for all child tasks"
@@ -4229,20 +3991,19 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试父级 join 会关闭整条子孙层级。
-        // Test that parent.join() closes and waits for child trackers too
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
         let grandchild = child.child_tracker().unwrap();
 
-        // Verify trackers start as open
+        // 验证 tracker 初始为开启状态
         assert!(!parent.is_closed());
         assert!(!child.is_closed());
         assert!(!grandchild.is_closed());
 
-        // Join parent (hierarchical by default - closes and waits for all)
+        // join 父节点（默认层级化 — 关闭并等待所有）
         parent.join().await;
 
-        // All should be closed (check child trackers since parent was moved)
+        // 所有节点应已关闭（由于 parent 已被移动，检查子 tracker）
         assert!(child.is_closed());
         assert!(grandchild.is_closed());
     }
@@ -4251,7 +4012,6 @@ mod tests {
     #[tokio::test]
     async fn test_unlimited_scheduler() {
         // 测试无限制调度器会立即执行任务。
-        // Test that UnlimitedScheduler executes tasks immediately
         let scheduler = UnlimitedScheduler::new();
         let error_policy = LogOnlyPolicy::new();
         let tracker = TaskTracker::new(scheduler, error_policy).unwrap();
@@ -4262,7 +4022,7 @@ mod tests {
             Ok(42)
         });
 
-        // Task should be ready to execute immediately (no concurrency limit)
+        // 任务应可立即执行（无并发限制）
         tx.send(()).ok();
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
@@ -4274,32 +4034,30 @@ mod tests {
     #[tokio::test]
     async fn test_threshold_cancel_policy(semaphore_scheduler: Arc<SemaphoreScheduler>) {
         // 测试阈值策略的按任务失败计数行为。
-        // Test that ThresholdCancelPolicy now uses per-task failure counting
-        let error_policy = ThresholdCancelPolicy::with_threshold(2); // Cancel after 2 failures per task
+        let error_policy = ThresholdCancelPolicy::with_threshold(2); // 每任务 2 次失败后取消
         let tracker = TaskTracker::new(semaphore_scheduler, error_policy.clone()).unwrap();
         let cancel_token = tracker.cancellation_token().child_token();
 
-        // With per-task context, individual task failures don't accumulate
-        // Each task starts with failure_count = 0, so single failures won't trigger cancellation
+        // 采用每任务上下文后，单个任务的失败不会累加
+        // 每个任务以 failure_count = 0 开始，因此单次失败不会触发取消
         let _handle1 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("First failure")) });
         tokio::task::yield_now().await;
         assert!(!cancel_token.is_cancelled());
-        assert_eq!(error_policy.failure_count(), 1); // Global counter still increments
+        assert_eq!(error_policy.failure_count(), 1); // 全局计数器仍递增
 
-        // Second failure from different task - still won't trigger cancellation
+        // 来自另一任务的第二次失败 — 仍不会触发取消
         let _handle2 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("Second failure")) });
         tokio::task::yield_now().await;
-        assert!(!cancel_token.is_cancelled()); // Per-task context prevents cancellation
-        assert_eq!(error_policy.failure_count(), 2); // Global counter increments
+        assert!(!cancel_token.is_cancelled()); // 每任务上下文阻止了取消
+        assert_eq!(error_policy.failure_count(), 2); // 全局计数器递增
 
-        // For cancellation to occur, a single task would need to fail multiple times
-        // through continuations (which would require a more complex test setup)
+        // 要触发取消，单个任务需要通过 continuation 多次失败
+        // （这需要更复杂的测试设置）
     }
 
     #[tokio::test]
     async fn test_policy_constructors() {
         // 测试常用策略构造器的 API 形态。
-        // Test that all constructors follow the new clean API patterns
         let _unlimited = UnlimitedScheduler::new();
         let _semaphore = SemaphoreScheduler::with_permits(5);
         let _log_only = LogOnlyPolicy::new();
@@ -4310,8 +4068,8 @@ mod tests {
             .window_secs(60)
             .build();
 
-        // All constructors return Arc directly - no more ugly ::new_arc patterns
-        // This test ensures the clean API reduces boilerplate
+        // 所有构造器直接返回 Arc — 不再需要繁琐的 ::new_arc 模式
+        // 本测试确保简洁的 API 减少样板代码
     }
 
     #[rstest]
@@ -4321,18 +4079,17 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试父 tracker 关闭后无法继续创建子级。
-        // Test that child tracker creation fails from closed parent
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
-        // Initially, creating a child should work
+        // 初始时创建子节点应可用
         let _child = parent.child_tracker().unwrap();
 
-        // Close the parent tracker
+        // 关闭父 tracker
         let parent_clone = parent.clone();
         parent.join().await;
         assert!(parent_clone.is_closed());
 
-        // Now, trying to create a child should fail
+        // 现在尝试创建子节点应失败
         let result = parent_clone.child_tracker();
         assert!(result.is_err());
         assert!(
@@ -4351,18 +4108,17 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试父 tracker 关闭后 builder 也无法构建子级。
-        // Test that child tracker builder creation fails from closed parent
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
-        // Initially, creating a child with builder should work
+        // 初始时用 builder 创建子节点应可用
         let _child = parent.child_tracker_builder().build().unwrap();
 
-        // Close the parent tracker
+        // 关闭父 tracker
         let parent_clone = parent.clone();
         parent.join().await;
         assert!(parent_clone.is_closed());
 
-        // Now, trying to create a child with builder should fail
+        // 现在用 builder 创建子节点应失败
         let result = parent_clone.child_tracker_builder().build();
         assert!(result.is_err());
         assert!(
@@ -4381,14 +4137,13 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试父 tracker 关闭前可以正常创建多个子级。
-        // Test that child creation works normally before parent is joined
         let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
-        // Should be able to create multiple children before closing
+        // 关闭前应能创建多个子节点
         let child1 = parent.child_tracker().unwrap();
         let child2 = parent.child_tracker_builder().build().unwrap();
 
-        // Verify children can spawn tasks
+        // 验证子节点可启动任务
         let handle1 = child1.spawn(async { Ok(42) });
         let handle2 = child2.spawn(async { Ok(24) });
 
@@ -4397,7 +4152,7 @@ mod tests {
 
         assert_eq!(result1, 42);
         assert_eq!(result2, 24);
-        assert_eq!(parent.metrics().success(), 2); // Parent sees all successes
+        assert_eq!(parent.metrics().success(), 2); // 父节点看到所有成功
     }
 
     #[rstest]
@@ -4406,15 +4161,15 @@ mod tests {
         semaphore_scheduler: Arc<SemaphoreScheduler>,
     ) {
         // 测试自定义错误动作能够触发外部取消 token。
-        // Test ErrorResponse::Custom behavior with TriggerCancellationTokenOnError
+        // 验证 ErrorResponse::Custom 配合 TriggerCancellationTokenOnError 的行为
 
-        // Create a custom cancellation token
+        // 创建一个自定义取消 token
         let custom_cancel_token = CancellationToken::new();
 
-        // Create the policy that will trigger our custom token
+        // 创建用于触发自定义 token 的策略
         let error_policy = TriggerCancellationTokenOnError::new(custom_cancel_token.clone());
 
-        // Create tracker using builder with the custom policy
+        // 使用构造器搭配自定义策略创建 tracker
         let tracker = TaskTracker::builder()
             .scheduler(semaphore_scheduler)
             .error_policy(error_policy)
@@ -4424,31 +4179,30 @@ mod tests {
 
         let child = tracker.child_tracker().unwrap();
 
-        // Initially, the custom token should not be cancelled
+        // 初始时自定义 token 不应被取消
         assert!(!custom_cancel_token.is_cancelled());
 
-        // Spawn a task that will fail
+        // 启动一个会失败的任务
         let handle = child.spawn(async {
             Err::<(), _>(anyhow::anyhow!("Test error to trigger custom response"))
         });
 
-        // Wait for the task to complete (it will fail)
+        // 等待任务完成（它会失败）
         let result = handle.await.unwrap();
         assert!(result.is_err());
 
-        // Await a timeout/deadline or the cancellation token to be cancelled
-        // The expectation is that the task will fail, and the cancellation token will be triggered
-        // Hitting the deadline is a failure
+        // 等待超时截止或取消 token 被触发
+        // 预期任务失败后取消 token 被触发，命中超时则为失败
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
                 panic!("Task should have failed, but hit the deadline");
             }
             _ = custom_cancel_token.cancelled() => {
-                // Task should have failed, and the cancellation token should be triggered
+                // 任务应已失败，取消 token 应被触发
             }
         }
 
-        // The custom cancellation token should now be triggered by our policy
+        // 自定义取消 token 现在应由我们的策略触发
         assert!(
             custom_cancel_token.is_cancelled(),
             "Custom cancellation token should be triggered by ErrorResponse::Custom"
@@ -4457,30 +4211,29 @@ mod tests {
         assert!(tracker.cancellation_token().is_cancelled());
         assert!(child.cancellation_token().is_cancelled());
 
-        // Verify the error was counted
+        // 验证错误已计数
         assert_eq!(tracker.metrics().failed(), 1);
     }
 
     #[test]
     fn test_action_result_variants() {
         // 测试 ActionResult 各变体的构造与匹配。
-        // Test that ActionResult variants can be created and pattern matched
 
-        // Test Fail variant
+        // 测试 Fail 变体
         let fail_result = ActionResult::Fail;
         match fail_result {
-            ActionResult::Fail => {} // Expected
+            ActionResult::Fail => {} // 预期
             _ => panic!("Expected Fail variant"),
         }
 
-        // Test Shutdown variant
+        // 测试 Shutdown 变体
         let shutdown_result = ActionResult::Shutdown;
         match shutdown_result {
-            ActionResult::Shutdown => {} // Expected
+            ActionResult::Shutdown => {} // 预期
             _ => panic!("Expected Shutdown variant"),
         }
 
-        // Test Continue variant with Continuation
+        // 测试带 Continuation 的 Continue 变体
         #[derive(Debug)]
         struct TestRestartable;
 
@@ -4501,7 +4254,7 @@ mod tests {
 
         match continue_result {
             ActionResult::Continue { continuation } => {
-                // Verify we have a valid Continuation
+                // 验证我们拥有一个有效的 Continuation
                 assert!(format!("{:?}", continuation).contains("TestRestartable"));
             }
             _ => panic!("Expected Continue variant"),
@@ -4511,9 +4264,8 @@ mod tests {
     #[test]
     fn test_continuation_error_creation() {
         // 测试 continuation 错误对象的创建与转换。
-        // Test RestartableError creation and conversion to anyhow::Error
 
-        // Create a dummy restartable task for testing
+        // 创建一个用于测试的虚拟 continuation 任务
         #[derive(Debug)]
         struct DummyRestartable;
 
@@ -4530,15 +4282,15 @@ mod tests {
         let dummy_restartable = Arc::new(DummyRestartable);
         let source_error = anyhow::anyhow!("Original task failed");
 
-        // Test FailedWithContinuation::new
+        // 测试 FailedWithContinuation::new
         let continuation_error = FailedWithContinuation::new(source_error, dummy_restartable);
 
-        // Verify the error displays correctly
+        // 验证错误能正确显示
         let error_string = format!("{}", continuation_error);
         assert!(error_string.contains("Task failed with continuation"));
         assert!(error_string.contains("Original task failed"));
 
-        // Test conversion to anyhow::Error
+        // 测试转换为 anyhow::Error
         let anyhow_error = anyhow::Error::new(continuation_error);
         assert!(
             anyhow_error
@@ -4550,15 +4302,14 @@ mod tests {
     #[test]
     fn test_continuation_error_ext_trait() {
         // 测试 continuation 错误扩展 trait 的提取能力。
-        // Test the RestartableErrorExt trait methods
 
-        // Test with regular anyhow::Error (not restartable)
+        // 使用普通 anyhow::Error（不可重启）测试
         let regular_error = anyhow::anyhow!("Regular error");
         assert!(!regular_error.has_continuation());
         let extracted = regular_error.extract_continuation();
         assert!(extracted.is_none());
 
-        // Test with RestartableError
+        // 使用 RestartableError 测试
         #[derive(Debug)]
         struct TestRestartable;
 
@@ -4579,7 +4330,7 @@ mod tests {
         let anyhow_error = anyhow::Error::new(continuation_error);
         assert!(anyhow_error.has_continuation());
 
-        // Test extraction of restartable task
+        // 测试提取可重启任务
         let extracted = anyhow_error.extract_continuation();
         assert!(extracted.is_some());
     }
@@ -4587,17 +4338,15 @@ mod tests {
     #[test]
     fn test_continuation_error_into_anyhow_helper() {
         // 测试 continuation 错误转换为 anyhow 的辅助路径。
-        // Test the convenience method for creating restartable errors
-        // Note: This test uses a mock TaskExecutor since we don't have real ones yet
 
-        // For now, we'll test the type erasure concept with a simple type
+        // 目前用简单类型测试类型擦除概念
         struct MockExecutor;
 
         let _source_error = anyhow::anyhow!("Mock task failed");
 
-        // We can't test FailedWithContinuation::into_anyhow yet because it requires
-        // a real TaskExecutor<T>. This will be tested in Phase 3.
-        // For now, just verify the concept works with manual construction.
+        // 目前还无法测试 FailedWithContinuation::into_anyhow，因为它需要
+        // 真实的 TaskExecutor<T>。这将在第三阶段测试。
+        // 目前仅通过手动构造验证概念可行。
 
         #[derive(Debug)]
         struct MockRestartable;
@@ -4623,7 +4372,6 @@ mod tests {
     #[test]
     fn test_continuation_error_with_task_executor() {
         // 测试 continuation 错误与任务执行器协作时的基本行为。
-        // Test RestartableError creation with TaskExecutor
 
         #[derive(Debug)]
         struct TestRestartableTask;
@@ -4641,27 +4389,26 @@ mod tests {
         let restartable_task = Arc::new(TestRestartableTask);
         let source_error = anyhow::anyhow!("Task failed");
 
-        // Test FailedWithContinuation::new with Restartable
+        // 测试 FailedWithContinuation::new 与 Restartable
         let continuation_error = FailedWithContinuation::new(source_error, restartable_task);
 
-        // Verify the error displays correctly
+        // 验证错误能正确显示
         let error_string = format!("{}", continuation_error);
         assert!(error_string.contains("Task failed with continuation"));
         assert!(error_string.contains("Task failed"));
 
-        // Test conversion to anyhow::Error
+        // 测试转换为 anyhow::Error
         let anyhow_error = anyhow::Error::new(continuation_error);
         assert!(anyhow_error.has_continuation());
 
-        // Test extraction (should work now with Restartable trait)
+        // 测试提取（现在应能通过 Restartable trait 成功）
         let extracted = anyhow_error.extract_continuation();
-        assert!(extracted.is_some()); // Should successfully extract the Restartable
+        assert!(extracted.is_some()); // 应成功提取 Restartable
     }
 
     #[test]
     fn test_continuation_error_into_anyhow_convenience() {
         // 测试 continuation 错误的便捷构造方法。
-        // Test the convenience method for creating restartable errors
 
         #[derive(Debug)]
         struct ConvenienceRestartable;
@@ -4679,7 +4426,7 @@ mod tests {
         let restartable_task = Arc::new(ConvenienceRestartable);
         let source_error = anyhow::anyhow!("Computation failed");
 
-        // Test FailedWithContinuation::into_anyhow convenience method
+        // 测试 FailedWithContinuation::into_anyhow 便捷方法
         let anyhow_error = FailedWithContinuation::into_anyhow(source_error, restartable_task);
 
         assert!(anyhow_error.has_continuation());
@@ -4694,9 +4441,8 @@ mod tests {
     #[test]
     fn test_handle_task_error_with_continuation_error() {
         // 测试 handle_task_error 对 continuation 错误的识别。
-        // Test that handle_task_error properly detects RestartableError
 
-        // Create a mock Restartable task
+        // 创建一个虚拟 Restartable 任务
         #[derive(Debug)]
         struct MockRestartableTask;
 
@@ -4712,41 +4458,40 @@ mod tests {
 
         let restartable_task = Arc::new(MockRestartableTask);
 
-        // Create RestartableError
+        // 创建 RestartableError
         let source_error = anyhow::anyhow!("Task failed, but can retry");
         let continuation_error = FailedWithContinuation::new(source_error, restartable_task);
         let anyhow_error = anyhow::Error::new(continuation_error);
 
-        // Verify it's detected as restartable
+        // 验证其被识别为可重启
         assert!(anyhow_error.has_continuation());
 
-        // Verify we can downcast to FailedWithContinuation
+        // 验证可以向下转换为 FailedWithContinuation
         let continuation_ref = anyhow_error.downcast_ref::<FailedWithContinuation>();
         assert!(continuation_ref.is_some());
 
-        // Verify the continuation task is present
+        // 验证 continuation 任务存在
         let continuation = continuation_ref.unwrap();
-        // Note: We can verify the Arc is valid by checking that Arc::strong_count > 0
+        // 注：可通过检查 Arc::strong_count > 0 验证 Arc 有效
         assert!(Arc::strong_count(&continuation.continuation) > 0);
     }
 
     #[test]
     fn test_handle_task_error_with_regular_error() {
         // 测试 handle_task_error 对普通错误的处理分支。
-        // Test that handle_task_error properly handles regular errors
 
         let regular_error = anyhow::anyhow!("Regular task failure");
 
-        // Verify it's not detected as restartable
+        // 验证其未被识别为可重启
         assert!(!regular_error.has_continuation());
 
-        // Verify we cannot downcast to FailedWithContinuation
+        // 验证无法向下转换为 FailedWithContinuation
         let continuation_ref = regular_error.downcast_ref::<FailedWithContinuation>();
         assert!(continuation_ref.is_none());
     }
 
     // ========================================
-    // END-TO-END ACTIONRESULT TESTS
+    // 端到端 ACTIONRESULT 测试
     // ========================================
 
     #[rstest]
@@ -4756,14 +4501,13 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试 continuation 的端到端执行成功路径。
-        // Test that a task returning FailedWithContinuation actually executes the continuation
         let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
 
-        // Shared state to track execution
+        // 用于跟踪执行的共享状态
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let log_clone = execution_log.clone();
 
-        // Create a continuation that logs its execution
+        // 创建一个记录自身执行的 continuation
         #[derive(Debug)]
         struct LoggingContinuation {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -4789,7 +4533,7 @@ mod tests {
             result: "continuation_result".to_string(),
         });
 
-        // Task that fails with continuation
+        // 使用 continuation 失败的任务
         let log_for_task = execution_log.clone();
         let handle = tracker.spawn(async move {
             log_for_task
@@ -4797,26 +4541,26 @@ mod tests {
                 .await
                 .push("original_task_executed".to_string());
 
-            // Return FailedWithContinuation
+            // 返回 FailedWithContinuation
             let error = anyhow::anyhow!("Original task failed");
             let result: Result<String, anyhow::Error> =
                 Err(FailedWithContinuation::into_anyhow(error, continuation));
             result
         });
 
-        // Execute and verify the continuation was called
+        // 执行并验证 continuation 被调用
         let result = handle.await.expect("Task should complete");
         assert!(result.is_ok(), "Continuation should succeed");
 
-        // Verify execution order
+        // 验证执行顺序
         let log = execution_log.lock().await;
         assert_eq!(log.len(), 2);
         assert_eq!(log[0], "original_task_executed");
         assert_eq!(log[1], "continuation_executed");
 
-        // Verify metrics - should show 1 success (from continuation)
+        // 验证指标——应显示 1 次成功（来自 continuation）
         assert_eq!(tracker.metrics().success(), 1);
-        assert_eq!(tracker.metrics().failed(), 0); // Continuation succeeded
+        assert_eq!(tracker.metrics().failed(), 0); // continuation 成功
         assert_eq!(tracker.metrics().cancelled(), 0);
     }
 
@@ -4827,13 +4571,12 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试多个 continuation 串联重试的成功路径。
-        // Test multiple continuation attempts
         let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
 
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-        // Continuation that fails twice, then succeeds
+        // 先失败两次、随后成功的 continuation
         #[derive(Debug)]
         struct RetryingContinuation {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -4856,7 +4599,7 @@ mod tests {
                     .push(format!("continuation_attempt_{}", attempt));
 
                 if attempt < 3 {
-                    // Fail with another continuation
+                    // 以另一个 continuation 失败
                     let next_continuation = Arc::new(RetryingContinuation {
                         log: self.log.clone(),
                         attempt_count: self.attempt_count.clone(),
@@ -4867,7 +4610,7 @@ mod tests {
                         next_continuation,
                     ))
                 } else {
-                    // Succeed on third attempt
+                    // 第三次尝试成功
                     TaskExecutionResult::Success(Box::new(format!(
                         "success_on_attempt_{}",
                         attempt
@@ -4881,7 +4624,7 @@ mod tests {
             attempt_count: attempt_count.clone(),
         });
 
-        // Task that immediately fails with continuation
+        // 立即以 continuation 失败的任务
         let handle = tracker.spawn(async move {
             let error = anyhow::anyhow!("Original task failed");
             let result: Result<String, anyhow::Error> = Err(FailedWithContinuation::into_anyhow(
@@ -4891,21 +4634,21 @@ mod tests {
             result
         });
 
-        // Execute and verify multiple continuations
+        // 执行并验证多个 continuation
         let result = handle.await.expect("Task should complete");
         assert!(result.is_ok(), "Final continuation should succeed");
 
-        // Verify all attempts were made
+        // 验证所有尝试都已执行
         let log = execution_log.lock().await;
         assert_eq!(log.len(), 3);
         assert_eq!(log[0], "continuation_attempt_1");
         assert_eq!(log[1], "continuation_attempt_2");
         assert_eq!(log[2], "continuation_attempt_3");
 
-        // Verify final attempt count
+        // 验证最终尝试次数
         assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 3);
 
-        // Verify metrics - should show 1 success (final continuation)
+        // 验证指标——应显示 1 次成功（最终 continuation）
         assert_eq!(tracker.metrics().success(), 1);
         assert_eq!(tracker.metrics().failed(), 0);
     }
@@ -4917,13 +4660,12 @@ mod tests {
         log_policy: Arc<LogOnlyPolicy>,
     ) {
         // 测试 continuation 最终失败时的端到端路径。
-        // Test continuation that ultimately fails without providing another continuation
         let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
 
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let log_clone = execution_log.clone();
 
-        // Continuation that fails without providing another continuation
+        // 失败且不提供另一个 continuation 的 continuation
         #[derive(Debug)]
         struct FailingContinuation {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -4945,7 +4687,7 @@ mod tests {
 
         let continuation = Arc::new(FailingContinuation { log: log_clone });
 
-        // Task that fails with continuation
+        // 使用 continuation 失败的任务
         let log_for_task = execution_log.clone();
         let handle = tracker.spawn(async move {
             log_for_task
@@ -4959,17 +4701,17 @@ mod tests {
             result
         });
 
-        // Execute and verify the continuation failed
+        // 执行并验证 continuation 失败
         let result = handle.await.expect("Task should complete");
         assert!(result.is_err(), "Continuation should fail");
 
-        // Verify execution order
+        // 验证执行顺序
         let log = execution_log.lock().await;
         assert_eq!(log.len(), 2);
         assert_eq!(log[0], "original_task_executed");
         assert_eq!(log[1], "continuation_failed");
 
-        // Verify metrics - should show 1 failure (from continuation)
+        // 验证指标——应显示 1 次失败（来自 continuation）
         assert_eq!(tracker.metrics().success(), 0);
         assert_eq!(tracker.metrics().failed(), 1);
         assert_eq!(tracker.metrics().cancelled(), 0);
@@ -4981,9 +4723,8 @@ mod tests {
         unlimited_scheduler: Arc<UnlimitedScheduler>,
     ) {
         // 测试 Fail、Shutdown、Continue 三种动作结果的端到端表现。
-        // Comprehensive test of Fail, Shutdown, and Continue paths
 
-        // Test 1: ActionResult::Fail (via LogOnlyPolicy)
+        // 测试 1：ActionResult::Fail（通过 LogOnlyPolicy）
         {
             let tracker =
                 TaskTracker::new(unlimited_scheduler.clone(), LogOnlyPolicy::new()).unwrap();
@@ -4996,7 +4737,7 @@ mod tests {
             assert_eq!(tracker.metrics().failed(), 1);
         }
 
-        // Test 2: ActionResult::Shutdown (via CancelOnError)
+        // 测试 2：ActionResult::Shutdown（通过 CancelOnError）
         {
             let tracker =
                 TaskTracker::new(unlimited_scheduler.clone(), CancelOnError::new()).unwrap();
@@ -5013,7 +4754,7 @@ mod tests {
             assert_eq!(tracker.metrics().failed(), 1);
         }
 
-        // Test 3: ActionResult::Continue (via FailedWithContinuation)
+        // 测试 3：ActionResult::Continue（通过 FailedWithContinuation）
         {
             let tracker =
                 TaskTracker::new(unlimited_scheduler.clone(), LogOnlyPolicy::new()).unwrap();
@@ -5047,45 +4788,45 @@ mod tests {
     }
 
     // ========================================
-    // LOOP BEHAVIOR AND POLICY INTERACTION TESTS
+    // 循环行为与策略交互测试
     // ========================================
     //
-    // These tests demonstrate the current ActionResult system and identify
-    // areas for future improvement:
+    // 这些测试展示当前的 ActionResult 体系，并指出
+    // 未来可改进的方向：
     //
-    // ✅ WHAT WORKS:
-    // - All ActionResult variants (Continue, Cancel, ExecuteNext) are tested
-    // - Task-driven continuations work correctly
-    // - Policy-driven continuations work correctly
-    // - Mixed continuation sources work correctly
-    // - Loop behavior with resource management works correctly
+    // ✅ 已生效的能力：
+    // - 所有 ActionResult 变体（Continue、Cancel、ExecuteNext）均被测试
+    // - 任务驱动的 continuation 正常工作
+    // - 策略驱动的 continuation 正常工作
+    // - 混合 continuation 来源正常工作
+    // - 带资源管理的循环行为正常工作
     //
-    // 🔄 CURRENT LIMITATIONS:
-    // - ThresholdCancelPolicy tracks failures GLOBALLY, not per-task
-    // - OnErrorPolicy doesn't receive attempt_count parameter
-    // - No per-task context for stateful retry policies
+    // 🔄 当前的局限：
+    // - ThresholdCancelPolicy 全局跟踪失败，而非按任务跟踪
+    // - OnErrorPolicy 不接收 attempt_count 参数
+    // - 有状态重试策略缺乏按任务的上下文
     //
-    // 🚀 FUTURE IMPROVEMENTS IDENTIFIED:
-    // - Add OnErrorContext associated type for per-task state
-    // - Pass attempt_count to OnErrorPolicy::on_error
-    // - Enable per-task failure tracking, backoff timers, etc.
+    // 🚀 已识别的未来改进：
+    // - 为 OnErrorPolicy 增加 OnErrorContext 关联类型以保存按任务状态
+    // - 向 OnErrorPolicy::on_error 传递 attempt_count
+    // - 启用按任务的失败跟踪、退避计时器等
     //
-    // The tests below demonstrate both current capabilities and limitations.
+    // 下面的测试同时展示了当前能力与局限。
 
-    /// Test retry loop behavior with different policies and continuation counts
+    /// 测试不同策略与 continuation 次数下的重试循环行为
     ///
-    /// This test verifies that:
-    /// 1. Tasks can provide multiple continuations in sequence
-    /// 2. Different error policies can limit the number of continuation attempts
-    /// 3. The retry loop correctly handles policy decisions about when to stop
+    /// 本测试验证：
+    /// 1. 任务能够按顺序提供多个 continuation
+    /// 2. 不同错误策略可限制 continuation 尝试次数
+    /// 3. 重试循环能正确处理策略关于何时停止的决定
     ///
-    /// Key insight: Policies are only consulted for regular errors, not FailedWithContinuation.
-    /// So we need continuations that eventually fail with regular errors to test policy limits.
+    /// 关键要点：策略仅对普通错误起作用，而非 FailedWithContinuation。
+    /// 因此需要最终以普通错误失败的 continuation 来测试策略限制。
     ///
-    /// DESIGN LIMITATION: Current ThresholdCancelPolicy tracks failures GLOBALLY across all tasks,
-    /// not per-task. This test demonstrates the current behavior but isn't ideal for retry loop testing.
+    /// 设计局限：当前 ThresholdCancelPolicy 在所有任务间全局跟踪失败，
+    /// 而非按任务跟踪。本测试展示当前行为，但对重试循环测试并不理想。
     ///
-    /// FUTURE IMPROVEMENT: Add OnErrorContext associated type to OnErrorPolicy:
+    /// 未来改进：为 OnErrorPolicy 增加 OnErrorContext 关联类型：
     /// ```rust
     /// trait OnErrorPolicy {
     ///     type Context: Default + Send + Sync;
@@ -5093,9 +4834,9 @@ mod tests {
     ///                 attempt_count: u32, context: &mut Self::Context) -> ErrorResponse;
     /// }
     /// ```
-    /// This would enable per-task failure tracking, backoff timers, etc.
+    /// 这将启用按任务的失败跟踪、退避计时器等。
     ///
-    /// NOTE: Uses fresh policy instance for each test case to avoid global state interference.
+    /// 注：每个测试用例使用全新的策略实例，以避免全局状态干扰。
     #[rstest]
     #[case(
         1,
@@ -5104,7 +4845,7 @@ mod tests {
     )]
     #[case(
         2,
-        false,  // Actually fails - ActionResult::Fail accepts the error and fails the task
+        false,  // 实际上会失败 — ActionResult::Fail 接受该错误并使任务失败
         "Global policy with max_failures=2 allows error but ActionResult::Fail still fails the task"
     )]
     #[tokio::test]
@@ -5115,14 +4856,12 @@ mod tests {
         #[case] description: &str,
     ) {
         // 测试全局阈值策略与 continuation 循环的交互。
-        // Task that provides continuations, but continuations fail with regular errors
-        // so the policy gets consulted and can limit retries
 
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let attempt_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-        // Create a continuation that fails with regular errors (not FailedWithContinuation)
-        // This allows the policy to be consulted and potentially stop the retries
+        // 创建一个以普通错误（非 FailedWithContinuation）失败的 continuation，
+        // 这样策略就会被咨询并可能停止重试
         #[derive(Debug)]
         struct PolicyTestContinuation {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -5146,13 +4885,13 @@ mod tests {
                     .push(format!("continuation_attempt_{}", attempt));
 
                 if attempt < self.max_attempts_before_success {
-                    // Fail with regular error - this will be seen by the policy
+                    // 以普通错误失败——策略会看到这个错误
                     TaskExecutionResult::Error(anyhow::anyhow!(
                         "Continuation attempt {} failed (regular error)",
                         attempt
                     ))
                 } else {
-                    // Succeed after enough attempts
+                    // 足够次数后成功
                     TaskExecutionResult::Success(Box::new(format!(
                         "success_on_attempt_{}",
                         attempt
@@ -5161,19 +4900,19 @@ mod tests {
             }
         }
 
-        // Create fresh policy instance for each test case to avoid global state interference
+        // 每个测试用例创建全新策略实例，以避免全局状态干扰
         let policy = ThresholdCancelPolicy::with_threshold(max_failures);
         let tracker = TaskTracker::new(unlimited_scheduler, policy).unwrap();
 
-        // Original task that fails with continuation
+        // 以 continuation 失败的原始任务
         let log_for_task = execution_log.clone();
-        // Set max_attempts_before_success so that:
-        // - For max_failures=1: Continuation fails 1 time (attempt 1), policy cancels after 1 failure
-        // - For max_failures=2: Continuation fails 1 time (attempt 1), succeeds on attempt 2
+        // 设置 max_attempts_before_success 使得：
+        // - max_failures=1：continuation 失败 1 次（第 1 次尝试），策略在 1 次失败后取消
+        // - max_failures=2：continuation 失败 1 次（第 1 次尝试），第 2 次成功
         let continuation = Arc::new(PolicyTestContinuation {
             log: execution_log.clone(),
             attempt_counter: attempt_counter.clone(),
-            max_attempts_before_success: 2, // Always fail on attempt 1, succeed on attempt 2
+            max_attempts_before_success: 2, // 总是在第 1 次失败，第 2 次成功
         });
 
         let handle = tracker.spawn(async move {
@@ -5187,10 +4926,10 @@ mod tests {
             result
         });
 
-        // Execute and check result based on policy
+        // 根据策略执行并检查结果
         let result = handle.await.expect("Task should complete");
 
-        // Debug: Print actual results
+        // 调试：打印实际结果
         let log = execution_log.lock().await;
         let final_attempt_count = attempt_counter.load(std::sync::atomic::Ordering::Relaxed);
         println!(
@@ -5205,9 +4944,9 @@ mod tests {
             tracker.metrics().success(),
             tracker.metrics().failed()
         );
-        drop(log); // Release the lock
+        drop(log); // 释放锁
 
-        // Both test cases should fail because ActionResult::Fail accepts the error and fails the task
+        // 两个测试用例都应失败，因为 ActionResult::Fail 接受错误并使任务失败
         assert!(result.is_err(), "{}: Task should fail", description);
         assert_eq!(
             tracker.metrics().success(),
@@ -5222,7 +4961,7 @@ mod tests {
             description
         );
 
-        // Should have stopped after 1 continuation attempt because ActionResult::Fail fails the task
+        // 应在 1 次 continuation 尝试后停止，因为 ActionResult::Fail 使任务失败
         let log = execution_log.lock().await;
         assert_eq!(
             log.len(),
@@ -5240,7 +4979,7 @@ mod tests {
             description
         );
 
-        // The key difference is whether the tracker gets cancelled
+        // 关键区别在于 tracker 是否被取消
         if max_failures == 1 {
             assert!(
                 tracker.cancellation_token().is_cancelled(),
@@ -5254,16 +4993,16 @@ mod tests {
         }
     }
 
-    /// Simple test to understand ThresholdCancelPolicy behavior with per-task context
+    /// 用于理解 ThresholdCancelPolicy 在按任务上下文下行为的简单测试
     #[rstest]
     #[tokio::test]
     async fn test_simple_threshold_policy_behavior(unlimited_scheduler: Arc<UnlimitedScheduler>) {
         // 测试阈值策略在不同任务上的基础行为。
-        // Test with max_failures=2 - now uses per-task failure counting
+        // 使用 max_failures=2 测试——现在采用按任务的失败计数
         let policy = ThresholdCancelPolicy::with_threshold(2);
         let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
 
-        // Task 1: Should fail but not trigger cancellation (per-task failure count = 1)
+        // 任务 1：应失败但不触发取消（按任务失败计数 = 1）
         let handle1 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("First failure"));
             result
@@ -5275,7 +5014,7 @@ mod tests {
             "Should not be cancelled after 1 failure"
         );
 
-        // Task 2: Should fail but not trigger cancellation (different task, per-task failure count = 1)
+        // 任务 2：应失败但不触发取消（不同任务，按任务失败计数 = 1）
         let handle2 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Second failure"));
             result
@@ -5295,18 +5034,18 @@ mod tests {
         );
     }
 
-    /// Test demonstrating that per-task error context solves the global failure tracking problem
+    /// 展示按任务错误上下文如何解决全局失败跟踪问题的测试
     ///
-    /// This test shows that with OnErrorContext, each task has independent failure tracking.
+    /// 本测试表明借助 OnErrorContext，每个任务拥有独立的失败跟踪。
     #[rstest]
     #[tokio::test]
     async fn test_per_task_context_limitation_demo(unlimited_scheduler: Arc<UnlimitedScheduler>) {
         // 测试按任务上下文隔离失败预算的效果。
-        // Create a policy that should allow 2 failures per task
+        // 创建一个每任务允许 2 次失败的策略
         let policy = ThresholdCancelPolicy::with_threshold(2);
         let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
 
-        // Task 1: Fails once (per-task failure count = 1, below threshold)
+        // 任务 1：失败一次（按任务失败计数 = 1，低于阈值）
         let handle1 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Task 1 failure"));
             result
@@ -5314,8 +5053,8 @@ mod tests {
         let result1 = handle1.await.expect("Task should complete");
         assert!(result1.is_err(), "Task 1 should fail");
 
-        // Task 2: Also fails once (per-task failure count = 1, below threshold)
-        // With per-task context, this doesn't interfere with Task 1's failure budget
+        // 任务 2：也失败一次（按任务失败计数 = 1，低于阈值）
+        // 有了按任务上下文，这不会干扰任务 1 的失败预算
         let handle2 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Task 2 failure"));
             result
@@ -5323,8 +5062,8 @@ mod tests {
         let result2 = handle2.await.expect("Task should complete");
         assert!(result2.is_err(), "Task 2 should fail");
 
-        // With per-task context, tracker should NOT be cancelled
-        // Each task failed only once, which is below the threshold of 2
+        // 有了按任务上下文，tracker 不应被取消
+        // 每个任务仅失败一次，低于阈值 2
         assert!(
             !tracker.cancellation_token().is_cancelled(),
             "Tracker should NOT be cancelled - per-task context prevents premature cancellation"
@@ -5337,17 +5076,17 @@ mod tests {
             "Global policy counted 2 failures across different tasks"
         );
 
-        // This demonstrates the limitation: we can't test per-task retry behavior
-        // because failures from different tasks affect each other's retry budgets
+        // 这展示了局限：无法测试按任务的重试行为，
+        // 因为不同任务的失败会彼此影响重试预算
     }
 
-    /// Test allow_continuation() policy method with attempt-based logic
+    /// 测试基于尝试次数逻辑的 allow_continuation() 策略方法
     ///
-    /// This test verifies that:
-    /// 1. Policies can conditionally allow/reject continuations based on context
-    /// 2. When allow_continuation() returns false, FailedWithContinuation is ignored
-    /// 3. When allow_continuation() returns true, FailedWithContinuation is processed normally
-    /// 4. The policy's decision takes precedence over task-provided continuations
+    /// 本测试验证：
+    /// 1. 策略可根据上下文有条件地允许/拒绝 continuation
+    /// 2. 当 allow_continuation() 返回 false 时，FailedWithContinuation 被忽略
+    /// 3. 当 allow_continuation() 返回 true 时，FailedWithContinuation 正常处理
+    /// 4. 策略的决定优先于任务提供的 continuation
     #[rstest]
     #[case(
         3,
@@ -5368,7 +5107,7 @@ mod tests {
         #[case] description: &str,
     ) {
         // 测试错误策略对 continuation 放行与拒绝的控制。
-        // Policy that allows continuations only up to max_attempts
+        // 仅允许直到 max_attempts 之前的 continuation 的策略
         #[derive(Debug)]
         struct AttemptLimitPolicy {
             max_attempts: u32,
@@ -5382,7 +5121,7 @@ mod tests {
             }
 
             fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-                None // Stateless policy
+                None // 无状态策略
             }
 
             fn allow_continuation(&self, _error: &anyhow::Error, context: &OnErrorContext) -> bool {
@@ -5394,7 +5133,7 @@ mod tests {
                 _error: &anyhow::Error,
                 _context: &mut OnErrorContext,
             ) -> ErrorResponse {
-                ErrorResponse::Fail // Just fail when continuations are not allowed
+                ErrorResponse::Fail // 不允许 continuation 时直接失败
             }
         }
 
@@ -5402,7 +5141,7 @@ mod tests {
         let tracker = TaskTracker::new(unlimited_scheduler, policy).unwrap();
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
 
-        // Continuation that always tries to retry
+        // 总是尝试重试的 continuation
         #[derive(Debug)]
         struct AlwaysRetryContinuation {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -5421,10 +5160,10 @@ mod tests {
                     .push(format!("continuation_attempt_{}", self.attempt));
 
                 if self.attempt >= 2 {
-                    // Success after 2 attempts
+                    // 2 次尝试后成功
                     TaskExecutionResult::Success(Box::new("final_success".to_string()))
                 } else {
-                    // Try to continue with another continuation
+                    // 尝试以另一个 continuation 继续
                     let next_continuation = Arc::new(AlwaysRetryContinuation {
                         log: self.log.clone(),
                         attempt: self.attempt + 1,
@@ -5438,7 +5177,7 @@ mod tests {
             }
         }
 
-        // Task that immediately fails with a continuation
+        // 立即以 continuation 失败的任务
         let initial_continuation = Arc::new(AlwaysRetryContinuation {
             log: execution_log.clone(),
             attempt: 1,
@@ -5469,7 +5208,7 @@ mod tests {
                 description
             );
 
-            // Should have executed multiple continuations
+            // 应已执行多个 continuation
             let log = execution_log.lock().await;
             assert!(
                 log.len() > 2,
@@ -5486,7 +5225,7 @@ mod tests {
                 description
             );
 
-            // Should have stopped early due to policy rejection
+            // 应因策略拒绝而提前停止
             let log = execution_log.lock().await;
             assert_eq!(
                 log.len(),
@@ -5495,7 +5234,7 @@ mod tests {
                 description
             );
             assert_eq!(log[0], "initial_task_failure");
-            // Should NOT contain continuation attempts because policy rejected them
+            // 不应包含 continuation 尝试，因为策略拒绝了它们
             assert!(
                 !log.iter()
                     .any(|entry| entry.contains("continuation_attempt")),
@@ -5506,37 +5245,37 @@ mod tests {
         }
     }
 
-    /// Test TaskHandle functionality
+    /// 测试 TaskHandle 功能
     ///
-    /// This test verifies that:
-    /// 1. TaskHandle can be awaited like a JoinHandle
-    /// 2. TaskHandle provides access to the task's cancellation token
-    /// 3. Individual task cancellation works correctly
-    /// 4. TaskHandle methods (abort, is_finished) work as expected
+    /// 本测试验证：
+    /// 1. TaskHandle 可像 JoinHandle 一样被 await
+    /// 2. TaskHandle 提供对任务取消 token 的访问
+    /// 3. 单个任务取消正常工作
+    /// 4. TaskHandle 方法（abort、is_finished）按预期工作
     #[tokio::test]
     async fn test_task_handle_functionality() {
         // 测试 TaskHandle 的等待、取消、终止与状态方法。
         let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 
-        // Test basic functionality - TaskHandle can be awaited
+        // 测试基本功能——TaskHandle 可被 await
         let handle1 = tracker.spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             Ok("completed".to_string())
         });
 
-        // Verify we can access the cancellation token
+        // 验证可以访问取消 token
         let cancel_token = handle1.cancellation_token();
         assert!(
             !cancel_token.is_cancelled(),
             "Token should not be cancelled initially"
         );
 
-        // Await the task
+        // 等待任务
         let result1 = handle1.await.expect("Task should complete");
         assert!(result1.is_ok(), "Task should succeed");
         assert_eq!(result1.unwrap(), "completed");
 
-        // Test individual task cancellation
+        // 测试单个任务取消
         let handle2 = tracker.spawn_cancellable(|cancel_token| async move {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
@@ -5551,10 +5290,10 @@ mod tests {
 
         let cancel_token2 = handle2.cancellation_token();
 
-        // Cancel this specific task
+        // 取消这个特定任务
         cancel_token2.cancel();
 
-        // The task should be cancelled
+        // 任务应被取消
         let result2 = handle2.await.expect("Task should complete");
         assert!(result2.is_err(), "Task should be cancelled");
         assert!(
@@ -5562,30 +5301,30 @@ mod tests {
             "Should be a cancellation error"
         );
 
-        // Test that other tasks are not affected
+        // 测试其他任务不受影响
         let handle3 = tracker.spawn(async { Ok("not_cancelled".to_string()) });
 
         let result3 = handle3.await.expect("Task should complete");
         assert!(result3.is_ok(), "Other tasks should not be affected");
         assert_eq!(result3.unwrap(), "not_cancelled");
 
-        // Test abort functionality
+        // 测试 abort 功能
         let handle4 = tracker.spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             Ok("should_be_aborted".to_string())
         });
 
-        // Check is_finished before abort
+        // 在 abort 前检查 is_finished
         assert!(!handle4.is_finished(), "Task should not be finished yet");
 
-        // Abort the task
+        // 终止任务
         handle4.abort();
 
-        // Task should be aborted (JoinError)
+        // 任务应被终止（JoinError）
         let result4 = handle4.await;
         assert!(result4.is_err(), "Aborted task should return JoinError");
 
-        // Verify metrics
+        // 验证指标
         assert_eq!(
             tracker.metrics().success(),
             2,
@@ -5596,16 +5335,16 @@ mod tests {
             1,
             "Should have 1 cancelled task"
         );
-        // Note: aborted tasks don't count as cancelled in our metrics
+        // 注：被 abort 的任务在指标中不计为已取消
     }
 
-    /// Test TaskHandle with cancellable tasks
+    /// 测试 TaskHandle 与可取消任务的配合
     #[tokio::test]
     async fn test_task_handle_with_cancellable_tasks() {
         // 测试 TaskHandle 与可取消任务的配合。
         let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 
-        // Test cancellable task with TaskHandle
+        // 测试带 TaskHandle 的可取消任务
         let handle = tracker.spawn_cancellable(|cancel_token| async move {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
@@ -5615,19 +5354,19 @@ mod tests {
             }
         });
 
-        // Verify we can access the task's individual cancellation token
+        // 验证可以访问任务的独立取消 token
         let task_cancel_token = handle.cancellation_token();
         assert!(
             !task_cancel_token.is_cancelled(),
             "Task token should not be cancelled initially"
         );
 
-        // Let the task complete normally
+        // 让任务正常完成
         let result = handle.await.expect("Task should complete");
         assert!(result.is_ok(), "Task should succeed");
         assert_eq!(result.unwrap(), "completed");
 
-        // Test cancellation of cancellable task
+        // 测试可取消任务的取消
         let handle2 = tracker.spawn_cancellable(|cancel_token| async move {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
@@ -5637,7 +5376,7 @@ mod tests {
             }
         });
 
-        // Cancel the specific task
+        // 取消特定任务
         handle2.cancellation_token().cancel();
 
         let result2 = handle2.await.expect("Task should complete");
@@ -5647,7 +5386,7 @@ mod tests {
             "Should be a cancellation error"
         );
 
-        // Verify metrics
+        // 验证指标
         assert_eq!(
             tracker.metrics().success(),
             1,
@@ -5660,18 +5399,18 @@ mod tests {
         );
     }
 
-    /// Test FailedWithContinuation helper methods
+    /// 测试 FailedWithContinuation 辅助方法
     ///
-    /// This test verifies that:
-    /// 1. from_fn creates working continuations from simple closures
-    /// 2. from_cancellable creates working continuations from cancellable closures
-    /// 3. Both helpers integrate correctly with the task execution system
+    /// 本测试验证：
+    /// 1. from_fn 从简单闭包创建可用的 continuation
+    /// 2. from_cancellable 从可取消闭包创建可用的 continuation
+    /// 3. 两个辅助方法都能与任务执行系统正确集成
     #[tokio::test]
     async fn test_continuation_helpers() {
         // 测试 from_fn 与 from_cancellable 两个 continuation 辅助方法。
         let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 
-        // Test from_fn helper
+        // 测试 from_fn 辅助方法
         let handle1 = tracker.spawn(async {
             let error =
                 FailedWithContinuation::from_fn(anyhow::anyhow!("Initial failure"), || async {
@@ -5688,7 +5427,7 @@ mod tests {
         );
         assert_eq!(result1.unwrap(), "Success from from_fn");
 
-        // Test from_cancellable helper
+        // 测试 from_cancellable 辅助方法
         let handle2 = tracker.spawn(async {
             let error = FailedWithContinuation::from_cancellable(
                 anyhow::anyhow!("Initial failure"),
@@ -5705,7 +5444,7 @@ mod tests {
         );
         assert_eq!(result2.unwrap(), "Success from from_cancellable");
 
-        // Verify metrics
+        // 验证指标
         assert_eq!(
             tracker.metrics().success(),
             2,
@@ -5714,13 +5453,13 @@ mod tests {
         assert_eq!(tracker.metrics().failed(), 0, "Should have 0 failed tasks");
     }
 
-    /// Test should_reschedule() policy method with mock scheduler tracking
+    /// 测试带 mock 调度器跟踪的 should_reschedule() 策略方法
     ///
-    /// This test verifies that:
-    /// 1. When should_reschedule() returns false, the guard is reused (efficient)
-    /// 2. When should_reschedule() returns true, the guard is re-acquired through scheduler
-    /// 3. The scheduler's acquire_execution_slot is called the expected number of times
-    /// 4. Rescheduling works for both task-driven and policy-driven continuations
+    /// 本测试验证：
+    /// 1. 当 should_reschedule() 返回 false 时，guard 被复用（高效）
+    /// 2. 当 should_reschedule() 返回 true 时，guard 通过调度器重新获取
+    /// 3. 调度器的 acquire_execution_slot 被调用预期次数
+    /// 4. 重调度对任务驱动与策略驱动的 continuation 都生效
     #[rstest]
     #[case(false, 1, "Policy requests no rescheduling - should reuse guard")]
     #[case(true, 2, "Policy requests rescheduling - should re-acquire guard")]
@@ -5731,7 +5470,7 @@ mod tests {
         #[case] description: &str,
     ) {
         // 测试策略要求重调度时，调度器资源申请次数的变化。
-        // Mock scheduler that tracks acquisition calls
+        // 跟踪资源申请调用的 mock 调度器
         #[derive(Debug)]
         struct MockScheduler {
             acquisition_count: Arc<AtomicU32>,
@@ -5760,7 +5499,7 @@ mod tests {
             }
         }
 
-        // Policy that controls rescheduling behavior
+        // 控制重调度行为的策略
         #[derive(Debug)]
         struct RescheduleTestPolicy {
             should_reschedule: bool,
@@ -5774,7 +5513,7 @@ mod tests {
             }
 
             fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-                None // Stateless policy
+                None // 无状态策略
             }
 
             fn allow_continuation(
@@ -5782,7 +5521,7 @@ mod tests {
                 _error: &anyhow::Error,
                 _context: &OnErrorContext,
             ) -> bool {
-                true // Always allow continuations for this test
+                true // 本测试始终允许 continuation
             }
 
             fn should_reschedule(&self, _error: &anyhow::Error, _context: &OnErrorContext) -> bool {
@@ -5794,7 +5533,7 @@ mod tests {
                 _error: &anyhow::Error,
                 _context: &mut OnErrorContext,
             ) -> ErrorResponse {
-                ErrorResponse::Fail // Just fail when continuations are not allowed
+                ErrorResponse::Fail // 不允许 continuation 时直接失败
             }
         }
 
@@ -5803,7 +5542,7 @@ mod tests {
         let tracker = TaskTracker::new(mock_scheduler.clone(), policy).unwrap();
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
 
-        // Simple continuation that succeeds on second attempt
+        // 第二次尝试成功的简单 continuation
         #[derive(Debug)]
         struct SimpleRetryContinuation {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -5820,12 +5559,12 @@ mod tests {
                     .await
                     .push("continuation_executed".to_string());
 
-                // Succeed immediately
+                // 立即成功
                 TaskExecutionResult::Success(Box::new("continuation_success".to_string()))
             }
         }
 
-        // Task that fails with a continuation
+        // 以 continuation 失败的任务
         let continuation = Arc::new(SimpleRetryContinuation {
             log: execution_log.clone(),
         });
@@ -5844,7 +5583,7 @@ mod tests {
 
         let result = handle.await.expect("Task should complete");
 
-        // Task should succeed regardless of rescheduling behavior
+        // 无论重调度行为如何，任务都应成功
         assert!(result.is_ok(), "{}: Task should succeed", description);
         assert_eq!(
             tracker.metrics().success(),
@@ -5853,7 +5592,7 @@ mod tests {
             description
         );
 
-        // Verify the execution log
+        // 验证执行日志
         let log = execution_log.lock().await;
         assert_eq!(
             log.len(),
@@ -5864,7 +5603,7 @@ mod tests {
         assert_eq!(log[0], "initial_task_failure");
         assert_eq!(log[1], "continuation_executed");
 
-        // Most importantly: verify the scheduler acquisition count
+        // 最关键：验证调度器资源申请次数
         let actual_acquisitions = mock_scheduler.acquisition_count();
         assert_eq!(
             actual_acquisitions, expected_acquisitions,
@@ -5873,12 +5612,12 @@ mod tests {
         );
     }
 
-    /// Test continuation loop with custom action policies
+    /// 测试带自定义动作策略的 continuation 循环
     ///
-    /// This tests that custom error actions can also provide continuations
-    /// and that the loop behavior works correctly with policy-provided continuations
+    /// 本测试验证自定义错误动作也能提供 continuation，
+    /// 并且循环行为在策略提供的 continuation 下正常工作
     ///
-    /// NOTE: Uses fresh policy/action instances to avoid global state interference.
+    /// 注：使用全新的策略/动作实例，以避免全局状态干扰。
     #[rstest]
     #[case(1, true, "Custom action with 1 retry should succeed")]
     #[case(3, true, "Custom action with 3 retries should succeed")]
@@ -5893,7 +5632,7 @@ mod tests {
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let retry_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-        // Custom action that provides continuations up to max_retries
+        // 提供直到 max_retries 之前 continuation 的自定义动作
         #[derive(Debug)]
         struct RetryAction {
             log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -5920,7 +5659,7 @@ mod tests {
                     .push(format!("custom_action_retry_{}", current_retry));
 
                 if current_retry <= self.max_retries {
-                    // Provide a continuation that succeeds if this is the final retry
+                    // 提供一个 continuation，若为最后一次重试则成功
                     #[derive(Debug)]
                     struct RetryContinuation {
                         log: Arc<tokio::sync::Mutex<Vec<String>>>,
@@ -5941,14 +5680,14 @@ mod tests {
                                 .push(format!("retry_continuation_{}", self.retry_number));
 
                             if self.retry_number >= self.max_retries {
-                                // Final retry succeeds
+                                // 最后一次重试成功
                                 TaskExecutionResult::Success(Box::new(format!(
                                     "success_after_{}_retries",
                                     self.retry_number
                                 )))
                             } else {
-                                // Still need more retries, fail with regular error (not FailedWithContinuation)
-                                // This will trigger the custom action again
+                                // 仍需更多重试，以普通错误（非 FailedWithContinuation）失败
+                                // 这会再次触发自定义动作
                                 TaskExecutionResult::Error(anyhow::anyhow!(
                                     "Retry {} still failing",
                                     self.retry_number
@@ -5965,13 +5704,13 @@ mod tests {
 
                     ActionResult::Continue { continuation }
                 } else {
-                    // Exceeded max retries, cancel
+                    // 超过最大重试次数，取消
                     ActionResult::Shutdown
                 }
             }
         }
 
-        // Custom policy that uses the retry action
+        // 使用重试动作的自定义策略
         #[derive(Debug)]
         struct CustomRetryPolicy {
             action: Arc<RetryAction>,
@@ -5985,7 +5724,7 @@ mod tests {
             }
 
             fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
-                None // Stateless policy - no heap allocation
+                None // 无状态策略——无堆分配
             }
 
             fn on_error(
@@ -6009,7 +5748,7 @@ mod tests {
         let policy = Arc::new(CustomRetryPolicy { action });
         let tracker = TaskTracker::new(unlimited_scheduler, policy).unwrap();
 
-        // Task that always fails with regular error (not FailedWithContinuation)
+        // 总是以普通错误（非 FailedWithContinuation）失败的任务
         let log_for_task = execution_log.clone();
         let handle = tracker.spawn(async move {
             log_for_task
@@ -6021,7 +5760,7 @@ mod tests {
             result
         });
 
-        // Execute and verify results
+        // 执行并验证结果
         let result = handle.await.expect("Task should complete");
 
         if should_succeed {
@@ -6033,9 +5772,9 @@ mod tests {
                 description
             );
 
-            // Verify the retry sequence
+            // 验证重试序列
             let log = execution_log.lock().await;
-            let expected_entries = 1 + (max_retries * 2); // original + (action + continuation) per retry
+            let expected_entries = 1 + (max_retries * 2); // 原始 + 每次重试（动作 + continuation）
             assert_eq!(
                 log.len(),
                 expected_entries as usize,
@@ -6059,7 +5798,7 @@ mod tests {
                 description
             );
 
-            // Should have stopped after max_retries
+            // 应在达到 max_retries 后停止
             let final_retry_count = retry_count.load(std::sync::atomic::Ordering::Relaxed);
             assert!(
                 final_retry_count > max_retries,
@@ -6071,10 +5810,10 @@ mod tests {
         }
     }
 
-    /// Test mixed continuation sources (task-driven + policy-driven)
+    /// 测试混合来源的 continuation（任务驱动 + 策略驱动）
     ///
-    /// This test verifies that both task-provided continuations and policy-provided
-    /// continuations can work together in the same execution flow
+    /// 本测试验证任务提供的 continuation 与策略提供的 continuation
+    /// 能在同一执行流中协同工作
     #[rstest]
     #[tokio::test]
     async fn test_mixed_continuation_sources(
@@ -6085,7 +5824,7 @@ mod tests {
         let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
 
-        // Task that provides a continuation, which then fails with regular error
+        // 提供 continuation、随后以普通错误失败的任务
         let log_for_task = execution_log.clone();
         let log_for_continuation = execution_log.clone();
 
@@ -6104,8 +5843,8 @@ mod tests {
                     .lock()
                     .await
                     .push("task_continuation_executed".to_string());
-                // This continuation fails with a regular error (not FailedWithContinuation)
-                // So it will be handled by the policy (LogOnlyPolicy just continues)
+                // 该 continuation 以普通错误（非 FailedWithContinuation）失败
+                // 因此由策略处理（LogOnlyPolicy 仅继续）
                 TaskExecutionResult::Error(anyhow::anyhow!("Task continuation failed"))
             }
         }
@@ -6120,32 +5859,32 @@ mod tests {
                 .await
                 .push("original_task_executed".to_string());
 
-            // Task provides continuation
+            // 任务提供 continuation
             let error = anyhow::anyhow!("Original task failed");
             let result: Result<String, anyhow::Error> =
                 Err(FailedWithContinuation::into_anyhow(error, continuation));
             result
         });
 
-        // Execute - should fail because continuation fails and LogOnlyPolicy just logs
+        // 执行——应失败，因为 continuation 失败且 LogOnlyPolicy 仅记录
         let result = handle.await.expect("Task should complete");
         assert!(
             result.is_err(),
             "Should fail because continuation fails and policy just logs"
         );
 
-        // Verify execution sequence
+        // 验证执行顺序
         let log = execution_log.lock().await;
         assert_eq!(log.len(), 2);
         assert_eq!(log[0], "original_task_executed");
         assert_eq!(log[1], "task_continuation_executed");
 
-        // Verify metrics - should show failure from continuation
+        // 验证指标——应显示来自 continuation 的失败
         assert_eq!(tracker.metrics().success(), 0);
         assert_eq!(tracker.metrics().failed(), 1);
     }
 
-    /// Debug test to understand the threshold policy behavior in retry loop
+    /// 调试用例，用于理解阈值策略在重试循环中的行为
     #[rstest]
     #[tokio::test]
     async fn debug_threshold_policy_in_retry_loop(unlimited_scheduler: Arc<UnlimitedScheduler>) {
@@ -6153,7 +5892,7 @@ mod tests {
         let policy = ThresholdCancelPolicy::with_threshold(2);
         let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
 
-        // Simple continuation that always fails with regular error
+        // 总是以普通错误失败的简单 continuation
         #[derive(Debug)]
         struct AlwaysFailContinuation {
             attempt: Arc<std::sync::atomic::AtomicU32>,
@@ -6207,6 +5946,6 @@ mod tests {
             tracker.metrics().failed()
         );
 
-        // This should help us understand what's happening
+        // 这有助于我们理解正在发生的情况
     }
 }

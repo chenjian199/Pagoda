@@ -56,10 +56,10 @@ const SHUTDOWN_MESSAGE: &str =
 const SHUTDOWN_TIMEOUT_MESSAGE: &str =
     "Use PGD_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to control the graceful shutdown timeout";
 
-/// Default graceful shutdown timeout in seconds in debug mode
+/// 调试模式下的默认优雅关闭超时（秒）。
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG: u64 = 5;
 
-/// Default graceful shutdown timeout in seconds in release mode
+/// release 模式下的默认优雅关闭超时（秒）。
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE: u64 = 30;
 
 // === SECTION: Worker 结构 & 构造 / 访问 / 执行接口 ===
@@ -71,7 +71,7 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Create a new [Worker] instance from [RuntimeConfig] settings which is sourced from the environment
+    /// 使用来自环境的 [RuntimeConfig] 配置创建一个新的 [Worker] 实例。
     // 中文说明：
     // 1. 这个函数从环境配置创建一个新的 Worker。
     // 2. 它先调用 RuntimeConfig::from_settings 读取当前进程里的运行时配置。
@@ -83,7 +83,7 @@ impl Worker {
         Ok(worker)
     }
 
-    /// Create a new [Worker] instance from a provided [RuntimeConfig]
+    /// 使用提供的 [RuntimeConfig] 创建一个新的 [Worker] 实例。
     // 中文说明：
     // 1. 这个函数根据传入的 RuntimeConfig 真正构造 Worker。
     // 2. 开始会先检查全局 OnceCell，避免在同一进程里重复初始化多个 Worker/runtime。
@@ -129,10 +129,9 @@ impl Worker {
         Ok(runtime)
     }
 
-    /// Whether a process-wide runtime has already been initialized
-    /// (RT populated by Worker::from_*, or RTHANDLE populated by
-    /// runtime_from_existing's fallback / external callers).
-    /// Does not fall back to Runtime::from_settings().
+    /// 判断是否已经初始化了进程级 runtime。
+    /// （RT 由 Worker::from_* 填充，或 RTHANDLE 由 runtime_from_existing 的回退路径 / 外部调用者填充。）
+    /// 这里不会回退到 `Runtime::from_settings()`。
     // 中文说明：
     // 1. 这个函数只做一个轻量查询，用来判断当前进程里是否已经存在全局 runtime。
     // 2. 它分别检查真正的 Tokio runtime 单例 RT 和单独保存的 handle 单例 RTHANDLE。
@@ -203,8 +202,8 @@ impl Worker {
         Ok(())
     }
 
-    /// Executes the provided application/closure on the [Runtime].
-    /// This is designed to be called once from main and will block the calling thread until the application completes.
+    /// 在 [Runtime] 上执行提供的应用 / 闭包。
+    /// 设计上应从 main 里只调用一次，并且会阻塞调用线程直到应用完成。
     // 中文说明：
     // 1. 这个内部函数负责真正创建并返回执行用户应用的 JoinHandle。
     // 2. 它先拆出 primary 和 secondary 两个执行句柄，再计算优雅关闭超时时间；该时间优先取环境变量，否则根据 debug/release 默认值决定。

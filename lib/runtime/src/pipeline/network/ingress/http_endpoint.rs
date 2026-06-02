@@ -18,7 +18,7 @@
 //!   监听任务持有 `CancellationToken`，关停时由它触发 graceful。
 //! - 服务端不做 retry / rate-limit，这些策略放在更上层的 router。
 
-//! HTTP portname for receiving requests via Axum/HTTP/2
+//! 通过 Axum/HTTP/2 接收请求的 HTTP portname。
 
 use super::*;
 use crate::SystemHealth;
@@ -45,17 +45,17 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 
-/// Default root path for pagoda RPC portnames
+/// pagoda RPC portname 的默认根路径。
 const DEFAULT_RPC_ROOT_PATH: &str = "/v1/rpc";
 
 // === SECTION: [1] 版本与常量 ===
 
-/// version of crate
+/// crate 版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // === SECTION: [2] 共享 HTTP 服务器与处理器结构 ===
 
-/// Shared HTTP server that handles multiple portnames on a single port
+/// 共享 HTTP 服务端，在一个端口上处理多个 portname。
 pub struct SharedHttpServer {
     handlers: Arc<DashMap<String, Arc<PortNameHandler>>>,
     bind_addr: SocketAddr,
@@ -63,7 +63,7 @@ pub struct SharedHttpServer {
     cancellation_token: CancellationToken,
 }
 
-/// Handler for a specific portname
+/// 某个特定 portname 的处理器。
 struct PortNameHandler {
     service_handler: Arc<dyn PushWorkHandler>,
     instance_id: u64,
@@ -85,12 +85,12 @@ impl SharedHttpServer {
         })
     }
 
-    /// Get the actual bound address (after `bind_and_start` resolves).
+    /// 获取实际绑定地址（在 `bind_and_start` 完成后可用）。
     pub fn actual_address(&self) -> Option<SocketAddr> {
         self.actual_addr.try_read().ok().and_then(|g| *g)
     }
 
-    /// Register an portname handler with this server
+    /// 向这个服务端注册一个 portname 处理器。
     #[allow(clippy::too_many_arguments)]
     pub async fn register_portname(
         &self,
@@ -113,7 +113,7 @@ impl SharedHttpServer {
             notify: Arc::new(Notify::new()),
         });
 
-        // Insert handler FIRST to ensure it's ready to receive requests
+        // 先插入处理器，确保它已经准备好接收请求。
         let subject_clone = subject.clone();
         self.handlers.insert(subject, handler);
 
@@ -123,7 +123,7 @@ impl SharedHttpServer {
         Ok(())
     }
 
-    /// Unregister an portname handler
+    /// 从这个服务端注销一个 portname 处理器。
     pub async fn unregister_portname(&self, subject: &str, portname_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(subject) {
             handler
@@ -154,9 +154,9 @@ impl SharedHttpServer {
         }
     }
 
-    /// Bind the TCP listener and start the accept loop.
+    /// 绑定 TCP 监听器并启动 accept 循环。
     ///
-    /// Returns the actual bound `SocketAddr` (important when binding to port 0).
+    /// 返回实际绑定的 `SocketAddr`（在绑定到 0 端口时尤其重要）。
     pub async fn bind_and_start(self: Arc<Self>) -> Result<SocketAddr> {
         let rpc_root_path = std::env::var("PGD_HTTP_RPC_ROOT_PATH")
             .unwrap_or_else(|_| DEFAULT_RPC_ROOT_PATH.to_string());
@@ -177,12 +177,12 @@ impl SharedHttpServer {
             "HTTP/2 portname server bound"
         );
 
-        // Store the actual address so `address()` returns the real port.
+        // 保存实际地址，这样 `address()` 就会返回真实端口。
         *self.actual_addr.write().await = Some(actual_addr);
 
         let cancellation_token = self.cancellation_token.clone();
 
-        // Spawn the accept loop in the background.
+        // 在后台启动 accept 循环。
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -227,7 +227,7 @@ impl SharedHttpServer {
         Ok(actual_addr)
     }
 
-    /// Wait for all inflight requests across all portnames
+    /// 等待所有 portname 上的 in-flight 请求完成。
     pub async fn wait_for_inflight(&self) {
         for handler in self.handlers.iter() {
             while handler.value().inflight.load(Ordering::SeqCst) > 0 {
@@ -237,14 +237,14 @@ impl SharedHttpServer {
     }
 }
 
-/// HTTP handler for the shared server
+/// 共享服务端的 HTTP 处理器。
 async fn handle_shared_request(
     AxumState(server): AxumState<Arc<SharedHttpServer>>,
     Path(portname_path): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Look up the handler for this portname (lock-free read with DashMap)
+    // 查找这个 portname 对应的处理器（通过 DashMap 做无锁读取）。
     let handler = match server.handlers.get(&portname_path) {
         Some(h) => h.clone(),
         None => {
@@ -253,13 +253,13 @@ async fn handle_shared_request(
         }
     };
 
-    // Increment inflight counter
+    // 增加 in-flight 计数。
     handler.inflight.fetch_add(1, Ordering::SeqCst);
 
-    // Extract tracing headers
+    // 提取 tracing 头部。
     let traceparent = TraceParent::from_axum_headers(&headers);
 
-    // Spawn async handler
+    // 启动异步处理任务。
     let service_handler = handler.service_handler.clone();
     let inflight = handler.inflight.clone();
     let notify = handler.notify.clone();
@@ -294,18 +294,18 @@ async fn handle_shared_request(
             }
         }
 
-        // Decrease inflight counter
+        // 减少 in-flight 计数。
         inflight.fetch_sub(1, Ordering::SeqCst);
         notify.notify_one();
     });
 
-    // Return 202 Accepted immediately (like NATS ack)
+    // 立即返回 202 Accepted（类似 NATS ack）。
     (StatusCode::ACCEPTED, "")
 }
 
 // === SECTION: [3] TraceParent 头部解析 ===
 
-/// Extension trait for TraceParent to support Axum headers
+/// 为 TraceParent 提供对 Axum 头部支持的扩展实现。
 impl TraceParent {
     pub fn from_axum_headers(headers: &HeaderMap) -> Self {
         let mut traceparent = TraceParent::default();
@@ -328,7 +328,7 @@ impl TraceParent {
             traceparent.x_request_id = Some(s.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-pagoda-request-id
+        // 从内部头部读取 request-id，并在没有时回退到已弃用的 x-pagoda-request-id。
         if let Some(s) = headers
             .get("request-id")
             .and_then(|v| v.to_str().ok())
@@ -347,7 +347,7 @@ impl TraceParent {
     }
 }
 
-// Implement RequestPlaneServer trait for SharedHttpServer
+// 为 SharedHttpServer 实现 RequestPlaneServer trait。
 #[async_trait::async_trait]
 impl super::unified_server::RequestPlaneServer for SharedHttpServer {
     async fn register_portname(
@@ -359,7 +359,7 @@ impl super::unified_server::RequestPlaneServer for SharedHttpServer {
         servicegroup_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // For HTTP, we use portname_name as both the subject (routing key) and portname_name
+        // 对于 HTTP，我们把 portname_name 同时作为 subject（路由键）和 portname_name。
         self.register_portname(
             portname_name.clone(),
             service_handler,
@@ -387,8 +387,8 @@ impl super::unified_server::RequestPlaneServer for SharedHttpServer {
     }
 
     fn is_healthy(&self) -> bool {
-        // Server is healthy if it has been created
-        // TODO: Add more sophisticated health checks (e.g., check if listener is active)
+        // 服务端只要已经创建，就认为是健康的。
+        // TODO：补充更复杂的健康检查（例如检查监听器是否仍然活跃）。
         true
     }
 }
@@ -449,13 +449,13 @@ mod tests {
         let server = SharedHttpServer::new(bind_addr, token.clone());
         let actual_addr = server.clone().bind_and_start().await.unwrap();
 
-        // OS should assign a non-zero port
+        // OS 应该分配一个非 0 端口。
         assert_ne!(actual_addr.port(), 0);
 
-        // actual_address() should return the real bound address
+        // `actual_address()` 应该返回真实绑定地址。
         assert_eq!(server.actual_address(), Some(actual_addr));
 
-        // address() should contain the real port
+        // `address()` 应该包含真实端口。
         let addr_str =
             <SharedHttpServer as super::unified_server::RequestPlaneServer>::address(&*server);
         assert!(addr_str.contains(&actual_addr.port().to_string()));
@@ -477,7 +477,7 @@ mod tests {
         let actual1 = server1.clone().bind_and_start().await.unwrap();
         let actual2 = server2.clone().bind_and_start().await.unwrap();
 
-        // Two servers binding to port 0 must get different ports
+        // 两个绑定到 0 端口的服务端必须拿到不同端口。
         assert_ne!(actual1.port(), actual2.port());
 
         token1.cancel();
@@ -488,10 +488,10 @@ mod tests {
     async fn test_bind_and_start_with_explicit_port() {
         use std::net::{IpAddr, Ipv4Addr};
 
-        // First bind to port 0 to get a free port
+        // 先绑定到 0 端口以获取一个空闲端口。
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let free_port = listener.local_addr().unwrap().port();
-        drop(listener); // Release the port
+        drop(listener); // 释放这个端口。
 
         let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), free_port);
         let token = CancellationToken::new();
@@ -499,7 +499,7 @@ mod tests {
         let server = SharedHttpServer::new(bind_addr, token.clone());
         let actual_addr = server.clone().bind_and_start().await.unwrap();
 
-        // When binding to an explicit port, actual should match
+        // 当绑定到显式端口时，实际端口应该一致。
         assert_eq!(actual_addr.port(), free_port);
 
         token.cancel();

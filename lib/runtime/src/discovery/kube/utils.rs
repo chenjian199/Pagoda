@@ -26,9 +26,8 @@
 //!
 //! ## 实现要点
 //!
-//! - 所有公开 API 版本完全一致；新增的 [`sanitize`] / [`short_hash`]
-//!   以及 [`PodInfo::pod_ip`] 字段是为了支撑 K8s 原生注册路径
-//!   （`Service` + `EndpointSlice`）所需的命名 / 地址写入。
+//! - [`sanitize`] / [`short_hash`] 以及 [`PodInfo::pod_ip`] 字段用于支撑 K8s
+//!   原生注册路径（`Service` + `EndpointSlice`）所需的命名 / 地址写入。
 //! - 53 位掩码 [`INSTANCE_ID_MASK`] 来源于 JavaScript Number 的安全整数范围，
 //!   保证 JSON 序列化后下游 (TS / JS) 不会发生整数精度丢失。
 //! - 字符规范化沿用 K8s DNS-1123 label 规则：只允许 `[a-z0-9-]`，首尾必须是
@@ -55,8 +54,8 @@ const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
 
 /// 容器模式下识别“主容器”的固定名称（与 helm chart 中 main container 命名一致）。
 ///
-/// 当 mode=Container 且容器名等于 `main` 时，CR 名称退化为 pod 名称，
-/// 与 mode=Pod 行为保持兼容，便于平滑切换两种模式。
+/// 当 mode=Container 且容器名等于 `main` 时，实例名称退化为 pod 名称，
+/// 与 mode=Pod 行为保持一致，便于平滑切换两种模式。
 const MAIN_CONTAINER_NAME: &str = "main";
 
 /// 默认从 Downward API 卷挂载读取 pod 身份的目录。
@@ -171,7 +170,7 @@ pub(super) enum KubeDiscoveryTarget {
 }
 
 impl KubeDiscoveryTarget {
-    /// 历史上 CR 名称，现在仍作为 `(instance_id, key)` 配对中的字符串键。
+    /// 实例的字符串键，作为 `(instance_id, key)` 配对中的 key，同时用于资源命名。
     pub fn cr_name(&self) -> String {
         match self {
             Self::Pod(pod) => pod.clone(),

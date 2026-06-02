@@ -19,18 +19,17 @@
 //! ## 外部契约
 //!
 //! - `pub fn watch_and_extract_field<T, V, F>(stream, extractor) ->
-//!   watch::Receiver<HashMap<u64, V>>` 与历史版本签名一致；
+//!   watch::Receiver<HashMap<u64, V>>` 作为稳定的公开签名；
 //! - 折叠策略：当同一 `instance_id` 既有基础模型 (`suffix=None`) 又有 LoRA
 //!   时，优先保留基础模型；若只有 LoRA 则任选其一。
 //!
 //! ## 实现要点
 //!
-//! - 内部状态键采用完整的 `DiscoveryInstanceId`（含命名空间 / 组件 /
+//! - 内部状态键采用完整的 `DiscoveryInstanceId`（含 namespace / servicegroup /
 //!   portname / 后缀），避免不同对象因低 53 位哈希冲突而互相覆盖；
 //! - 折叠后的 `HashMap<u64, V>` 与上次广播值比较，仅在**内容真实变化**时
 //!   `send`，避免下游被空唤醒；
-//! - 折叠逻辑被抽离为 [`collapse_to_instance_view`]，单独可测，与历史版本
-//!   `collapse_by_instance_id` 同语义但实现差异更大。
+//! - 折叠逻辑被抽离为 [`collapse_to_instance_view`]，可单独测试。
 
 use std::collections::HashMap;
 

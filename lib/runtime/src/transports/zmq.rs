@@ -311,7 +311,7 @@ mod tests {
         let address = "tcp://127.0.0.1:1337";
         let token = CancellationToken::new();
 
-        // Start server
+        // 启动服务端。
         let (server, handle) = Server::new(&context, address, token.clone()).await?;
         let state = server.state.clone();
 
@@ -360,7 +360,7 @@ mod tests {
     static PORT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn unique_portname() -> String {
-        // Reserve a best-effort unique local TCP port for test bindings.
+        // 尽力预留一个唯一的本地 TCP 端口供测试绑定.
         let probe = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("should bind an ephemeral probe port");
         let port = probe
@@ -369,7 +369,7 @@ mod tests {
             .port();
         drop(probe);
 
-        // Add a tiny deterministic jitter to reduce race risk between tests.
+        // 加一点确定性抖动以减少测试间的竞争风险.
         let offset = (PORT_COUNTER.fetch_add(1, Ordering::SeqCst) % 7) as u16;
         format!("tcp://127.0.0.1:{}", port.saturating_add(offset))
     }
@@ -461,7 +461,7 @@ mod tests {
             ]))
             .await?;
 
-        // Server should keep running because unknown request_id is non-fatal.
+        // 未知 request_id 不是致命错误，服务端应保持运行.
         sleep(Duration::from_millis(100)).await;
         assert!(!handle.is_finished());
 
@@ -487,7 +487,7 @@ mod tests {
 
         let mut client = Client::new(&context, &portname)?;
 
-        // First message fills the channel via eager send.
+        // 第一条消息通过急切发送填满通道.
         client
             .dealer()
             .send(tmq::Multipart::from(vec![
@@ -496,7 +496,7 @@ mod tests {
             ]))
             .await?;
 
-        // Second message should hit TrySendError::Full and follow delayed send path.
+        // 第二条消息应命中 TrySendError::Full 并走延迟发送路径.
         client
             .dealer()
             .send(tmq::Multipart::from(vec![
@@ -505,7 +505,7 @@ mod tests {
             ]))
             .await?;
 
-        // Drain first then second; this unblocks delayed send.
+        // 先取出第一条再取第二条;这会解除延迟发送的阻塞.
         let first = timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("first receive should complete")
@@ -533,8 +533,8 @@ mod tests {
         let (_server, handle) = Server::new(&context, &portname, parent.clone()).await?;
         let mut client = Client::new(&context, &portname)?;
 
-        // Sending a single frame results in identity+payload (2 frames) at router,
-        // which violates the 3-frame contract and should terminate the server.
+        // 发送单一帧在 router 侧得到 identity+payload（2 帧）,
+        // 这违反了 3 帧契约，应终止服务端.
         client
             .dealer()
             .send(tmq::Multipart::from(vec![b"only-one-frame".to_vec()]))

@@ -985,12 +985,12 @@ mod tests {
             "PortName should have a notifier created"
         );
 
-        // Verify we can notify it without panicking
+        // 验证可以在不触发 panic 的情况下通知它。
         if let Some(notifier) = notifier {
             notifier.notify_one();
         }
 
-        // Initially, the portname should be Ready (default after registration)
+        // 初始状态下，端点名称应为 Ready（注册后的默认状态）。
         let status = drt
             .system_health()
             .lock()

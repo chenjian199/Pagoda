@@ -5,9 +5,9 @@
 //!
 //! ## 设计意图
 //! 把 [`TwoPartCodec`] 状态机的纯算法部分（长度前缀 + 段拼装 + checksum 校验）单独沉淀
-//! 到本文件，便于在不引入 `tokio_util::codec` 依赖的纯算法测试里复用，也便于
+//! 到本文件，方便在不引入 `tokio_util::codec` 依赖的纯算法测试里复用，也方便
 //! [`pipeline::network::codec::zero_copy_decoder`](super::zero_copy_decoder) 这种
-//! "借而不有"的快路径直接调用解析逻辑。
+//! “借而不有”的快路径直接调用解析逻辑。
 //!
 //! ## 外部契约
 //! - 公开符号：
@@ -26,9 +26,9 @@
 //!   `impl Encoder<TwoPartMessage, Error=TwoPartCodecError>` 接入
 //!   `tokio_util::codec`；行为：
 //!   - 缓冲 < [`FRAME_PREFIX_LEN`]（24）时 `decode` 返回 `Ok(None)`；
-//!   - `header_len + body_len + 24` 超 `max_message_size` 抛 `MessageTooLarge`；
-//!   - 在 `cfg(debug_assertions)` 下计算 xxh3_64 并校验，release 下双方都填 0 跳过；
-//!   - 接收端如果对端发送的 checksum == 0 视为"已禁用"并跳过校验（向后兼容）。
+//!   - `header_len + body_len + 24` 超 `max_message_size` 时抛出 `MessageTooLarge`；
+//!   - 在 `cfg(debug_assertions)` 下计算 xxh3_64 并校验，release 下双方都填 0 直接跳过；
+//!   - 接收端如果对端发送的 checksum == 0，则视为“已禁用”并跳过校验（向后兼容）。
 //! - 线协议字段序：`u64 BE header_len | u64 BE body_len | u64 BE checksum |
 //!   header_bytes | body_bytes`；魔数 24 字节为编译期常量。
 //!
@@ -38,13 +38,13 @@
 //! - **统一帧总长计算**：私有 [`compute_total_len`] 用 `checked_add` 串接，遇 overflow
 //!   返回 `MessageTooLarge(usize::MAX, max_or_max)`；编码与解码两侧都走这一函数，
 //!   避免在多处写重复的 `24.checked_add(...).and_then(...)`。
-//! - **统一上限检查**：私有 [`enforce_max`] 把"`Some(max) && total > max → Err`"
+//! - **统一上限检查**：私有 [`enforce_max`] 把“`Some(max) && total > max → Err`”
 //!   收敛为单一函数。
-//! - **checksum 与构造**：编码路径不再额外 `BytesMut` 拷贝去算 checksum；改成对
-//!   `[&header, &data]` 两段切片串接喂入 `xxh3_64`（通过 `extend_from_slice` 到一个
-//!   预先 reserve 好的小 buffer 中，等价但更直观）。
-//! - `encode_message` / `decode_message` 不再 `self.clone()` + `&mut codec`；直接以
-//!   `&mut BytesMut` 私有路径实现，公开方法只是薄封装。
+//! - **checksum 与构造**：编码路径不再额外通过 `BytesMut` 拷贝计算 checksum；而是把
+//!   `[&header, &data]` 两段切片串起来喂给 `xxh3_64`（先 `extend_from_slice` 到一个
+//!   预留好容量的小 buffer 中，做法等价但更直观）。
+//! - `encode_message` / `decode_message` 不再走 `self.clone()` + `&mut codec`；而是直接
+//!   通过 `&mut BytesMut` 的私有路径实现，公开方法只是薄封装。
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
@@ -54,11 +54,11 @@ use crate::pipeline::error::TwoPartCodecError;
 
 // === SECTION: 线协议常量与编译期不变式 ===
 
-/// `header_len` 字段宽度（u64 BE）。
+/// `header_len` 字段宽度（u64 大端序）。
 const HEADER_LEN_WIDTH: usize = 8;
-/// `body_len` 字段宽度（u64 BE）。
+/// `body_len` 字段宽度（u64 大端序）。
 const BODY_LEN_WIDTH: usize = 8;
-/// `checksum` 字段宽度（u64 BE）。
+/// `checksum` 字段宽度（u64 大端序）。
 const CHECKSUM_WIDTH: usize = 8;
 /// 帧前缀总长度：`header_len + body_len + checksum`。
 const FRAME_PREFIX_LEN: usize = HEADER_LEN_WIDTH + BODY_LEN_WIDTH + CHECKSUM_WIDTH;
@@ -70,10 +70,10 @@ const _: () = assert!(FRAME_PREFIX_LEN == 24);
 
 // === SECTION: 私有 helper ===
 
-/// 串接 `checked_add` 计算 `prefix + header + body`；溢出转 `MessageTooLarge`。
+/// 串接 `checked_add` 计算 `prefix + header + body`；溢出时转成 `MessageTooLarge`。
 ///
 /// 错误中第一项填 `usize::MAX`、第二项填 `max_message_size.unwrap_or(usize::MAX)`：
-/// 这是 lib-copy 原始行为，调用方据此区分"溢出"与"具体超限"。
+/// 这是约定行为，调用方据此区分“溢出”和“具体超限”。
 #[inline]
 fn compute_total_len(
     header_len: usize,
@@ -89,7 +89,7 @@ fn compute_total_len(
         ))
 }
 
-/// 当 `max_message_size` 设置且 `total_len` 超限时返回 `MessageTooLarge(total, max)`。
+/// 当 `max_message_size` 已设置且 `total_len` 超限时，返回 `MessageTooLarge(total, max)`。
 #[inline]
 fn enforce_max(total_len: usize, max_message_size: Option<usize>) -> Result<(), TwoPartCodecError> {
     if let Some(max) = max_message_size
@@ -100,11 +100,11 @@ fn enforce_max(total_len: usize, max_message_size: Option<usize>) -> Result<(), 
     Ok(())
 }
 
-/// 计算 `[header || data]` 的 xxh3_64 校验和；仅 debug 构建调用。
+/// 计算 `[header || data]` 的 xxh3_64 校验和；仅在 debug 构建中调用。
 #[cfg(debug_assertions)]
 #[inline]
 fn compute_checksum(header: &[u8], data: &[u8]) -> u64 {
-    // 一次预 reserve，避免增长引发再分配。
+    // 一次性预留容量，避免增长时再次分配。
     let mut hash_buf = BytesMut::with_capacity(header.len() + data.len());
     hash_buf.extend_from_slice(header);
     hash_buf.extend_from_slice(data);
@@ -123,7 +123,7 @@ impl TwoPartCodec {
         TwoPartCodec { max_message_size }
     }
 
-    /// Encodes a `TwoPartMessage` into `Bytes`, enforcing `max_message_size`.
+    /// 将 `TwoPartMessage` 编码为 `Bytes`，并强制检查 `max_message_size`。
     pub fn encode_message(&self, msg: TwoPartMessage) -> Result<Bytes, TwoPartCodecError> {
         let mut buf = BytesMut::new();
         // 走与 Encoder trait 完全一致的路径，避免分叉。
@@ -132,7 +132,7 @@ impl TwoPartCodec {
         Ok(buf.freeze())
     }
 
-    /// Decodes a `TwoPartMessage` from `Bytes`, enforcing `max_message_size`.
+    /// 从 `Bytes` 解码出 `TwoPartMessage`，并强制检查 `max_message_size`。
     pub fn decode_message(&self, data: Bytes) -> Result<TwoPartMessage, TwoPartCodecError> {
         let mut buf = BytesMut::from(&data[..]);
         let mut codec = self.clone();
@@ -150,12 +150,12 @@ impl Decoder for TwoPartCodec {
     type Error = TwoPartCodecError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // 帧前缀（24 字节：header_len + body_len + checksum）未集齐 → 等待更多数据。
+        // 帧前缀（24 字节：header_len + body_len + checksum）未集齐时，等待更多数据。
         if src.len() < FRAME_PREFIX_LEN {
             return Ok(None);
         }
 
-        // 仅 peek 长度与 checksum，不消费 src，便于上限超限/数据未齐时原地决策。
+        // 只查看长度和 checksum，不消费 src，方便在超限或数据未齐时原地决策。
         let mut cursor = &src[..];
         let header_len = cursor.get_u64() as usize;
         let body_len = cursor.get_u64() as usize;
@@ -164,17 +164,17 @@ impl Decoder for TwoPartCodec {
         let total_len = compute_total_len(header_len, body_len, self.max_message_size)?;
         enforce_max(total_len, self.max_message_size)?;
 
-        // 数据未到齐 → 等待更多。
+        // 数据未到齐时，等待更多。
         if src.len() < total_len {
             return Ok(None);
         }
 
-        // 确认可推进；消费前缀。
+        // 确认可以推进后，消费前缀。
         src.advance(FRAME_PREFIX_LEN);
 
         #[cfg(debug_assertions)]
         {
-            // 对端 checksum 为 0 视为"禁用校验"（向后兼容）。
+            // 对端 checksum 为 0 时，视为“禁用校验”（向后兼容）。
             if _checksum != 0 {
                 let bytes_to_hash =
                     header_len
@@ -206,7 +206,7 @@ impl Encoder<TwoPartMessage> for TwoPartCodec {
         let total_len = compute_total_len(header_len, body_len, self.max_message_size)?;
         enforce_max(total_len, self.max_message_size)?;
 
-        // 一次预 reserve，写入时不再扩容。
+        // 先预留一次容量，写入时不再扩容。
         dst.reserve(total_len);
 
         dst.put_u64(header_len as u64);
@@ -315,27 +315,27 @@ mod tests {
     //!
     //! | 用例 | 覆盖目标 |
     //! |------|----------|
-    //! | `test_message_with_header_and_data` | round-trip：header + data 都非空（lib-copy） |
-    //! | `test_message_with_only_header` | round-trip：仅 header（lib-copy） |
-    //! | `test_message_with_only_data` | round-trip：仅 data（lib-copy） |
-    //! | `test_empty_message` | round-trip：完全空帧（lib-copy） |
-    //! | `test_message_under_max_size` | total < max 通过（lib-copy） |
-    //! | `test_message_exactly_at_max_size` | total == max 通过（lib-copy） |
-    //! | `test_message_over_max_size` | encode 端 total > max → `MessageTooLarge`（lib-copy） |
-    //! | `test_decoding_message_over_max_size` | decode 端 total > max → `MessageTooLarge`（lib-copy） |
-    //! | `test_checksum_mismatch` | debug 下 checksum 失败 → `ChecksumMismatch`（lib-copy） |
-    //! | `test_partial_data` | 数据不全 → `InvalidMessage`（lib-copy） |
-    //! | `test_multiple_messages_in_buffer` | 单 buffer 多帧顺序消费（lib-copy） |
-    //! | `test_streaming_read` | `FramedRead` 完整读一帧（lib-copy） |
-    //! | `test_streaming_partial_reads` | `FramedRead` 分片读，5 字节 chunk（lib-copy） |
-    //! | `test_streaming_corrupted_data` | `FramedRead` 损坏数据 → `ChecksumMismatch`（lib-copy） |
-    //! | `test_empty_stream` | 空流不产出消息（lib-copy） |
-    //! | `test_streaming_multiple_messages` | `FramedRead` 多帧依次产出（lib-copy） |
-    //! | `test_message_without_max_size` | 无上限时大消息往返（lib-copy） |
+    //! | `test_message_with_header_and_data` | round-trip：header + data 都非空 |
+    //! | `test_message_with_only_header` | round-trip：仅 header |
+    //! | `test_message_with_only_data` | round-trip：仅 data |
+    //! | `test_empty_message` | round-trip：完全空帧 |
+    //! | `test_message_under_max_size` | total < max 通过 |
+    //! | `test_message_exactly_at_max_size` | total == max 通过 |
+    //! | `test_message_over_max_size` | encode 端 total > max → `MessageTooLarge` |
+    //! | `test_decoding_message_over_max_size` | decode 端 total > max → `MessageTooLarge` |
+    //! | `test_checksum_mismatch` | debug 下 checksum 失败 → `ChecksumMismatch` |
+    //! | `test_partial_data` | 数据不全 → `InvalidMessage` |
+    //! | `test_multiple_messages_in_buffer` | 单 buffer 多帧顺序消费 |
+    //! | `test_streaming_read` | `FramedRead` 完整读一帧 |
+    //! | `test_streaming_partial_reads` | `FramedRead` 分片读，5 字节 chunk |
+    //! | `test_streaming_corrupted_data` | `FramedRead` 损坏数据 → `ChecksumMismatch` |
+    //! | `test_empty_stream` | 空流不产出消息 |
+    //! | `test_streaming_multiple_messages` | `FramedRead` 多帧依次产出 |
+    //! | `test_message_without_max_size` | 无上限时大消息往返 |
     //! | `test_decode_returns_none_when_prefix_incomplete` | < 24 字节 → `Ok(None)` |
     //! | `test_decode_returns_none_when_payload_incomplete` | 前缀齐、payload 部分 → `Ok(None)` |
     //! | `test_max_size_exact_boundary_encode_decode` | max=total 与 max=total-1/total+1 三态 |
-    //! | `test_decoder_length_field_overflow_yields_too_large` | header_len=u64::MAX → `MessageTooLarge(usize::MAX, _)` |
+    //! | `test_decoder_length_field_overflow_yields_too_large` | `header_len` 溢出时返回 `MessageTooLarge(usize::MAX, _)` |
     //! | `test_encoder_buffer_total_length_matches_frame` | encode 后 `dst.len() == total_len` |
     //! | `test_optional_parts_and_helpers` | `parts/optional_parts/header/data` 一致性 |
     //! | `test_into_message_type_all_variants` | 4 个变体全覆盖 |
@@ -358,7 +358,7 @@ mod tests {
 
     use super::*;
 
-    /// Test encoding and decoding of a message with both header and data.
+    /// 测试同时包含头部和数据的消息编码与解码。
     #[test]
     fn test_message_with_header_and_data() {
         let header_data = Bytes::from("header data");
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(decoded.data, data);
     }
 
-    /// Test encoding and decoding of a message with only header.
+    /// 测试仅包含头部的消息编码与解码。
     #[test]
     fn test_message_with_only_header() {
         let header_data = Bytes::from("header only");
@@ -387,7 +387,7 @@ mod tests {
         assert!(decoded.data.is_empty());
     }
 
-    /// Test encoding and decoding of a message with only data.
+    /// 测试仅包含数据的消息编码与解码。
     #[test]
     fn test_message_with_only_data() {
         let data = Bytes::from("data only");
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(decoded.data, data);
     }
 
-    /// Test encoding and decoding of an empty message.
+    /// 测试空消息的编码与解码。
     #[test]
     fn test_empty_message() {
         let message = TwoPartMessage::from_parts(Bytes::new(), Bytes::new());
@@ -414,7 +414,7 @@ mod tests {
         assert!(decoded.data.is_empty());
     }
 
-    /// Test encoding and decoding of a message under max_message_size.
+    /// 测试不超过最大消息大小的消息编码与解码。
     #[test]
     fn test_message_under_max_size() {
         let max_size = 1024;
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(decoded.data, body_data);
     }
 
-    /// Test encoding and decoding of a message exactly at max_message_size.
+    /// 测试恰好等于最大消息大小的消息编码与解码。
     #[test]
     fn test_message_exactly_at_max_size() {
         let max_size = 1024;
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(decoded.data, body_data);
     }
 
-    /// Test encoding of a message over max_message_size.
+    /// 测试超过最大消息大小的消息编码。
     #[test]
     fn test_message_over_max_size() {
         let max_size = 1024;
@@ -479,7 +479,7 @@ mod tests {
         }
     }
 
-    /// Test decoding of a message over max_message_size.
+    /// 测试超过最大消息大小的消息解码。
     #[test]
     fn test_decoding_message_over_max_size() {
         let max_size = 1024;
@@ -506,7 +506,7 @@ mod tests {
         }
     }
 
-    /// Test decoding of a message with checksum mismatch.
+    /// 测试校验和不匹配时的消息解码。
     #[test]
     #[cfg(debug_assertions)]
     fn test_checksum_mismatch() {
@@ -525,13 +525,13 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(TwoPartCodecError::ChecksumMismatch) = result {
-            // Test passed
+            // 测试通过。
         } else {
             panic!("Expected ChecksumMismatch error");
         }
     }
 
-    /// Test partial data arrival and ensure decoder waits for full message.
+    /// 测试数据分段到达时解码器会等待完整消息。
     #[test]
     fn test_partial_data() {
         let header_data = Bytes::from("header data");
@@ -547,13 +547,13 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(TwoPartCodecError::InvalidMessage(_)) = result {
-            // Test passed
+            // 测试通过。
         } else {
             panic!("Expected InvalidMessage error");
         }
     }
 
-    /// Test multiple messages concatenated in the same buffer.
+    /// 测试多个消息拼接在同一缓冲区中的情况。
     #[test]
     fn test_multiple_messages_in_buffer() {
         let header_data1 = Bytes::from("header1");
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(decoded_msg2.data, data2);
     }
 
-    /// Test simulating reading from a byte stream like a TCP socket.
+    /// 测试模拟从类似 TCP socket 的字节流中读取。
     #[tokio::test]
     async fn test_streaming_read() {
         let header_data = Bytes::from("header data");
@@ -605,7 +605,7 @@ mod tests {
         }
     }
 
-    /// Test simulating partial reads from a TCP socket
+    /// 测试模拟从 TCP socket 进行部分读取。
     #[tokio::test]
     async fn test_streaming_partial_reads() {
         let header_data = Bytes::from("header data");
@@ -653,7 +653,7 @@ mod tests {
         }
     }
 
-    /// Test handling of corrupted data in a stream
+    /// 测试处理流中的损坏数据。
     #[tokio::test]
     #[cfg(debug_assertions)]
     async fn test_streaming_corrupted_data() {
@@ -673,7 +673,7 @@ mod tests {
         if let Some(result) = framed_read.next().await {
             assert!(result.is_err());
             if let Err(TwoPartCodecError::ChecksumMismatch) = result {
-                // Test passed
+                // 测试通过。
             } else {
                 panic!("Expected ChecksumMismatch error");
             }
@@ -682,7 +682,7 @@ mod tests {
         }
     }
 
-    /// Test handling of empty streams
+    /// 测试处理空流。
     #[tokio::test]
     async fn test_empty_stream() {
         let codec = TwoPartCodec::new(None);
@@ -693,7 +693,7 @@ mod tests {
         }
     }
 
-    /// Test decoding of multiple messages from a stream
+    /// 测试从流中解码多个消息。
     #[tokio::test]
     async fn test_streaming_multiple_messages() {
         let header_data1 = Bytes::from("header1");
@@ -734,7 +734,7 @@ mod tests {
         }
     }
 
-    /// Test encoding and decoding without max_message_size.
+    /// 测试不设置最大消息大小时的编码与解码。
     #[test]
     fn test_message_without_max_size() {
         let header_data = Bytes::from(vec![b'h'; 1024 * 1024]);

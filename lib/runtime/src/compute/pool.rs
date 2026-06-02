@@ -502,7 +502,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // === lib 标准契约测试 ============================
+    // === 标准契约测试 ============================
     // ------------------------------------------------------------------
 
     #[tokio::test]
@@ -511,7 +511,7 @@ mod tests {
 
         let result = pool
             .execute(|| {
-                // Simulate CPU-intensive work
+                // 模拟一段 CPU 密集型工作
                 let mut sum = 0u64;
                 for i in 0..1000 {
                     sum += i;
@@ -529,7 +529,7 @@ mod tests {
         use std::sync::Arc;
         let pool = Arc::new(ComputePool::with_defaults().unwrap());
 
-        // Test using execute_sync from spawn_blocking
+        // 在 spawn_blocking 中测试 execute_sync
         let pool_clone = pool.clone();
         let result = tokio::task::spawn_blocking(move || {
             pool_clone.execute_sync(|| {
@@ -573,7 +573,7 @@ mod tests {
                     });
                 }
 
-                drop(tx); // Close sender so receiver can finish
+                drop(tx); // 关闭发送端，接收端才能结束迭代
 
                 let mut results = vec![0; 4];
                 for (i, val) in rx {
@@ -584,7 +584,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Results may be in any order due to parallel execution
+        // 并行执行导致结果顺序不确定，排序后再断言
         result.sort();
         assert_eq!(result, vec![0, 2, 4, 6]);
     }

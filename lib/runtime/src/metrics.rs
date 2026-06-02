@@ -63,13 +63,13 @@ use regex::Regex;
 use std::any::Any;
 use std::collections::HashMap;
 
-// Import commonly used items to avoid verbose prefixes
+// 导入常用项，避免在代码中反复写出冗长的路径前缀
 use prometheus_names::{
     build_servicegroup_metric_name, labels, name_prefix, sanitize_prometheus_label,
     sanitize_prometheus_name, work_handler,
 };
 
-// Pipeline imports for portname creation
+// 创建 portname 所需的 pipeline 相关导入
 use crate::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn, async_trait,
     network::Ingress,
@@ -78,11 +78,11 @@ use crate::protocols::annotated::Annotated;
 use crate::stream;
 use crate::stream::StreamExt;
 
-// Prometheus imports
+// Prometheus 相关导入
 use prometheus::Encoder;
 
-/// Validate that a label slice has no duplicate keys.
-/// Returns Ok(()) when all keys are unique; otherwise returns an error naming the duplicate key.
+/// 校验标签切片中没有重复的键名。
+/// 当所有键名唯一时返回 Ok(())；否则返回错误并指出重复的键名。
 // 中文说明：
 // 1. 这个辅助函数会遍历传入的标签列表，检查每个标签键名是否只出现一次。
 // 2. 一旦发现重复键，就立即返回错误，避免后续指标注册时出现歧义或冲突。
@@ -102,17 +102,17 @@ fn validate_no_duplicate_label_keys(labels: &[(&str, &str)]) -> anyhow::Result<(
     Ok(())
 }
 
-// === SECTION: PrometheusMetric trait ===
+// === 分节：PrometheusMetric trait ===
 
 /// 给所有 Prometheus 指标类型加上的统一构造门面。`create_metric` 据此泛型分派。
 pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 'static {
-    /// Create a new metric with the given options
+    /// 根据给定的指标选项创建一个新指标。
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error>
     where
         Self: Sized;
 
-    /// Create a new metric with histogram options and custom buckets
-    /// This is a default implementation that will panic for non-histogram metrics
+    /// 根据 Histogram 选项与自定义桶创建一个新指标。
+    /// 这是一个默认实现，用于非 Histogram 指标时会直接 panic。
     // 中文说明：
     // 1. 这是给不支持 Histogram 的指标类型准备的默认实现。
     // 2. 如果调用方误把这套接口用于非 Histogram 指标，这里会直接 panic，尽早暴露使用错误。
@@ -127,8 +127,8 @@ pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 
         panic!("{message}");
     }
 
-    /// Create a new metric with counter options and label names (for CounterVec)
-    /// This is a default implementation that will panic for non-countervec metrics
+    /// 根据 Counter 选项与标签名创建一个新指标（用于 CounterVec）。
+    /// 这是一个默认实现，用于非 CounterVec 指标时会直接 panic。
     // 中文说明：
     // 1. 这是给不支持带标签名构造的指标类型准备的默认实现。
     // 2. 如果错误地在不兼容的指标类型上调用它，会直接 panic，避免静默产生错误结果。
@@ -144,7 +144,7 @@ pub trait PrometheusMetric: prometheus::core::Collector + Clone + Send + Sync + 
     }
 }
 
-// Implement the trait for Counter, IntCounter, and Gauge
+// 为 Counter、IntCounter、Gauge 等基础类型实现该 trait
 impl PrometheusMetric for prometheus::Counter {
     // 中文说明：把统一的 trait 构造入口转发给 Counter 自己的 with_opts，并原样返回构造结果。
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
@@ -231,7 +231,7 @@ impl PrometheusMetric for prometheus::IntCounterVec {
     }
 }
 
-// Implement the trait for Histogram
+// 为 Histogram 类型实现该 trait
 impl PrometheusMetric for prometheus::Histogram {
     // 中文说明：先把通用 Opts 转成 HistogramOpts，再构造 Histogram 指标。
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
@@ -254,7 +254,7 @@ impl PrometheusMetric for prometheus::Histogram {
     }
 }
 
-// Implement the trait for CounterVec
+// 为 CounterVec 类型实现该 trait
 impl PrometheusMetric for prometheus::CounterVec {
     // 中文说明：CounterVec 必须伴随标签名一起创建，因此误用此入口时直接 panic。
     fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
@@ -435,8 +435,8 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     Ok(prometheus_metric)
 }
 
-/// Wrapper struct that provides access to metrics functionality
-/// This struct is accessed via the `.metrics()` method on DistributedRuntime, Namespace, ServiceGroup, and PortName
+/// 提供指标功能访问入口的包装结构。
+/// 该结构通过 DistributedRuntime、Namespace、ServiceGroup、PortName 上的 `.metrics()` 方法访问。
 pub struct Metrics<H: MetricsHierarchy> {
     hierarchy: H,
 }
@@ -448,28 +448,28 @@ impl<H: MetricsHierarchy> Metrics<H> {
         metrics
     }
 
-    // TODO: Add support for additional Prometheus metric types:
-    // - Counter: ✅ IMPLEMENTED - create_counter()
-    // - CounterVec: ✅ IMPLEMENTED - create_countervec()
-    // - Gauge: ✅ IMPLEMENTED - create_gauge()
-    // - GaugeVec: ✅ IMPLEMENTED - create_gaugevec()
-    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
-    // - Histogram: ✅ IMPLEMENTED - create_histogram()
-    // - HistogramVec with custom buckets: create_histogram_with_buckets()
-    // - Info: create_info() - for info metrics with labels
-    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
-    // - IntCounterVec: ✅ IMPLEMENTED - create_intcountervec()
-    // - IntGauge: ✅ IMPLEMENTED - create_intgauge()
-    // - IntGaugeVec: ✅ IMPLEMENTED - create_intgaugevec()
-    // - Stateset: create_stateset() - for state-based metrics
-    // - Summary: create_summary() - for quantiles and sum/count metrics
-    // - SummaryVec: create_summary_vec() - for labeled summaries
-    // - Untyped: create_untyped() - for untyped metrics
+    // 待办：补充更多 Prometheus 指标类型的支持：
+    // - Counter：已实现 - create_counter()
+    // - CounterVec：已实现 - create_countervec()
+    // - Gauge：已实现 - create_gauge()
+    // - GaugeVec：已实现 - create_gaugevec()
+    // - GaugeHistogram：create_gauge_histogram() - 用于 gauge 直方图
+    // - Histogram：已实现 - create_histogram()
+    // - 带自定义桶的 HistogramVec：create_histogram_with_buckets()
+    // - Info：create_info() - 用于带标签的 info 指标
+    // - IntCounter：已实现 - create_intcounter()
+    // - IntCounterVec：已实现 - create_intcountervec()
+    // - IntGauge：已实现 - create_intgauge()
+    // - IntGaugeVec：已实现 - create_intgaugevec()
+    // - Stateset：create_stateset() - 用于状态类指标
+    // - Summary：create_summary() - 用于分位数与 sum/count 指标
+    // - SummaryVec：create_summary_vec() - 用于带标签的 summary
+    // - Untyped：create_untyped() - 用于无类型指标
     //
-    // NOTE: The order of create_* methods below is mirrored in lib/bindings/python/rust/lib.rs::Metrics
-    // Keep them synchronized when adding new metric types
+    // 注意：下面 create_* 方法的顺序与 lib/bindings/python/rust/lib.rs::Metrics 中保持一致，
+    // 新增指标类型时请同步两处。
 
-    /// Create a Counter metric
+    /// 创建一个 Counter 指标
     // 中文说明：创建一个无动态标签的 Counter 指标，并把请求转发给统一的 create_metric 入口。
     pub fn create_counter(
         &self,
@@ -481,7 +481,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(counter)
     }
 
-    /// Create a CounterVec metric with label names (for dynamic labels)
+    /// 创建一个带标签名的 CounterVec 指标（用于动态标签）
     // 中文说明：创建 CounterVec，并把动态标签名和值分别传给统一创建逻辑。
     pub fn create_countervec(
         &self,
@@ -501,7 +501,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(counter_vec)
     }
 
-    /// Create a Gauge metric
+    /// 创建一个 Gauge 指标
     // 中文说明：创建一个普通 Gauge 指标，不带额外的动态标签名定义。
     pub fn create_gauge(
         &self,
@@ -513,7 +513,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(gauge)
     }
 
-    /// Create a GaugeVec metric with label names (for dynamic labels)
+    /// 创建一个带标签名的 GaugeVec 指标（用于动态标签）
     // 中文说明：创建 GaugeVec，把动态标签名和对应常量标签值一起交给通用入口处理。
     pub fn create_gaugevec(
         &self,
@@ -533,7 +533,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(gauge_vec)
     }
 
-    /// Create a Histogram metric with custom buckets
+    /// 创建一个带自定义桶的 Histogram 指标
     // 中文说明：创建 Histogram，并允许调用方传入自定义桶配置覆盖默认桶。
     pub fn create_histogram(
         &self,
@@ -546,7 +546,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(histogram)
     }
 
-    /// Create an IntCounter metric
+    /// 创建一个 IntCounter 指标
     // 中文说明：创建 IntCounter，适用于以整数形式单调递增统计的场景。
     pub fn create_intcounter(
         &self,
@@ -558,7 +558,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(int_counter)
     }
 
-    /// Create an IntCounterVec metric with label names (for dynamic labels)
+    /// 创建一个带标签名的 IntCounterVec 指标（用于动态标签）
     // 中文说明：创建 IntCounterVec，并显式传入动态标签名集合。
     pub fn create_intcountervec(
         &self,
@@ -578,7 +578,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(int_counter_vec)
     }
 
-    /// Create an IntGauge metric
+    /// 创建一个 IntGauge 指标
     // 中文说明：创建 IntGauge，用于整数型可增可减指标。
     pub fn create_intgauge(
         &self,
@@ -590,7 +590,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(int_gauge)
     }
 
-    /// Create an IntGaugeVec metric with label names (for dynamic labels)
+    /// 创建一个带标签名的 IntGaugeVec 指标（用于动态标签）
     // 中文说明：创建 IntGaugeVec，并把动态标签名与常量标签值传给统一实现。
     pub fn create_intgaugevec(
         &self,
@@ -610,7 +610,7 @@ impl<H: MetricsHierarchy> Metrics<H> {
         Ok(int_gauge_vec)
     }
 
-    /// Get metrics in Prometheus text format
+    /// 以 Prometheus 文本格式获取指标
     // 中文说明：从当前层级对应的 registry 中导出 Prometheus 文本格式结果，供抓取接口直接使用。
     pub fn prometheus_expfmt(&self) -> anyhow::Result<String> {
         let registry = self.hierarchy.get_metrics_registry();
@@ -618,43 +618,41 @@ impl<H: MetricsHierarchy> Metrics<H> {
     }
 }
 
-/// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
-/// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
-/// generating output in Prometheus text format.
+/// 该 trait 应由所有指标注册表实现，包括 Prometheus、Envy、OpenTelemetry 等。
+/// 它提供了创建与管理指标、组织子注册表、以及生成 Prometheus 文本格式输出的统一接口。
 use crate::traits::DistributedRuntimeProvider;
 
 pub trait MetricsHierarchy: Send + Sync {
     // ========================================================================
-    // Required methods - must be implemented by all types
+    // 必需方法 — 所有类型都必须实现
     // ========================================================================
 
-    /// Get the name of this hierarchy (without any hierarchy prefix)
+    /// 获取该层级的名称（不含任何层级前缀）
     fn basename(&self) -> String;
 
-    /// Get the parent hierarchies as actual objects (not strings)
-    /// Returns a vector of hierarchy references, ordered from root to immediate parent.
-    /// For example, an PortName would return [DRT, Namespace, ServiceGroup].
+    /// 以实际对象（而非字符串）的形式获取父层级。
+    /// 返回一个层级引用列表，从根到直接父层依次排列。
+    /// 例如，PortName 会返回 [DRT, Namespace, ServiceGroup]。
     fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy>;
 
-    /// Get a reference to this hierarchy's metrics registry
+    /// 获取该层级所持有的指标注册表引用
     fn get_metrics_registry(&self) -> &MetricsRegistry;
 
     // ========================================================================
-    // Provided methods - have default implementations
+    // 提供方法 — 已有默认实现
     // ========================================================================
 
-    /// Get the connection ID (discovery instance ID) for this hierarchy level.
+    /// 获取该层级的连接 ID（discovery 实例 ID）。
     ///
-    /// Returns `Some(id)` when the hierarchy has access to the DistributedRuntime
-    /// (e.g. Namespace, ServiceGroup, PortName). Used by `create_metric()` to auto-inject
-    /// the `worker_id` label. Returns `None` by default.
+    /// 当层级可以访问 DistributedRuntime（例如 Namespace、ServiceGroup、PortName）时
+    /// 返回 `Some(id)`。`create_metric()` 据此自动注入 `worker_id` 标签。默认返回 `None`。
     // 中文说明：默认情况下层级对象不提供连接 ID，因此返回 None，具体类型需要时再自行覆写。
     fn connection_id(&self) -> Option<u64> {
         Option::<u64>::None
     }
 
-    /// Access the metrics interface for this hierarchy
-    /// This is a provided method that works for any type implementing MetricsHierarchy
+    /// 访问该层级的指标接口
+    /// 这是一个提供方法，适用于任何实现了 MetricsHierarchy 的类型
     // 中文说明：为任意实现了 MetricsHierarchy 的对象生成一个轻量级 Metrics 包装器，便于继续调用 create_* 系列方法。
     fn metrics(&self) -> Metrics<&Self>
     where
@@ -665,7 +663,7 @@ pub trait MetricsHierarchy: Send + Sync {
     }
 }
 
-// Blanket implementation for references to types that implement MetricsHierarchy
+// 为实现了 MetricsHierarchy 的类型的引用提供通用（blanket）实现
 impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
     // 中文说明：把引用类型的 basename 调用继续转发给底层真实对象。
     fn basename(&self) -> String {
@@ -692,51 +690,47 @@ impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
     }
 }
 
-/// Type alias for runtime callback functions to reduce complexity
+/// 运行时回调函数的类型别名，用于降低类型复杂度
 ///
-/// This type represents an Arc-wrapped callback function that can be:
-/// - Shared efficiently across multiple threads and contexts
-/// - Cloned without duplicating the underlying closure
-/// - Used in generic contexts requiring 'static lifetime
+/// 该类型表示一个 Arc 包装的回调函数，具备以下特性：
+/// - 可在多个线程与上下文间高效共享
+/// - 可克隆而不复制底层闭包
+/// - 可用于需要 'static 生命周期的泛型上下文
 ///
-/// The Arc wrapper is included in the type to make sharing explicit.
+/// 类型中显式包含 Arc 包装以明确表达共享语义。
 pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
 
-/// Type alias for exposition text callback functions that return Prometheus text
+/// 返回 Prometheus 文本的曝光文本回调函数的类型别名
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
-/// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
+/// 为某个层级保存 Prometheus 注册表及其关联回调的结构。
 ///
-/// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
-/// on cloned instances (e.g., cloned Client/PortName) are visible to the original.
+/// 所有字段都是 Arc 包装的，因此克隆时会共享状态。这保证在克隆实例
+/// （例如克隆的 Client/PortName）上注册的指标对原始对象可见。
 #[derive(Clone)]
 pub struct MetricsRegistry {
-    /// The Prometheus registry for this hierarchy.
-    /// Arc-wrapped so clones share the same registry (metrics registered on clones are visible everywhere).
+    /// 该层级的 Prometheus 注册表。
+    /// 采用 Arc 包装，使克隆体共享同一注册表（在克隆体上注册的指标处处可见）。
     pub prometheus_registry: Arc<std::sync::RwLock<prometheus::Registry>>,
 
-    /// Child registries included when emitting combined `/metrics` output.
+    /// 在输出合并的 `/metrics` 时需要纳入的子注册表。
     ///
-    /// Why this exists:
-    /// - Previously, `create_metric()` registered every collector into *all* parent registries
-    ///   (PortName → ServiceGroup → Namespace → DRT) so scraping the root registry included everything.
-    /// - That fan-out caused Prometheus collisions when different portnames tried to register the
-    ///   same metric name with different const-labels (descriptor mismatch).
-    ///
-    /// We now register metrics only into the local hierarchy registry to avoid collisions.
-    /// `child_registries` rebuilds “what to scrape” as a tree of registries so `/metrics` can:
-    /// - traverse registries recursively,
-    /// - merge metric families into one exposition payload,
-    /// - warn/drop exact duplicate series, while allowing same metric name with different labels.
+    /// 设计原因：
+    /// - 指标只注册到当前层级的本地注册表，避免不同 portname 用不同常量标签
+    ///   注册同名指标时出现 Prometheus 描述符冲突。
+    /// - `child_registries` 把“需要采集的内容”重建为一棵注册表树，使 `/metrics` 可以：
+    ///   - 递归遍历注册表；
+    ///   - 把各指标族合并为一份曝光负载；
+    ///   - 对完全重复的序列告警/丢弃，同时允许同名指标携带不同标签。
     child_registries: Arc<std::sync::RwLock<Vec<MetricsRegistry>>>,
 
-    /// Update callbacks invoked before metrics are scraped.
-    /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
+    /// 在采集指标前调用的更新回调。
+    /// 使用 Arc 包装以在克隆间保留回调（防止 MetricsRegistry 被克隆时丢失回调）。
     pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
 
-    /// Callbacks that return Prometheus exposition text appended to metrics output.
-    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at PortName remain accessible at DRT).
+    /// 返回 Prometheus 曝光文本、追加到指标输出末尾的回调。
+    /// 使用 Arc 包装以在克隆间保留回调（例如在 PortName 注册的 vLLM 回调在 DRT 仍可访问）。
     pub prometheus_expfmt_callbacks:
         Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
 }
@@ -762,7 +756,7 @@ impl std::fmt::Debug for MetricsRegistry {
 }
 
 impl MetricsRegistry {
-    /// Create a new metrics registry with an empty Prometheus registry and callback lists
+    /// 创建一个新的指标注册表，包含空的 Prometheus 注册表与回调列表
     // 中文说明：初始化一个全新的 MetricsRegistry，并为 registry、子节点列表以及两类回调列表分别创建共享容器。
     pub fn new() -> Self {
         let prometheus_registry = Arc::new(std::sync::RwLock::new(prometheus::Registry::new()));
@@ -778,9 +772,9 @@ impl MetricsRegistry {
         }
     }
 
-    /// Add a child registry to be included in combined /metrics output.
+    /// 添加一个子注册表，使其被纳入合并的 /metrics 输出中。
     ///
-    /// Dedup is by underlying Prometheus registry pointer, so repeated registration via clones is safe.
+    /// 按底层 Prometheus 注册表指针去重，因此通过克隆体重复注册是安全的。
     // 中文说明：把子 registry 挂到当前节点下，并通过底层 registry 指针去重，避免同一个子节点被重复收集。
     pub fn add_child_registry(&self, child: &MetricsRegistry) {
         let child_ptr = Arc::as_ptr(&child.prometheus_registry);
@@ -797,11 +791,11 @@ impl MetricsRegistry {
 
     // 中文说明：递归收集当前 registry 以及所有子 registry，生成一次完整抓取时需要遍历的 registry 列表。
     fn registries_for_combined_scrape(&self) -> Vec<MetricsRegistry> {
-        // Traverse child registries recursively so `prometheus_expfmt()` on any hierarchy
-        // (DRT/namespace/servicegroup/portname) includes metrics from its descendants.
+        // 递归遍历子 registry，使任意层级（DRT/namespace/servicegroup/portname）上调用
+        // `prometheus_expfmt()` 都能包含其后代的指标。
         //
-        // Dedup by underlying Prometheus registry pointer so multiple paths (e.g. also registering
-        // directly on the root) won't duplicate output.
+        // 按底层 Prometheus 注册表指针去重，使多条路径（例如同时直接注册到根节点）
+        // 不会重复输出。
         // 中文说明：深度优先遍历 registry 树，把尚未见过的底层 registry 依次加入输出列表。
         fn visit(
             registry: &MetricsRegistry,
@@ -841,11 +835,11 @@ impl MetricsRegistry {
     ///    确保抓取前每个 registry 的内部状态已经刷新。
     /// 2. 合并阶段使用 `BTreeMap<String, MetricFamily>` 作为聚合容器：
     ///    `BTreeMap` 的遍历顺序天然按 family 名升序，最终编码时无需再做显式 sort，
-    ///    输出顺序与历史实现严格一致。
+    ///    输出顺序与注册顺序无关、始终保持稳定。
     /// 3. 使用私有 `series_dedup_key` 把"family 名 + 排序后的 label 对"压成一个
     ///    可哈希字符串，集中表达"同 series"的判定逻辑，避免哈希键构造代码散落。
     /// 4. 把合并后的 family 编码为文本，再依次追加每个 registry 的 exposition
-    ///    callback 输出（与历史实现完全相同的换行规则）。
+    ///    callback 输出（使用统一的换行拼接规则）。
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
         use std::collections::BTreeMap;
 
@@ -953,21 +947,21 @@ impl MetricsRegistry {
         Ok(result)
     }
 
-    /// Add a callback function that receives a reference to any MetricsHierarchy
+    /// 添加一个接收 MetricsHierarchy 引用的回调函数
     // 中文说明：注册一个抓取前执行的更新回调，后续 scrape 时会按顺序触发这些回调。
     pub fn add_update_callback(&self, callback: PrometheusUpdateCallback) {
         let mut callbacks = self.prometheus_update_callbacks.write().unwrap();
         callbacks.push(callback);
     }
 
-    /// Add an exposition text callback that returns Prometheus text
+    /// 添加一个返回 Prometheus 文本的曝光文本回调
     // 中文说明：注册一个额外文本回调，用于在标准指标文本后面追加自定义 exposition 内容。
     pub fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
         let mut callbacks = self.prometheus_expfmt_callbacks.write().unwrap();
         callbacks.push(callback);
     }
 
-    /// Execute all update callbacks and return their results
+    /// 执行所有更新回调并返回它们的结果
     // 中文说明：顺序执行所有更新回调，并把每个回调的结果完整收集返回给调用方处理。
     pub fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
         let callbacks = self.prometheus_update_callbacks.read().unwrap();
@@ -975,7 +969,7 @@ impl MetricsRegistry {
         results
     }
 
-    /// Execute all exposition text callbacks and return their concatenated text
+    /// 执行所有曝光文本回调并返回拼接后的文本
     // 中文说明：依次执行所有 exposition 文本回调，把非空文本按换行规则拼接成一个最终字符串。
     pub fn execute_expfmt_callbacks(&self) -> String {
         let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
@@ -1000,7 +994,7 @@ impl MetricsRegistry {
         output
     }
 
-    /// Add a Prometheus metric collector to this registry
+    /// 把一个 Prometheus 指标 collector 注册到当前 registry
     // 中文说明：把新的 collector 注册到当前 Prometheus registry 中，并把底层注册错误包装成 anyhow 错误返回。
     pub fn add_metric(
         &self,
@@ -1012,7 +1006,7 @@ impl MetricsRegistry {
             .map_err(|e| anyhow::anyhow!("Failed to register metric: {}", e))
     }
 
-    /// Add a Prometheus metric collector, logging a warning on failure instead of returning an error.
+    /// 把一个 Prometheus 指标 collector 注册到当前 registry；失败时记录 warning 而不返回错误。
     // 中文说明：尝试注册 collector；如果失败则仅记录 warning，不把错误继续向上传播。
     pub fn add_metric_or_warn(&self, collector: Box<dyn prometheus::core::Collector>, name: &str) {
         match self.add_metric(collector) {
@@ -1023,14 +1017,14 @@ impl MetricsRegistry {
         }
     }
 
-    /// Get a read guard to the Prometheus registry for scraping
+    /// 获取 Prometheus registry 的只读锁，用于抓取
     // 中文说明：返回底层 Prometheus registry 的只读锁，供外部直接执行 gather 或其他只读操作。
     pub fn get_prometheus_registry(&self) -> std::sync::RwLockReadGuard<'_, prometheus::Registry> {
         let registry = self.prometheus_registry.read().unwrap();
         registry
     }
 
-    /// Returns true if a metric with the given name already exists in the Prometheus registry
+    /// 如果 Prometheus registry 中已经存在指定名称的指标，则返回 true
     // 中文说明：抓取当前 registry 中的所有 metric family，并判断是否已经存在指定名称的指标。
     pub fn has_metric_named(&self, metric_name: &str) -> bool {
         let registry = self.prometheus_registry.read().unwrap();
@@ -1052,8 +1046,8 @@ mod test_helpers {
     use super::prometheus_names::name_prefix;
     use super::*;
 
-    /// Base function to filter Prometheus output lines based on a predicate.
-    /// Returns lines that match the predicate, converted to String.
+    /// 基础函数：根据谓词过滤 Prometheus 输出行。
+    /// 返回所有匹配谓词的行，并转换为 String。
     fn filter_prometheus_lines<F>(input: &str, mut predicate: F) -> Vec<String>
     where
         F: FnMut(&str) -> bool,
@@ -1065,8 +1059,8 @@ mod test_helpers {
             .collect::<Vec<_>>()
     }
 
-    /// Extracts all servicegroup metrics (excluding help text and type definitions).
-    /// Returns only the actual metric lines with values.
+    /// 提取所有 servicegroup 指标（不包含 help 文本与类型定义）。
+    /// 仅返回带值的实际指标行。
     pub fn extract_metrics(input: &str) -> Vec<String> {
         filter_prometheus_lines(input, |line| {
             line.starts_with(&format!("{}_", name_prefix::SERVICEGROUP))
@@ -1075,8 +1069,8 @@ mod test_helpers {
         })
     }
 
-    /// Parses a Prometheus metric line and extracts the name, labels, and value.
-    /// Used instead of fetching metrics directly to test end-to-end results, not intermediate state.
+    /// 解析一行 Prometheus 指标文本，提取其名称、标签与值。
+    /// 用于测试端到端结果而非中间状态，因此不直接读取指标对象。
     ///
     /// # Example
     /// ```
@@ -1122,11 +1116,10 @@ mod test_helpers {
         Some((name, labels, value))
     }
 
-    /// Injects a `worker_id` label into Prometheus metric data lines.
-    /// Prometheus places const labels (like worker_id) before special labels
-    /// (like histogram `le`), so for histogram bucket lines we insert before
-    /// `,le=`. For all other metric lines, we insert before the closing `}`.
-    /// Comment lines and lines without labels are left unchanged.
+    /// 向 Prometheus 指标数据行中注入一个 `worker_id` 标签。
+    /// Prometheus 会把常量标签（如 worker_id）排在特殊标签（如直方图的 `le`）之前，
+    /// 因此对于直方图桶行，我们在 `,le=` 之前插入；对其他指标行则在闭合 `}` 之前插入。
+    /// 注释行与不含标签的行保持不变。
     pub fn inject_worker_id(expected: &str, wid: &str) -> String {
         let wid_label = format!(",worker_id=\"{}\"", wid);
         expected
@@ -1135,8 +1128,8 @@ mod test_helpers {
                 if line.starts_with('#') || line.trim().is_empty() || !line.contains('{') {
                     line.to_string()
                 } else if let Some(le_pos) = line.find(",le=") {
-                    // Histogram bucket lines: worker_id is a const label, `le` is special,
-                    // so worker_id sorts before `le` in Prometheus output.
+                    // 直方图桶行：worker_id 是常量标签，`le` 是特殊标签，
+                    // 所以在 Prometheus 输出中 worker_id 排在 `le` 之前。
                     let mut s = line.to_string();
                     s.insert_str(le_pos, &wid_label);
                     s
@@ -1155,7 +1148,7 @@ mod test_metricsregistry_units {
 
     #[test]
     fn test_build_servicegroup_metric_name_with_prefix() {
-        // Test that build_servicegroup_metric_name correctly prepends the pagoda_servicegroup prefix
+        // 验证 build_servicegroup_metric_name 能正确加上 pagoda_servicegroup 前缀
         let result = build_servicegroup_metric_name("requests");
         assert_eq!(result, "pagoda_servicegroup_requests");
 
@@ -1168,7 +1161,7 @@ mod test_metricsregistry_units {
         use super::test_helpers::parse_prometheus_metric;
         use std::collections::HashMap;
 
-        // Test parsing a metric with labels
+        // 解析一个带标签的指标
         let line = "http_requests_total{method=\"GET\",status=\"200\"} 1234";
         let parsed = parse_prometheus_metric(line);
         assert!(parsed.is_some());
@@ -1183,7 +1176,7 @@ mod test_metricsregistry_units {
 
         assert_eq!(value, 1234.0);
 
-        // Test parsing a metric without labels
+        // 解析一个不带标签的指标
         let line = "cpu_usage 98.5";
         let parsed = parse_prometheus_metric(line);
         assert!(parsed.is_some());
@@ -1193,7 +1186,7 @@ mod test_metricsregistry_units {
         assert!(labels.is_empty());
         assert_eq!(value, 98.5);
 
-        // Test parsing a metric with float value
+        // 解析一个带浮点值的指标
         let line = "response_time{service=\"api\"} 0.123";
         let parsed = parse_prometheus_metric(line);
         assert!(parsed.is_some());
@@ -1207,11 +1200,11 @@ mod test_metricsregistry_units {
 
         assert_eq!(value, 0.123);
 
-        // Test parsing invalid lines
-        assert!(parse_prometheus_metric("").is_none()); // Empty line
-        assert!(parse_prometheus_metric("# HELP metric description").is_none()); // Help text
-        assert!(parse_prometheus_metric("# TYPE metric counter").is_none()); // Type definition
-        assert!(parse_prometheus_metric("metric_name").is_none()); // No value
+        // 解析无效行
+        assert!(parse_prometheus_metric("").is_none()); // 空行
+        assert!(parse_prometheus_metric("# HELP metric description").is_none()); // help 文本
+        assert!(parse_prometheus_metric("# TYPE metric counter").is_none()); // 类型定义
+        assert!(parse_prometheus_metric("metric_name").is_none()); // 缺少值
 
         println!("✓ Prometheus metric parsing works correctly!");
     }
@@ -1221,12 +1214,12 @@ mod test_metricsregistry_units {
         use crate::MetricsRegistry;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // Test 1: Basic callback execution with counter increments
+        // 测试 1：基本回调执行，伴随计数器递增
         {
             let registry = MetricsRegistry::new();
             let counter = Arc::new(AtomicUsize::new(0));
 
-            // Add callbacks with different increment values
+            // 添加多个具有不同递增值的回调
             for increment in [1, 10, 100] {
                 let counter_clone = counter.clone();
                 registry.add_update_callback(Arc::new(move || {
@@ -1235,75 +1228,75 @@ mod test_metricsregistry_units {
                 }));
             }
 
-            // Verify counter starts at 0
+            // 验证计数器从 0 开始
             assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-            // First execution
+            // 首次执行
             let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results.iter().all(|r| r.is_ok()));
             assert_eq!(counter.load(Ordering::SeqCst), 111); // 1 + 10 + 100
 
-            // Second execution - callbacks should be reusable
+            // 第二次执行 — 回调应可复用
             let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 222); // 111 + 111
 
-            // Test cloning - cloned entry shares callbacks (callbacks are Arc-wrapped)
+            // 测试克隆 — 克隆体共享回调（回调是 Arc 包装的）
             let cloned = registry.clone();
             assert_eq!(cloned.execute_update_callbacks().len(), 3);
             assert_eq!(counter.load(Ordering::SeqCst), 333); // 222 + 111
 
-            // Original still has callbacks and shares the same Arc
+            // 原始对象仍持有回调并共享同一个 Arc
             registry.execute_update_callbacks();
             assert_eq!(counter.load(Ordering::SeqCst), 444); // 333 + 111
         }
 
-        // Test 2: Mixed success and error callbacks
+        // 测试 2：成功与错误回调混合
         {
             let registry = MetricsRegistry::new();
             let counter = Arc::new(AtomicUsize::new(0));
 
-            // Successful callback
+            // 成功的回调
             let counter_clone = counter.clone();
             registry.add_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }));
 
-            // Error callback
+            // 错误回调
             registry.add_update_callback(Arc::new(|| Err(anyhow::anyhow!("Simulated error"))));
 
-            // Another successful callback
+            // 另一个成功的回调
             let counter_clone = counter.clone();
             registry.add_update_callback(Arc::new(move || {
                 counter_clone.fetch_add(10, Ordering::SeqCst);
                 Ok(())
             }));
 
-            // Execute and verify mixed results
+            // 执行并验证混合结果
             let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 3);
             assert!(results[0].is_ok());
             assert!(results[1].is_err());
             assert!(results[2].is_ok());
 
-            // Verify error message
+            // 验证错误消息
             assert_eq!(
                 results[1].as_ref().unwrap_err().to_string(),
                 "Simulated error"
             );
 
-            // Verify successful callbacks still executed
+            // 验证成功的回调仍然执行
             assert_eq!(counter.load(Ordering::SeqCst), 11); // 1 + 10
 
-            // Execute again - errors should be consistent
+            // 再次执行 — 错误应保持一致
             let results = registry.execute_update_callbacks();
             assert!(results[1].is_err());
             assert_eq!(counter.load(Ordering::SeqCst), 22); // 11 + 11
         }
 
-        // Test 3: Empty registry
+        // 测试 3：空注册表
         {
             let registry = MetricsRegistry::new();
             let results = registry.execute_update_callbacks();
@@ -1334,20 +1327,20 @@ mod test_metricsregistry_prefixes {
         // DRT
         assert_eq!(drt.basename(), DRT_NAME);
         assert_eq!(drt.parent_hierarchies().len(), 0);
-        // DRT hierarchy is just its basename (empty string)
+        // DRT 层级名称即其 basename（空字符串）
 
         // Namespace
         assert_eq!(namespace.basename(), NAMESPACE_NAME);
         assert_eq!(namespace.parent_hierarchies().len(), 1);
         assert_eq!(namespace.parent_hierarchies()[0].basename(), DRT_NAME);
-        // Namespace hierarchy is just its basename since parent is empty
+        // 由于父层为空，Namespace 层级名称即其 basename
 
         // ServiceGroup
         assert_eq!(servicegroup.basename(), COMPONENT_NAME);
         assert_eq!(servicegroup.parent_hierarchies().len(), 2);
         assert_eq!(servicegroup.parent_hierarchies()[0].basename(), DRT_NAME);
         assert_eq!(servicegroup.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
-        // ServiceGroup hierarchy structure is validated by the individual assertions above
+        // ServiceGroup 层级结构由上面的逐条断言验证
 
         // PortName
         assert_eq!(portname.basename(), ENDPOINT_NAME);
@@ -1355,9 +1348,9 @@ mod test_metricsregistry_prefixes {
         assert_eq!(portname.parent_hierarchies()[0].basename(), DRT_NAME);
         assert_eq!(portname.parent_hierarchies()[1].basename(), NAMESPACE_NAME);
         assert_eq!(portname.parent_hierarchies()[2].basename(), COMPONENT_NAME);
-        // PortName hierarchy structure is validated by the individual assertions above
+        // PortName 层级结构由上面的逐条断言验证
 
-        // Relationships
+        // 层级间的父子关系
         assert!(
             namespace
                 .parent_hierarchies()
@@ -1377,15 +1370,15 @@ mod test_metricsregistry_prefixes {
                 .any(|h| h.basename() == servicegroup.basename())
         );
 
-        // Depth
+        // 层级深度
         assert_eq!(drt.parent_hierarchies().len(), 0);
         assert_eq!(namespace.parent_hierarchies().len(), 1);
         assert_eq!(servicegroup.parent_hierarchies().len(), 2);
         assert_eq!(portname.parent_hierarchies().len(), 3);
 
-        // Invalid namespace behavior - sanitizes to "_123" and succeeds
-        // @ryanolson intended to enable validation (see TODO comment in servicegroup.rs) but didn't turn it on,
-        // so invalid characters are sanitized in MetricsRegistry rather than rejected.
+        // 非法 namespace 的行为 — 被清洗为 "_123" 并成功
+        // 当前未启用名称校验（参见 servicegroup.rs 中的 TODO 注释），
+        // 因此非法字符会在 MetricsRegistry 中被清洗而非被拒绝。
         let invalid_namespace = drt.namespace("@@123").unwrap();
         let result =
             invalid_namespace
@@ -1393,7 +1386,7 @@ mod test_metricsregistry_prefixes {
                 .create_counter("test_counter", "A test counter", &[]);
         assert!(result.is_ok());
         if let Ok(counter) = &result {
-            // Verify the namespace was sanitized to "_123" in the label
+            // 验证 namespace 已在标签中被清洗为 "_123"
             let desc = counter.desc();
             let namespace_label = desc[0]
                 .const_label_pairs
@@ -1403,7 +1396,7 @@ mod test_metricsregistry_prefixes {
             assert_eq!(namespace_label.value(), "_123");
         }
 
-        // Valid namespace works
+        // 有效 namespace 正常工作
         let valid_namespace = drt.namespace("ns567").unwrap();
         assert!(
             valid_namespace
@@ -1415,9 +1408,8 @@ mod test_metricsregistry_prefixes {
 
     #[tokio::test]
     async fn test_expfmt_callback_only_registered_on_portname_is_included_once() {
-        // Sanity test: if an expfmt callback is registered only on the portname registry,
-        // scraping from the root (DRT) should still include it exactly once via the
-        // child-registry traversal.
+        // 决定性测试：如果一个 expfmt 回调仅注册在 portname 的 registry 上，
+        // 从根（DRT）抓取时应通过子 registry 遍历恰好包含它一次。
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns_expfmt_ep_only").unwrap();
         let servicegroup = namespace.servicegroup("comp_expfmt_ep_only").unwrap();
@@ -1446,35 +1438,35 @@ mod test_metricsregistry_prefixes {
 
     #[tokio::test]
     async fn test_recursive_namespace() {
-        // Create a distributed runtime for testing
+        // 创建一个用于测试的分布式运行时
         let drt = create_test_drt_async().await;
 
-        // Create a deeply chained namespace: ns1.ns2.ns3
+        // 创建一个深度链式的 namespace：ns1.ns2.ns3
         let ns1 = drt.namespace("ns1").unwrap();
         let ns2 = ns1.namespace("ns2").unwrap();
         let ns3 = ns2.namespace("ns3").unwrap();
 
-        // Create a servicegroup in the deepest namespace
+        // 在最深的 namespace 中创建一个 servicegroup
         let servicegroup = ns3.servicegroup("test-servicegroup").unwrap();
 
-        // Verify the hierarchy structure
+        // 验证层级结构
         assert_eq!(ns1.basename(), "ns1");
         assert_eq!(ns1.parent_hierarchies().len(), 1);
         assert_eq!(ns1.parent_hierarchies()[0].basename(), "");
-        // ns1 hierarchy is just its basename since parent is empty
+        // 由于父层为空，ns1 层级名称即其 basename
 
         assert_eq!(ns2.basename(), "ns2");
         assert_eq!(ns2.parent_hierarchies().len(), 2);
         assert_eq!(ns2.parent_hierarchies()[0].basename(), "");
         assert_eq!(ns2.parent_hierarchies()[1].basename(), "ns1");
-        // ns2 hierarchy structure validated by parent assertions above
+        // ns2 层级结构由上面的父层断言验证
 
         assert_eq!(ns3.basename(), "ns3");
         assert_eq!(ns3.parent_hierarchies().len(), 3);
         assert_eq!(ns3.parent_hierarchies()[0].basename(), "");
         assert_eq!(ns3.parent_hierarchies()[1].basename(), "ns1");
         assert_eq!(ns3.parent_hierarchies()[2].basename(), "ns2");
-        // ns3 hierarchy structure validated by parent assertions above
+        // ns3 层级结构由上面的父层断言验证
 
         assert_eq!(servicegroup.basename(), "test-servicegroup");
         assert_eq!(servicegroup.parent_hierarchies().len(), 4);
@@ -1482,7 +1474,7 @@ mod test_metricsregistry_prefixes {
         assert_eq!(servicegroup.parent_hierarchies()[1].basename(), "ns1");
         assert_eq!(servicegroup.parent_hierarchies()[2].basename(), "ns2");
         assert_eq!(servicegroup.parent_hierarchies()[3].basename(), "ns3");
-        // servicegroup hierarchy structure validated by parent assertions above
+        // servicegroup 层级结构由上面的父层断言验证
 
         println!("✓ Chained namespace test passed - all prefixes correct");
     }
@@ -1499,17 +1491,17 @@ mod test_metricsregistry_prometheus_fmt_outputs {
 
     #[tokio::test]
     async fn test_prometheusfactory_using_metrics_registry_trait() {
-        // Setup real DRT and registry using the test-friendly constructor
+        // 使用便于测试的构造函数创建真实的 DRT 与 registry
         let drt = create_test_drt_async().await;
 
-        // Use a simple constant namespace name
+        // 使用一个简单的常量 namespace 名称
         let namespace_name = "ns345";
 
         let namespace = drt.namespace(namespace_name).unwrap();
         let servicegroup = namespace.servicegroup("comp345").unwrap();
         let portname = servicegroup.portname("ep345");
 
-        // Test Counter creation
+        // 测试 Counter 创建
         let counter = portname
             .metrics()
             .create_counter("testcounter", "A test counter", &[])
@@ -1522,8 +1514,8 @@ mod test_metricsregistry_prometheus_fmt_outputs {
         println!("PortName output:");
         println!("{}", portname_output_raw);
 
-        // worker_id is runtime-generated (etcd lease ID), so we grab it from the DRT
-        // and inject it into expected strings via the inject_worker_id helper.
+        // worker_id 是运行时生成的（etcd lease ID），因此从 DRT 获取它，
+        // 并通过 inject_worker_id 助手注入到预期字符串中。
         let wid = format!("{:x}", drt.connection_id());
         use super::test_helpers::inject_worker_id;
 
@@ -1545,7 +1537,7 @@ pagoda_servicegroup_testcounter{pagoda_servicegroup="comp345",pagoda_portname="e
             expected_portname_output
         );
 
-        // Test Gauge creation
+        // 测试 Gauge 创建
         let gauge = servicegroup
             .metrics()
             .create_gauge("testgauge", "A test gauge", &[])
@@ -1553,7 +1545,7 @@ pagoda_servicegroup_testcounter{pagoda_servicegroup="comp345",pagoda_portname="e
         gauge.set(50000.0);
         assert_eq!(gauge.get(), 50000.0);
 
-        // Test Prometheus format output for ServiceGroup (gauge + histogram)
+        // 测试 ServiceGroup 的 Prometheus 格式输出（gauge + histogram）
         let servicegroup_output_raw = servicegroup.metrics().prometheus_expfmt().unwrap();
         println!("ServiceGroup output:");
         println!("{}", servicegroup_output_raw);
@@ -1586,7 +1578,7 @@ pagoda_servicegroup_testgauge{pagoda_servicegroup="comp345",pagoda_namespace="ns
         intcounter.inc_by(12345);
         assert_eq!(intcounter.get(), 12345);
 
-        // Test Prometheus format output for Namespace (int_counter + gauge + histogram)
+        // 测试 Namespace 的 Prometheus 格式输出（int_counter + gauge + histogram）
         let namespace_output_raw = namespace.metrics().prometheus_expfmt().unwrap();
         println!("Namespace output:");
         println!("{}", namespace_output_raw);
@@ -1615,7 +1607,7 @@ pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345"#,
             expected_namespace_output
         );
 
-        // Test IntGauge creation
+        // 测试 IntGauge 创建
         let intgauge = namespace
             .metrics()
             .create_intgauge("testintgauge", "A test int gauge", &[])
@@ -1623,7 +1615,7 @@ pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345"#,
         intgauge.set(42);
         assert_eq!(intgauge.get(), 42);
 
-        // Test IntGaugeVec creation
+        // 测试 IntGaugeVec 创建
         let intgaugevec = namespace
             .metrics()
             .create_intgaugevec(
@@ -1640,7 +1632,7 @@ pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345"#,
             .with_label_values(&["server2", "inactive"])
             .set(0);
 
-        // Test CounterVec creation
+        // 测试 CounterVec 创建
         let countervec = portname
             .metrics()
             .create_countervec(
@@ -1653,7 +1645,7 @@ pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345"#,
         countervec.with_label_values(&["GET", "200"]).inc_by(10.0);
         countervec.with_label_values(&["POST", "201"]).inc_by(5.0);
 
-        // Test Histogram creation
+        // 测试 Histogram 创建
         let histogram = servicegroup
             .metrics()
             .create_histogram("testhistogram", "A test histogram", &[], None)
@@ -1662,13 +1654,13 @@ pagoda_servicegroup_testintcounter{pagoda_namespace="ns345"} 12345"#,
         histogram.observe(2.5);
         histogram.observe(4.0);
 
-        // Test Prometheus format output for DRT (all metrics combined)
+        // 测试 DRT 的 Prometheus 格式输出（所有指标合并）
         let drt_output_raw = drt.metrics().prometheus_expfmt().unwrap();
         println!("DRT output:");
         println!("{}", drt_output_raw);
 
-        // The uptime_seconds value is dynamic (depends on elapsed wall-clock time),
-        // so we check all other lines exactly and validate uptime separately.
+        // uptime_seconds 的值是动态的（取决于已经过的壁钟时间），
+        // 因此我们精确检查其他所有行，并单独验证 uptime。
         let expected_drt_output_without_uptime = inject_worker_id(
             r#"# HELP pagoda_servicegroup_testcounter A test counter
 # TYPE pagoda_servicegroup_testcounter counter
@@ -1709,9 +1701,9 @@ pagoda_servicegroup_testintgaugevec{pagoda_namespace="ns345",instance="server2",
             &wid,
         );
 
-        // Split actual output into non-uptime lines and validate the uptime value line.
-        // The uptime metric now carries a worker_id label, so we match on the metric name
-        // prefix and extract the value as the last whitespace-delimited token.
+        // 把实际输出拆分为非 uptime 行，并验证 uptime 值行。
+        // uptime 指标现在携带 worker_id 标签，因此我们按指标名前缀匹配，
+        // 并把值提取为最后一个以空白分隔的 token。
         let mut non_uptime_lines = Vec::new();
         let mut saw_uptime_value = false;
         for line in drt_output_raw.trim_end_matches('\n').lines() {
@@ -1722,7 +1714,7 @@ pagoda_servicegroup_testintgaugevec{pagoda_namespace="ns345",instance="server2",
             } else if line.starts_with("# HELP pagoda_servicegroup_uptime_seconds")
                 || line.starts_with("# TYPE pagoda_servicegroup_uptime_seconds")
             {
-                // Skip HELP/TYPE lines for uptime (we just verify it exists via the value)
+                // 跳过 uptime 的 HELP/TYPE 行（我们只通过值验证它存在）
             } else {
                 non_uptime_lines.push(line);
             }
@@ -1744,7 +1736,7 @@ pagoda_servicegroup_testintgaugevec{pagoda_namespace="ns345",instance="server2",
             actual_without_uptime
         );
 
-        // Wait briefly so the uptime gauge is clearly positive on the next scrape.
+        // 稍作等待，使下一次抓取时 uptime gauge 明显为正值。
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let drt_output_after = drt.metrics().prometheus_expfmt().unwrap();
         let uptime_line = drt_output_after
@@ -1768,7 +1760,7 @@ pagoda_servicegroup_testintgaugevec{pagoda_namespace="ns345",instance="server2",
 
     #[test]
     fn test_refactored_filter_functions() {
-        // Test data with servicegroup metrics
+        // 带 servicegroup 指标的测试数据
         let test_input = r#"# HELP pagoda_servicegroup_requests Total requests
 # TYPE pagoda_servicegroup_requests counter
 pagoda_servicegroup_requests 42
@@ -1778,9 +1770,9 @@ pagoda_servicegroup_latency_bucket{le="0.1"} 10
 pagoda_servicegroup_latency_bucket{le="0.5"} 25
 pagoda_servicegroup_errors_total 5"#;
 
-        // Test extract_metrics (only actual metric lines, excluding help/type)
+        // 测试 extract_metrics（仅保留实际指标行，排除 help/type）
         let metrics_only = super::test_helpers::extract_metrics(test_input);
-        assert_eq!(metrics_only.len(), 4); // 4 actual metric lines (excluding help/type)
+        assert_eq!(metrics_only.len(), 4); // 4 条实际指标行（排除 help/type）
         assert!(
             metrics_only
                 .iter()
@@ -1792,14 +1784,14 @@ pagoda_servicegroup_errors_total 5"#;
 
     #[tokio::test]
     async fn test_same_metric_name_different_portnames() {
-        // Test that the same metric name can exist in different portnames without collision.
-        // This validates the multi-registry approach: each portname has its own registry,
-        // and metrics are merged at scrape time with distinct labels.
+        // 验证同一指标名可以存在于不同 portname 中而不冲突。
+        // 这验证了多 registry 方案：每个 portname 有自己的 registry，
+        // 指标在抓取时按不同标签合并。
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns_test").unwrap();
         let servicegroup = namespace.servicegroup("comp_test").unwrap();
 
-        // Create two portnames with the same metric name
+        // 创建两个使用相同指标名的 portname
         let ep1 = servicegroup.portname("ep1");
         let ep2 = servicegroup.portname("ep2");
 
@@ -1815,7 +1807,7 @@ pagoda_servicegroup_errors_total 5"#;
             .unwrap();
         counter2.inc_by(200.0);
 
-        // Get merged Prometheus output from servicegroup level
+        // 从 servicegroup 层级获取合并后的 Prometheus 输出
         let output = servicegroup.metrics().prometheus_expfmt().unwrap();
 
         let wid = format!("{:x}", drt.connection_id());
@@ -1845,15 +1837,15 @@ pagoda_servicegroup_requests_total{pagoda_servicegroup="comp_test",pagoda_portna
 
     #[tokio::test]
     async fn test_duplicate_series_warning() {
-        // Test that duplicate series (same metric name + same labels) are detected and deduplicated.
-        // This should log a warning and keep only one of the duplicate series.
+        // 验证重复 series（同名指标 + 同标签）能被检测并去重。
+        // 这应该记录一条 warning 并只保留重复 series 中的一条。
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns_dup").unwrap();
         let servicegroup = namespace.servicegroup("comp_dup").unwrap();
 
-        // Create two portnames with counters that will have identical labels when scraped
+        // 创建两个 portname，其 counter 在抓取时会具有相同标签
         let ep1 = servicegroup.portname("ep_same");
-        let ep2 = servicegroup.portname("ep_same"); // Same portname name = duplicate labels
+        let ep2 = servicegroup.portname("ep_same"); // 相同的 portname 名 = 重复标签
 
         let counter1 = ep1
             .metrics()
@@ -1867,7 +1859,7 @@ pagoda_servicegroup_requests_total{pagoda_servicegroup="comp_test",pagoda_portna
             .unwrap();
         counter2.inc_by(75.0);
 
-        // Get merged output - duplicates should be deduplicated
+        // 获取合并后的输出 — 重复项应被去重
         let output = servicegroup.metrics().prometheus_expfmt().unwrap();
 
         let wid = format!("{:x}", drt.connection_id());

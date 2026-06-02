@@ -706,7 +706,7 @@ mod tests {
         });
     }
 
-    // === SECTION: 合并自原 mod supplemental_tests ===
+    // === SECTION: 补充测试 ===
     use super::*;
 
     /// ## 测试过程

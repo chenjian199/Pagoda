@@ -570,10 +570,10 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// spawn canary loop，sleep 30ms 后 cancel；timeout 1s 内 join 成功。
-    /// 断言至少新增 1 个 delay 样本，stall 计数不倒退。
+    /// 启动哨兵循环，休眠 30ms 后取消；在 1s 超时内成功 join。
+    /// 断言至少新增 1 个延迟样本，停顿计数不倒退。
     /// ## 意义
-    /// 验证 canary 循环能被 cancel 干净退出，且确实写入 histogram。
+    /// 验证哨兵循环能被干净地取消退出，且确实写入直方图。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_supplemental_tokio_metrics_and_canary_loop_cancels_cleanly() {
         let delay_before = EVENT_LOOP_DELAY_SECONDS.get_sample_count();

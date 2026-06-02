@@ -36,12 +36,11 @@
 //!
 //! ## 实现要点
 //!
-//! - 净化函数在本次重写中**抛弃了 regex 依赖**，改用 `char` 迭代器逐字符判定。
-//!   原版用三个 `Lazy<Regex>` + `replace_all`；新版只用栈上 buffer 与
-//!   `Vec::with_capacity(raw.len())`，无全局初始化开销，分支也更直白。
+//! - 净化函数**不依赖 regex**，改用 `char` 迭代器逐字符判定。
+//!   只用栈上 buffer 与 `Vec::with_capacity(raw.len())`，无全局初始化开销，分支也更直白。
 //! - 三套规则统一封装在 [`CharSpec`] 里：metric 允许 `[A-Za-z0-9_:]`，
 //!   label 允许 `[A-Za-z0-9_]`，首字符额外要求字母或下划线。
-//! - 全下划线结果一律视作“没有有效信息”→ 返回错误（与旧版语义一致）。
+//! - 全下划线结果一律视作“没有有效信息”→ 返回错误。
 //! - label 净化额外去掉前导 `__`（Prometheus 保留给内部用），剩余再过一次
 //!   首字符校正。
 //!
@@ -57,71 +56,71 @@
 
 /// 指标前缀；详见模块级文档的命名约定。
 pub mod name_prefix {
-    /// Prefix for servicegroup-scoped metrics, auto-labeled with namespace/portname.
+    /// servicegroup 作用域指标的前缀，自动携带 namespace/portname 标签。
     pub const SERVICEGROUP: &str = "pagoda_servicegroup";
 
-    /// Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
+    /// 前端 HTTP 服务指标的前缀（requests、TTFT、ITL、断连）。
     pub const FRONTEND: &str = "pagoda_frontend";
 
-    /// Prefix for KV router instance metrics (carries `router_id` label).
+    /// KV 路由实例指标的前缀（携带 `router_id` 标签）。
     pub const ROUTER: &str = "pagoda_router";
 
-    /// Prefix for standalone KV indexer metrics
+    /// 独立 KV indexer 指标的前缀
     pub const KVINDEXER: &str = "pagoda_kvindexer";
 
-    /// Prefix for request-plane metrics at AddressedPushRouter.
-    /// Transport-agnostic: measures request lifecycle latency and concurrency
-    /// (queue → send → roundtrip TTFT, inflight gauge).
+    /// AddressedPushRouter 处 request-plane 指标的前缀。
+    /// 与传输无关：衡量请求生命周期延迟与并发度
+    /// （queue → send → roundtrip TTFT，inflight gauge）。
     pub const REQUEST_PLANE: &str = "pagoda_request_plane";
 
-    /// Prefix for transport-layer metrics (TCP / NATS).
-    /// Protocol-specific: measures wire-level health (bytes sent/received, error counts).
+    /// 传输层指标的前缀（TCP / NATS）。
+    /// 与协议相关：衡量线路级健康状况（发送/接收字节数、错误计数）。
     pub const TRANSPORT: &str = "pagoda_transport";
 
-    /// Prefix for work-handler transport breakdown metrics (backend side)
+    /// work-handler 传输拆解指标的前缀（后端侧）
     pub const WORK_HANDLER: &str = "pagoda_work_handler";
 
-    /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    /// tokio 运行时指标的前缀（poll 耗时、队列深度、停顿）。
     pub const TOKIO: &str = "pagoda_tokio";
 
-    /// Prefix for per-phase routing overhead latency (hashing, scheduling).
-    /// Raw Prometheus, not servicegroup-scoped.
+    /// 逐阶段路由开销延迟的前缀（哈希、调度）。
+    /// 原始 Prometheus 指标，非 servicegroup 作用域。
     pub const ROUTING_OVERHEAD: &str = "pagoda_routing_overhead";
 }
 
 /// 由层级系统自动注入的公共标签。Python codegen 会同步导出这些常量。
 pub mod labels {
-    /// Label for servicegroup identification
+    /// 用于标识 servicegroup 的标签
     pub const SERVICEGROUP: &str = "pagoda_servicegroup";
 
-    /// Label for namespace identification
+    /// 用于标识 namespace 的标签
     pub const NAMESPACE: &str = "pagoda_namespace";
 
-    /// Label for portname identification
+    /// 用于标识 portname 的标签
     pub const PORTNAME: &str = "pagoda_portname";
 
-    /// Label for worker data-parallel rank (non-auto-inserted).
+    /// 用于 worker 数据并行 rank 的标签（非自动注入）。
     pub const DP_RANK: &str = "dp_rank";
 
-    /// Label for worker instance ID (etcd lease ID).
+    /// 用于 worker 实例 ID 的标签（etcd lease ID）。
     pub const WORKER_ID: &str = "worker_id";
 
-    /// Label for model name/path (OpenAI API standard, injected by Pagoda)
+    /// 用于模型名称/路径的标签（OpenAI API 标准，由 Pagoda 注入）
     pub const MODEL: &str = "model";
 
-    /// Label for model name/path (engine-native alternative).
+    /// 用于模型名称/路径的标签（引擎原生的替代项）。
     pub const MODEL_NAME: &str = "model_name";
 
-    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder").
+    /// 用于 worker 类型的标签（例如 "aggregated"、"prefill"、"decode"、"encoder"）。
     pub const WORKER_TYPE: &str = "worker_type";
 
-    /// Label for router instance (discovery.instance_id() of the frontend)
+    /// 用于路由实例的标签（前端的 discovery.instance_id()）
     pub const ROUTER_ID: &str = "router_id";
 }
 
-/// Well-known `pagoda_servicegroup` label values.
+/// 常见的 `pagoda_servicegroup` 标签取值。
 pub mod servicegroup_names {
-    /// ServiceGroup name for the KV router (frontend-side request routing).
+    /// KV 路由的 ServiceGroup 名称（前端侧请求路由）。
     pub const ROUTER: &str = "router";
 }
 
@@ -129,133 +128,133 @@ pub mod servicegroup_names {
 // === Frontend HTTP service ===================================================
 // =============================================================================
 
-/// Frontend service metrics (LLM HTTP service)
+/// 前端服务指标（LLM HTTP 服务）
 pub mod frontend_service {
-    /// Environment variable that overrides the default metric prefix
+    /// 用于覆盖默认指标前缀的环境变量
     pub const METRICS_PREFIX_ENV: &str = "PGD_METRICS_PREFIX";
 
-    /// Total number of LLM requests processed
+    /// 已处理的 LLM 请求总数
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
+    /// 在收到首个响应前于 HTTP 队列中等待的请求数（gauge）
     pub const QUEUED_REQUESTS: &str = "queued_requests";
 
-    /// Number of inflight/concurrent requests going to the engine
+    /// 发往引擎的 inflight/并发请求数
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
-    /// Number of requests currently being handled by the frontend
+    /// 前端当前正在处理的请求数
     pub const ACTIVE_REQUESTS: &str = "active_requests";
 
-    /// Number of disconnected clients (gauge)
+    /// 断开连接的客户端数（gauge）
     pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
-    /// Duration of LLM requests
+    /// LLM 请求的耗时
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
 
-    /// Input sequence length in tokens
+    /// 输入序列长度（token 数）
     pub const INPUT_SEQUENCE_TOKENS: &str = "input_sequence_tokens";
 
-    /// Output sequence length in tokens
+    /// 输出序列长度（token 数）
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
-    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    /// 路由时预测的 KV 缓存命中率（0.0-1.0）
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
-    /// Upper-bound estimation of KV cache transfer latency (disaggregated)
+    /// KV 缓存传输延迟的上界估计（分离式）
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
 
-    /// Shared cache hit rate (0.0-1.0)
+    /// 共享缓存命中率（0.0-1.0）
     pub const SHARED_CACHE_HIT_RATE: &str = "shared_cache_hit_rate";
 
-    /// Shared cache blocks beyond device overlap for the selected worker
+    /// 所选 worker 上超出设备重叠部分的共享缓存块数
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
 
-    /// Number of cached tokens (prefix cache hits) per request
+    /// 每个请求的已缓存 token 数（前缀缓存命中）
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
-    /// Tokenizer latency in milliseconds
+    /// Tokenizer 延迟（毫秒）
     pub const TOKENIZER_LATENCY_MS: &str = "tokenizer_latency_ms";
 
-    /// Total number of output tokens generated
+    /// 生成的输出 token 总数
     pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
 
-    /// Time to first token in seconds
+    /// 首 token 耗时（秒）
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
 
-    /// Inter-token latency in seconds
+    /// token 间延迟（秒）
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
 
-    /// Total KV blocks available for a worker
+    /// worker 可用的 KV 块总数
     pub const MODEL_TOTAL_KV_BLOCKS: &str = "model_total_kv_blocks";
 
-    /// Maximum number of sequences for a worker (runtime config)
+    /// worker 的最大序列数（运行时配置）
     pub const MODEL_MAX_NUM_SEQS: &str = "model_max_num_seqs";
 
-    /// Maximum number of batched tokens for a worker (runtime config)
+    /// worker 的最大批处理 token 数（运行时配置）
     pub const MODEL_MAX_NUM_BATCHED_TOKENS: &str = "model_max_num_batched_tokens";
 
-    /// Maximum context length for a worker (MDC)
+    /// worker 的最大上下文长度（MDC）
     pub const MODEL_CONTEXT_LENGTH: &str = "model_context_length";
 
-    /// KV cache block size for a worker (MDC)
+    /// worker 的 KV 缓存块大小（MDC）
     pub const MODEL_KV_CACHE_BLOCK_SIZE: &str = "model_kv_cache_block_size";
 
-    /// Request migration limit for a worker (MDC)
+    /// worker 的请求迁移上限（MDC）
     pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
 
-    /// Total number of request migrations due to worker unavailability
+    /// 因 worker 不可用而发生的请求迁移总数
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
-    /// Total number of times migration was disabled because the sequence length
-    /// exceeded the configured max_seq_len limit
+    /// 因序列长度超过配置的 max_seq_len 上限
+    /// 而禁用迁移的总次数
     pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
         "model_migration_max_seq_len_exceeded_total";
 
-    /// Total number of request cancellations
+    /// 请求取消总数
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
 
-    /// Total number of requests rejected due to resource exhaustion
+    /// 因资源耗尽而被拒绝的请求总数
     pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
 
-    /// Active decode blocks per worker
+    /// 每个 worker 的活跃 decode 块数
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
 
-    /// Active prefill tokens per worker
+    /// 每个 worker 的活跃 prefill token 数
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
 
-    /// Last observed time to first token per worker (seconds)
+    /// 每个 worker 最近观测到的首 token 耗时（秒）
     pub const WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS: &str =
         "worker_last_time_to_first_token_seconds";
 
-    /// Last observed input sequence tokens per worker
+    /// 每个 worker 最近观测到的输入序列 token 数
     pub const WORKER_LAST_INPUT_SEQUENCE_TOKENS: &str = "worker_last_input_sequence_tokens";
 
-    /// Last observed inter-token latency per worker (seconds)
+    /// 每个 worker 最近观测到的 token 间延迟（秒）
     pub const WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS: &str =
         "worker_last_inter_token_latency_seconds";
 
-    /// Number of requests pending in the router's scheduler queue
+    /// 路由器调度队列中待处理的请求数
     pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
 
-    /// Number of replicas allocated for a LoRA adapter
+    /// 为某个 LoRA adapter 分配的副本数
     pub const LORA_REPLICA_FACTOR: &str = "lora_replica_factor";
 
-    /// Whether a LoRA adapter is actively receiving traffic
+    /// 某个 LoRA adapter 是否正在接收流量
     pub const LORA_IS_ACTIVE: &str = "lora_is_active";
 
-    /// Estimated load (windowed request count) for a LoRA adapter
+    /// 某个 LoRA adapter 的估计负载（窗口内请求计数）
     pub const LORA_ESTIMATED_LOAD: &str = "lora_estimated_load";
 
-    /// Raw arrival count (windowed rate counter) for a LoRA adapter
+    /// 某个 LoRA adapter 的原始到达计数（窗口内速率计数器）
     pub const LORA_RAW_ARRIVAL_COUNT: &str = "lora_raw_arrival_count";
 
-    /// Number of in-flight (active) requests for a LoRA adapter
+    /// 某个 LoRA adapter 的 in-flight（活跃）请求数
     pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
 
-    /// Label name for the type of migration
+    /// 迁移类型的标签名
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
-    /// Label name for tokenizer operation
+    /// tokenizer 操作的标签名
     pub const OPERATION_LABEL: &str = "operation";
 
     pub mod operation {
@@ -294,7 +293,7 @@ pub mod frontend_service {
 // === Work handler / Task tracker / DistributedRuntime ========================
 // =============================================================================
 
-/// Work handler Prometheus metric names
+/// work handler 的 Prometheus 指标名称
 pub mod work_handler {
     pub const REQUESTS_TOTAL: &str = "requests_total";
     pub const REQUEST_BYTES_TOTAL: &str = "request_bytes_total";
@@ -323,7 +322,7 @@ pub mod work_handler {
     }
 }
 
-/// Task tracker Prometheus metric name suffixes
+/// task tracker 的 Prometheus 指标名后缀
 pub mod task_tracker {
     pub const TASKS_ISSUED_TOTAL: &str = "tasks_issued_total";
     pub const TASKS_STARTED_TOTAL: &str = "tasks_started_total";
@@ -333,7 +332,7 @@ pub mod task_tracker {
     pub const TASKS_REJECTED_TOTAL: &str = "tasks_rejected_total";
 }
 
-/// DistributedRuntime core metrics
+/// DistributedRuntime 核心指标
 pub mod distributed_runtime {
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
 }
@@ -361,13 +360,13 @@ pub mod kvbm {
     pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
-/// Router per-request metrics (servicegroup-scoped via `MetricsHierarchy`).
+/// 每个请求的路由指标（通过 `MetricsHierarchy` 进行 servicegroup 作用域化）。
 pub mod router_request {
-    /// Prefix prepended to `frontend_service::*` names to form router metric names.
+    /// 拼接在 `frontend_service::*` 名称前、用于组成路由指标名的前缀。
     pub const METRIC_PREFIX: &str = "router_";
 }
 
-/// Routing overhead phase latency histogram suffixes.
+/// 路由开销各阶段延迟直方图后缀。
 pub mod routing_overhead {
     pub const BLOCK_HASHING_MS: &str = "overhead_block_hashing_ms";
     pub const INDEXER_FIND_MATCHES_MS: &str = "overhead_indexer_find_matches_ms";
@@ -378,7 +377,7 @@ pub mod routing_overhead {
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (servicegroup-scoped aggregate histograms + counter)
+/// 路由请求指标（servicegroup 作用域的聚合直方图 + 计数器）
 pub mod router {
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
     pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
@@ -398,7 +397,7 @@ pub mod router {
 // === Frontend perf / Tokio perf / Indexer / Request plane / Transport ========
 // =============================================================================
 
-/// Frontend pipeline stage and event-loop metrics
+/// 前端流水线阶段与事件循环指标
 pub mod frontend_perf {
     pub const STAGE_DURATION_SECONDS: &str = "stage_duration_seconds";
     pub const STAGE_REQUESTS: &str = "stage_requests";
@@ -415,7 +414,7 @@ pub mod frontend_perf {
     pub const EVENT_LOOP_STALL_TOTAL: &str = "event_loop_stall_total";
 }
 
-/// Tokio runtime metrics
+/// tokio 运行时指标
 pub mod tokio_perf {
     pub const WORKER_MEAN_POLL_TIME_NS: &str = "worker_mean_poll_time_ns";
     pub const GLOBAL_QUEUE_DEPTH: &str = "global_queue_depth";
@@ -431,7 +430,7 @@ pub mod tokio_perf {
     pub const ALIVE_TASKS: &str = "alive_tasks";
 }
 
-/// Standalone KV indexer HTTP service metrics
+/// 独立 KV indexer 的 HTTP 服务指标
 pub mod kvindexer {
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
     pub const REQUESTS_TOTAL: &str = "requests_total";
@@ -440,7 +439,7 @@ pub mod kvindexer {
     pub const WORKERS: &str = "workers";
 }
 
-/// Request plane metrics at AddressedPushRouter
+/// AddressedPushRouter 处的 request plane 指标
 pub mod request_plane {
     pub const QUEUE_SECONDS: &str = "queue_seconds";
     pub const SEND_SECONDS: &str = "send_seconds";
@@ -448,7 +447,7 @@ pub mod request_plane {
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 }
 
-/// Transport-specific metrics (TCP / NATS)
+/// 特定传输方式的指标（TCP / NATS）
 pub mod transport {
     pub mod tcp {
         pub const POOL_ACTIVE: &str = "tcp_pool_active";
@@ -463,12 +462,12 @@ pub mod transport {
     }
 }
 
-/// KvRouter (including KvIndexer)
+/// KvRouter（含 KvIndexer）
 pub mod kvrouter {
     pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
 }
 
-/// KV Publisher metrics
+/// KV Publisher 指标
 pub mod kv_publisher {
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
     pub const ZMQ_EVENTS_TOTAL: &str = "kv_publisher_zmq_events_total";
@@ -477,7 +476,7 @@ pub mod kv_publisher {
     pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
 }
 
-/// Additional TRT-LLM worker metrics beyond what the engine natively provides.
+/// 引擎原生指标之外、额外补充的 TRT-LLM worker 指标。
 pub mod trtllm_additional {
     pub const NUM_ABORTED_REQUESTS_TOTAL: &str = "trtllm_num_aborted_requests_total";
     pub const REQUEST_TYPE_IMAGE_TOTAL: &str = "trtllm_request_type_image_total";
@@ -489,13 +488,13 @@ pub mod trtllm_additional {
     pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
 }
 
-/// KV cache statistics metrics
+/// KV 缓存统计指标
 pub mod kvstats {
     pub const TOTAL_BLOCKS: &str = "total_blocks";
     pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
 }
 
-/// Model information metrics
+/// 模型信息指标
 pub mod model_info {
     pub const LOAD_TIME_SECONDS: &str = "model_load_time_seconds";
 }

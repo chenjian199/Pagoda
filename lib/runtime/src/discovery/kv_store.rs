@@ -17,7 +17,7 @@
 //!
 //! ## 外部契约
 //!
-//! - 公开类型 [`KVStoreDiscovery`] 与历史版本签名一致：
+//! - 公开类型 [`KVStoreDiscovery`] 的构造签名保持稳定：
 //!   `KVStoreDiscovery::new(kv::Manager, CancellationToken)`。
 //! - `Discovery` trait 的 `register / unregister / list / list_and_watch /
 //!   shutdown` 全部实现并保持原有语义。
@@ -27,7 +27,7 @@
 //! - **键路径计算**集中到 [`KeySchema`] 静态方法，避免 register/unregister/list
 //!   三个地方重复实现 `format!`；
 //! - **桶名选择**通过 [`BucketRoute`] 枚举与 [`BucketRoute::from_query`]
-//!   集中决策，原版散落多处的 `starts_with` 分支被收敛；
+//!   集中决策，将原本散落多处的 `starts_with` 分支收敛；
 //! - **删除事件 key 反序列化**抽离为 [`parse_deleted_key`] 单一函数，
 //!   单元测试可以独立覆盖其边界条件（如长度不足、hex 解析失败、缺 suffix）；
 //! - `list_and_watch` 不再就地内联 `match (Put / Delete)` 大块代码，而是
@@ -58,7 +58,7 @@ const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 
 /// 把 `DiscoveryQuery` 与具体桶名建立映射，集中决策点。
 ///
-/// 原版在 register / list / watch 中都各写一份 “if prefix.starts_with(...)”
+/// 若不集中，register / list / watch 三处都得各写一份 “if prefix.starts_with(...)”
 /// 的判断；提炼出 enum 后只需一个静态方法即可在三处复用。
 #[derive(Clone, Copy)]
 enum BucketRoute {

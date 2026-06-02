@@ -21,7 +21,7 @@
 //! - [`TypedEventStream<T>`]：解码后的 `(envelope, T)` 流别名。
 //!
 //! ## 实现要点
-//! 字段顺序、序列化策略完全一致；这是序列化契约不能动。
+//! 字段顺序与序列化策略是序列化契约的一部分，不能改动。
 
 use anyhow::Result;
 use bytes::Bytes;

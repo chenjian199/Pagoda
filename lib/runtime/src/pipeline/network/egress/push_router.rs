@@ -10,13 +10,13 @@
 //! 透明重试、换节点。
 //!
 //! ## 外部契约
-//! - 公开结构 / 方法完全一致；
+//! - 公开结构 / 方法是稳定契约；
 //! - 依赖 [`crate::error::BackendError`] / `PagodaError` / `ErrorType` / `match_error_chain`
 //!   进行错误分类与重试决策——这些导入路径是契约。
 //!
 //! ## 实现要点
 //! - 路由决策独立于传输层：选定 instance 后全部委托给注入的 `Arc<dyn RequestPlaneClient>`；
-//! - 重试参数、退避策略、instance 黑名单都在 lib-copy 里定型，本重写不调整。
+//! - 重试参数、退避策略、instance 黑名单都已定型，保持稳定。
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, PagodaError, ErrorType, match_error_chain};
@@ -54,7 +54,7 @@ use std::{
 use tokio_stream::StreamExt;
 use tracing::Instrument;
 
-/// Check if an error chain indicates the worker should be reported as down.
+/// 检查错误链是否表明该 worker 应被报告为宕机。
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     const INHIBITED: &[ErrorType] = &[
         ErrorType::CannotConnect,
@@ -66,9 +66,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     match_error_chain(err, INHIBITED, &[])
 }
 
-/// Read the backend response inactivity timeout from the environment.
-/// Reuses `PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
-/// as the HTTP-layer safety net in `disconnect.rs`.
+/// 从环境变量读取后端响应不活动超时。
+/// 复用 `PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS` —— 与 `disconnect.rs`
+/// 中 HTTP 层安全网相同的环境变量。
 fn response_inactivity_timeout() -> Option<std::time::Duration> {
     use crate::config::environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
     std::env::var(PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
@@ -119,12 +119,12 @@ impl Drop for OccupancyPermit {
     }
 }
 
-/// Trait for monitoring worker load and determining busy state.
-/// Implementations can define custom load metrics and busy thresholds.
+/// 用于监控 worker 负载并判定繁忙状态的 trait。
+/// 实现方可定义自定义的负载指标与繁忙阈值。
 #[async_trait]
 pub trait WorkerLoadMonitor: Send + Sync {
-    /// Start background monitoring of worker load.
-    /// This should spawn background tasks that update the client's free instances.
+    /// 启动 worker 负载的后台监控。
+    /// 应派发后台任务以更新客户端的空闲实例。
     async fn start_monitoring(&self) -> anyhow::Result<()>;
 }
 
@@ -134,41 +134,41 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de>,
 {
-    // TODO: This shouldn't be pub, but lib/bindings/python/rust/lib.rs exposes it.
-    /// The Client is how we gather remote portname information from etcd.
+    // TODO: 这本不应为 pub，但 lib/bindings/python/rust/lib.rs 暴露了它。
+    /// Client 是我们从 etcd 收集远端 portname 信息的途径。
     pub client: Client,
 
-    /// How we choose which instance to send traffic to.
+    /// 我们如何选择将流量发往哪个实例。
     ///
-    /// Setting this to KV means we never intend to call `generate` on this PushRouter. We are
-    /// not using it as an AsyncEngine.
-    /// Instead we will decide whether to call random/round_robin/direct ourselves and call them directly.
-    /// pagoda-llm's KV Routing does this.
+    /// 设为 KV 意味着我们绝不打算对该 PushRouter 调用 `generate`。我们
+    /// 不会把它当作 AsyncEngine 使用。
+    /// 取而代之，我们自行决定调用 random/round_robin/direct 并直接调用它们。
+    /// pagoda-llm 的 KV Routing 即如此。
     router_mode: RouterMode,
 
-    /// Number of round robin requests handled. Used to decide which server is next.
+    /// 已处理的轮询请求数。用于决定下一台服务器是哪个。
     round_robin_counter: Arc<AtomicU64>,
 
-    /// The next step in the chain. PushRouter (this object) picks an instances,
-    /// addresses it, then passes it to AddressedPushRouter which does the network traffic.
+    /// 链路中的下一步。PushRouter（本对象）选取一个实例，
+    /// 为其寻址，然后传给负责网络流量的 AddressedPushRouter。
     addressed: Arc<AddressedPushRouter>,
 
-    /// When false, `generate_with_fault_detection` skips fault detection logic:
-    /// it won't call `report_instance_down` on errors, and it uses the raw discovery
-    /// instance list instead of the filtered avail list. Use for recovery/query paths
-    /// where transient failures are expected.
+    /// 为 false 时，`generate_with_fault_detection` 跳过故障检测逻辑：
+    /// 它不会在出错时调用 `report_instance_down`，且使用原始 discovery
+    /// 实例列表而非过滤后的可用列表。用于预期会出现瞬时故障的
+    /// 恢复/查询路径。
     fault_detection_enabled: bool,
 
-    /// Cached response inactivity timeout. Read once at construction from
-    /// [`environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
+    /// 缓存的响应不活动超时。在构造时从
+    /// [`environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS) 读取一次，以避免每次请求一次系统调用。
     response_timeout: Option<std::time::Duration>,
 
-    /// Shared request occupancy state for tracked routing modes.
+    /// 用于受跟踪路由模式的共享请求占用状态。
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
-    /// An internal Rust type. This says that PushRouter is generic over the T and U types,
-    /// which are the input and output types of it's `generate` function. It allows the
-    /// compiler to specialize us at compile time.
+    /// 一个内部 Rust 类型。它表明 PushRouter 对 T 和 U 类型泛型，
+    /// 即其 `generate` 函数的输入与输出类型。它允许编译器
+    /// 在编译期对我们做特化。
     _phantom: PhantomData<(T, U)>,
 }
 
@@ -182,7 +182,7 @@ pub enum RouterMode {
     KV,
     Direct,
     LeastLoaded,
-    /// Device-aware weighted routing for heterogeneous workers.
+    /// 面向异构 worker 的设备感知加权路由。
     DeviceAwareWeighted,
 }
 
@@ -200,8 +200,8 @@ impl RouterMode {
 // SECTION: 路由算法 helper（p2c / device-aware partition / watcher spawn）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Pick the instance with lower in-flight count from two random candidates.
-/// Returns the single instance if only one is available.
+/// 从两个随机候选中选取在途请求数较少的实例。
+/// 若只有一个可用，则返回该实例。
 fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]) -> u64 {
     let count = instance_ids.len();
     if count == 1 {
@@ -226,17 +226,17 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
     selected
 }
 
-/// Select the target device group for the next request in `DeviceAwareWeighted` mode.
+/// 为 `DeviceAwareWeighted` 模式下的下一个请求选择目标设备组。
 ///
-/// If only one class exists (all CPU or all non-CPU), returns that class directly.
-/// If both classes exist, compares capability-normalized load and returns the less-loaded group.
+/// 若只存在一个类别（全 CPU 或全非 CPU），则直接返回该类别。
+/// 若两个类别都存在，则比较能力归一化后的负载并返回负载较低的组。
 ///
-/// Budget check (integer form):
-/// `allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
-/// and choose CPU when `total_cpu_inflight < allowed_cpu_inflight`.
+/// 预算检查（整数形式）：
+/// 公式：`allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
+/// 当 `total_cpu_inflight < allowed_cpu_inflight` 时选择 CPU。
 ///
-/// `ratio` is `non_cpu_to_cpu_ratio` (from `PGD_ENCODER_CUDA_TO_CPU_RATIO`,
-/// default `8` in `device_aware_weighted`).
+/// `ratio` 为 `non_cpu_to_cpu_ratio`（来自 `PGD_ENCODER_CUDA_TO_CPU_RATIO`，
+/// 在 `device_aware_weighted` 中默认为 `8`）。
 fn device_aware_candidate_group(
     state: &RoutingOccupancyState,
     instance_ids: &[u64],
@@ -261,7 +261,7 @@ fn device_aware_candidate_group(
         return cpu_ids;
     }
 
-    // Both classes exist: compute a budget for CPU in-flight requests.
+    // 两个类别都存在：为 CPU 在途请求计算预算。
     let total_non_cpu_inflight: u64 = non_cpu_ids.iter().map(|id| state.load(*id)).sum();
     let total_cpu_inflight: u64 = cpu_ids.iter().map(|id| state.load(*id)).sum();
     let cpu_count = cpu_ids.len() as u64;
@@ -276,16 +276,16 @@ fn device_aware_candidate_group(
     }
 }
 
-/// At most one `list_and_watch` per portname, across all `PushRouter`
-/// instances. Entry removed on watcher exit so a later router can re-arm.
+/// 跨所有 `PushRouter` 实例，每个 portname 最多一个 `list_and_watch`。
+/// 条目在 watcher 退出时被移除，以便后续 router 可重新启用。
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<PortNameId, ()>> =
     std::sync::OnceLock::new();
 
-/// Watch discovery for instance removals and cancel pending response-stream
-/// registrations on the removed instance, unblocking queued requests with
-/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
-/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `PortNameInstanceId`.
+/// 监视 discovery 的实例移除事件，取消被移除实例上待处理的
+/// 响应流注册，以可迁移的 `Disconnected` 错误解锁排队中的请求。
+/// 使用原始 `list_and_watch` 事件（而非合并后的快照差异），使同一
+/// 身份的快速 移除→重新加入 不会被静默吞掉。以完整的
+/// `PortNameInstanceId` 作为键。
 fn spawn_instance_removal_watcher(
     portname: PortName,
     addressed: Arc<AddressedPushRouter>,
@@ -296,7 +296,7 @@ fn spawn_instance_removal_watcher(
     };
     use tokio_stream::StreamExt as _;
 
-    // One watcher per portname: if one is already running, skip.
+    // 每个 portname 一个 watcher：若已有一个在运行，则跳过。
     let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
     let portname_id = portname.id();
     if guard.insert(portname_id.clone(), ()).is_some() {
@@ -310,8 +310,8 @@ fn spawn_instance_removal_watcher(
     let portname_name = portname.name().to_string();
 
     tokio::spawn(async move {
-        // Release on every exit path (including panic); a leaked entry
-        // silently disables removal cancellation until process restart.
+        // 在每条退出路径（包括 panic）上释放；泄露的条目会
+        // 静默地禁用移除取消功能，直到进程重启。
         struct GuardRelease(PortNameId);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
@@ -325,7 +325,7 @@ fn spawn_instance_removal_watcher(
         let namespace = portname.servicegroup().namespace().name();
         let servicegroup = portname.servicegroup().name().to_string();
 
-        // Reconnect on transient discovery failure; cancel-aware backoff.
+        // 在瞬时 discovery 故障时重连；支持取消的退避。
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
         'reconnect: loop {
             let query = DiscoveryQuery::PortName {
@@ -400,7 +400,7 @@ fn spawn_instance_removal_watcher(
 }
 
 async fn addressed_router(portname: &PortName) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    // Get network manager and create client (no mode checks!)
+    // 获取网络管理器并创建客户端（不做模式检查！）
     let manager = portname.drt().network_manager();
     let req_client = manager.create_client()?;
     let resp_transport = portname.drt().tcp_server().await?;
@@ -418,16 +418,16 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    /// Create a new PushRouter without a worker load monitor (no busy detection)
+    /// 创建一个不带 worker 负载监控器的新 PushRouter（无繁忙检测）
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_monitor(client, router_mode, None).await
     }
 
-    /// Create a new PushRouter with fault detection disabled.
+    /// 创建一个禁用故障检测的新 PushRouter。
     ///
-    /// Unlike `from_client`, this router will not call `report_instance_down` on
-    /// transient errors, and `direct()` uses the raw discovery instance list instead
-    /// of the filtered avail list. Use for recovery/query paths.
+    /// 与 `from_client` 不同，该 router 不会在瞬时错误时调用
+    /// `report_instance_down`，且 `direct()` 使用原始 discovery 实例列表
+    /// 而非过滤后的可用列表。用于恢复/查询路径。
     pub async fn from_client_no_fault_detection(
         client: Client,
         router_mode: RouterMode,
@@ -445,7 +445,7 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // 当 worker 宕机时取消孤立的待处理响应流。
         spawn_instance_removal_watcher(
             client.portname.clone(),
             addressed.clone(),
@@ -464,12 +464,12 @@ where
         })
     }
 
-    /// Create a new PushRouter with an optional worker load monitor.
+    /// 创建一个带可选 worker 负载监控器的新 PushRouter。
     ///
-    /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// busy detection itself is driven by the monitor via `client.update_free_instances(...)`.
-    /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// `client.instance_ids_free()` returns all instances and the gate never rejects.
+    /// 拒绝路径由 `fault_detection_enabled`（此处为 true）控制；
+    /// 繁忙检测本身由监控器通过 `client.update_free_instances(...)` 驱动。
+    /// 若监控器未配置阈值（或未提供监控器），
+    /// `client.instance_ids_free()` 返回全部实例，闸门绝不拒绝。
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -477,7 +477,7 @@ where
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.portname).await?;
 
-        // Start worker monitor if provided and in dynamic mode
+        // 如提供了监控器且处于动态模式，则启动 worker 监控器
         if let Some(monitor) = worker_monitor.as_ref() {
             monitor.start_monitoring().await?;
         }
@@ -493,7 +493,7 @@ where
             None
         };
 
-        // Cancel orphaned pending response streams when workers die.
+        // 当 worker 宕机时取消孤立的待处理响应流。
         spawn_instance_removal_watcher(
             client.portname.clone(),
             addressed.clone(),
@@ -514,7 +514,7 @@ where
         Ok(router)
     }
 
-    /// Issue a request to the next available instance in a round-robin fashion
+    /// 以轮询方式向下一个可用实例发出请求
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
@@ -532,7 +532,7 @@ where
             .await
     }
 
-    /// Issue a request to a random portname
+    /// 向随机 portname 发出请求
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
             let instance_ids = self.client.instance_ids_avail();
@@ -549,8 +549,8 @@ where
             .await
     }
 
-    /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
-    /// route to the one with fewer in-flight requests.
+    /// 使用二选一（power-of-two-choices）发出请求：随机选 2 个健康 worker，
+    /// 路由到在途请求较少的那个。
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_id = {
@@ -572,15 +572,15 @@ where
         }
     }
 
-    /// Issue a request to a specific portname
+    /// 向特定 portname 发出请求
     pub async fn direct(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
-        // When fault detection is disabled, check the raw discovery list
-        // (not filtered by report_instance_down) so transient failures
-        // don't poison the instance for subsequent retries.
+        // 当故障检测被禁用时，检查原始 discovery 列表
+        // （未被 report_instance_down 过滤），使瞬时故障
+        // 不会在后续重试中毒化该实例。
         let found = if self.fault_detection_enabled {
             self.client.instance_ids_avail().contains(&instance_id)
         } else {
@@ -598,14 +598,13 @@ where
             .await
     }
 
-    /// Issue a request using device-aware weighted routing.
+    /// 使用设备感知加权路由发出请求。
     ///
-    /// Instances are partitioned by device type (CPU vs non-CPU), then the router
-    /// applies a budget policy and selects the least-loaded instance within the
-    /// chosen group.
+    /// 实例按设备类型（CPU 与非 CPU）划分，随后 router
+    /// 应用预算策略并在所选组内选择负载最低的实例。
     ///
-    /// If only one device class exists (all CPU or all non-CPU), this naturally
-    /// degenerates to least-loaded routing over the available instances.
+    /// 若只存在一个设备类别（全 CPU 或全非 CPU），这会自然
+    /// 退化为对可用实例的负载最低路由。
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_ids = self.avail_instance_ids_vec();
@@ -614,17 +613,17 @@ where
             return Err(self.no_instances_error());
         }
 
-        // Apply a unified policy for all portnames.
+        // 对所有 portname 应用统一策略。
         let portname_id = self.client.portname.id();
 
-        // For encoder portnames, partition by device type
+        // 对于 encoder portname，按设备类型划分
         let instances = self.client.instances();
         let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
             .iter()
             .map(|inst| (inst.instance_id, inst.device_type.clone()))
             .collect();
 
-        // Apply budget-based routing to determine which group to send to
+        // 应用基于预算的路由以决定发往哪个组
         let cuda_to_cpu_ratio = std::env::var("PGD_ENCODER_CUDA_TO_CPU_RATIO")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -637,7 +636,7 @@ where
             cuda_to_cpu_ratio,
         );
 
-        // Select least-loaded within the chosen group
+        // 在所选组内选择负载最低者
         let instance_id = state
             .select_exact_min_and_increment(&candidates)
             .await
@@ -668,7 +667,7 @@ where
         }
     }
 
-    /// Issue a request to the instance with the fewest active connections.
+    /// 向活动连接最少的实例发出请求。
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_ids = self.avail_instance_ids_vec();
@@ -691,9 +690,9 @@ where
         }
     }
 
-    /// Select the next worker according to the routing mode.
-    /// Increments round-robin counter if applicable.
-    /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    /// 根据路由模式选择下一个 worker。
+    /// 如适用则递增轮询计数器。
+    /// 对于需要请求生命周期跟踪或显式路由提示的模式返回 None。
     pub fn select_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -723,9 +722,9 @@ where
         }
     }
 
-    /// Peek the next worker according to the routing mode without incrementing the counter.
-    /// Useful for checking if a worker is suitable before committing to it.
-    /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
+    /// 按路由模式稥视下一个 worker 而不递增计数器。
+    /// 用于在提交之前检查 worker 是否合适。
+    /// 对于需要请求生命周期跟踪或显式路由提示的模式返回 None。
     pub fn peek_next_worker(&self) -> Option<u64> {
         let instance_ids = self.client.instance_ids_avail();
         let count = instance_ids.len();
@@ -735,13 +734,13 @@ where
 
         match self.router_mode {
             RouterMode::RoundRobin => {
-                // Just peek at the current counter value without incrementing
+                // 仅稥视当前计数器值而不递增
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
                 Some(instance_ids[counter % count])
             }
             RouterMode::Random => {
-                // For random, peeking implies a fresh random selection since it's stateless.
-                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
+                // 对于 random，由于无状态，稥视意味着一次新的随机选择。
+                // 注意：调用方必须意识到 select_next_worker() 会选出一个不同的随机 worker。
                 let counter = rand::rng().random::<u64>() as usize;
                 Some(instance_ids[counter % count])
             }
@@ -783,15 +782,7 @@ where
         self.client.instance_ids_avail().iter().copied().collect()
     }
 
-    /*
-    pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let subject = self.client.portname.subject();
-        tracing::debug!("static got subject: {subject}");
-        let request = request.map(|req| AddressedRequest::new(req, subject));
-        tracing::debug!("router generate");
-        self.addressed.generate(request).await
-    }
-    */
+
 
     async fn generate_with_fault_detection(
         &self,
@@ -811,11 +802,11 @@ where
             )
         };
 
-        // Check if all workers are busy (when fault detection is enabled).
+        // 检查是否所有 worker 都繁忙（当故障检测启用时）。
         if self.fault_detection_enabled {
             let free_instances = self.client.instance_ids_free();
             if free_instances.is_empty() {
-                // Check if we actually have any instances at all
+                // 检查我们是否确实拥有任何实例
                 let all_instances = self.client.instance_ids();
                 if !all_instances.is_empty() {
                     tracing::warn!(
@@ -836,8 +827,8 @@ where
             }
         }
 
-        // Resolve transport address; if the selected instance disappeared
-        // between selection and dispatch, fall back to another available one.
+        // 解析传输地址；若所选实例在选择与派发之间消失，
+        // 则回退到另一个可用实例。
         let (address, _transport_kind, instance) = {
             use crate::servicegroup::TransportType;
 
@@ -880,8 +871,8 @@ where
             if let Some(result) = resolve_transport(instance_id) {
                 result
             } else {
-                // Instance vanished — pick a different one from the current
-                // availability list and retry the lookup once.
+                // 实例消失 —— 从当前可用列表中选另一个
+                // 并重试查找一次。
                 let avail = self.client.instance_ids_avail();
                 let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
                 match fallback_id {
@@ -933,7 +924,7 @@ where
                 let client = self.client.clone();
                 let client_for_timeout = self.client.clone();
                 let stream = stream.map(move |res| {
-                    // Check if the error is migratable (indicates worker/connection failure)
+                    // 检查错误是否可迁移（表明 worker/连接故障）
                     if let Some(err) = res.err()
                         && is_inhibited(&err)
                     {
@@ -945,9 +936,9 @@ where
                     res
                 });
 
-                // Request-plane inactivity timeout: emit a ResponseTimeout error item
-                // when the backend stops producing output. This triggers is_inhibited()
-                // → report_instance_down() to quarantine the worker.
+                // 请求平面不活动超时：当后端停止产出输出时，
+                // 发出一个 ResponseTimeout 错误项。这会触发 is_inhibited()
+                // → report_instance_down() 以隔离该 worker。
                 let stream: Pin<Box<dyn Stream<Item = U> + Send>> = if let Some(timeout) =
                     self.response_timeout
                 {
@@ -1067,24 +1058,24 @@ mod tests {
     //!
     //! | 测试名 | 覆盖维度 |
     //! |---|---|
-    //! | `p2c_selects_lower_load_worker` | （lib-copy）两节点 load 悬殊 → 选低载 |
-    //! | `p2c_selects_single_worker` | （lib-copy）单节点退化 |
-    //! | `p2c_treats_missing_counts_as_zero` | （lib-copy）缺失计数等价 0 |
-    //! | `p2c_returns_valid_worker_on_tie` | （lib-copy）平局也只返回候选集成员 |
-    //! | `occupancy_permit_decrements_before_stream_creation` | （lib-copy）Permit drop -1 |
-    //! | `occupancy_tracked_stream_decrements_on_drop` | （lib-copy）Stream drop -1 |
-    //! | `p2c_lifecycle_tracks_inflight_counts_with_shared_tracker` | （lib-copy）多 Permit 计数闭环 |
-    //! | `p2c_never_selects_dominated_worker` | （lib-copy）绝对劣势节点永不胜出 |
-    //! | `least_loaded_selects_exact_min_and_tracks_counts` | （lib-copy） |
-    //! | `least_loaded_select_and_peek_return_none_with_available_worker` | （lib-copy） |
-    //! | `device_aware_cpu_only_selects_least_loaded_instance` | （lib-copy） |
-    //! | `device_aware_non_cpu_only_selects_least_loaded_instance` | （lib-copy） |
-    //! | `device_aware_group_uses_ratio_budget` | （lib-copy） |
-    //! | `device_aware_weighted_select_and_peek_return_none_with_available_worker` | （lib-copy） |
-    //! | `transport_resolution_falls_back_when_selected_instance_disappears` | （lib-copy） |
-    //! | `transport_resolution_errors_when_no_instances_available` | （lib-copy） |
-    //! | `watcher_dedup_guard_released_on_panic` | （lib-copy）Drop guard panic 释放 |
-    //! | `watcher_dedup_guard_released_on_normal_exit` | （lib-copy）Drop guard 正常释放 |
+    //! | `p2c_selects_lower_load_worker` | 两节点 load 悬殊 → 选低载 |
+    //! | `p2c_selects_single_worker` | 单节点退化 |
+    //! | `p2c_treats_missing_counts_as_zero` | 缺失计数等价 0 |
+    //! | `p2c_returns_valid_worker_on_tie` | 平局也只返回候选集成员 |
+    //! | `occupancy_permit_decrements_before_stream_creation` | Permit 在流创建前 drop -1 |
+    //! | `occupancy_tracked_stream_decrements_on_drop` | Stream drop 时 -1 |
+    //! | `p2c_lifecycle_tracks_inflight_counts_with_shared_tracker` | 多 Permit 计数闭环 |
+    //! | `p2c_never_selects_dominated_worker` | 绝对劣势节点永不胜出 |
+    //! | `least_loaded_selects_exact_min_and_tracks_counts` | 最小负载选精确最小值并跟踪计数 |
+    //! | `least_loaded_select_and_peek_return_none_with_available_worker` | 无可用 worker 时 select/peek 返回 None |
+    //! | `device_aware_cpu_only_selects_least_loaded_instance` | CPU-only 设备感知选最小负载实例 |
+    //! | `device_aware_non_cpu_only_selects_least_loaded_instance` | 非 CPU-only 设备感知选最小负载实例 |
+    //! | `device_aware_group_uses_ratio_budget` | 设备感知分组按比例预算分配 |
+    //! | `device_aware_weighted_select_and_peek_return_none_with_available_worker` | 加权设备感知无可用 worker 时返回 None |
+    //! | `transport_resolution_falls_back_when_selected_instance_disappears` | 选中实例消失时传输解析回退 |
+    //! | `transport_resolution_errors_when_no_instances_available` | 无实例可用时传输解析报错 |
+    //! | `watcher_dedup_guard_released_on_panic` | Drop guard panic 释放 |
+    //! | `watcher_dedup_guard_released_on_normal_exit` | Drop guard 正常释放 |
     //! | `router_mode_default_is_round_robin` | `Default::default()` 锁定 `RoundRobin` |
     //! | `router_mode_is_kv_routing_flag` | `is_kv_routing()` 仅在 `KV` 时 true |
     //! | `router_mode_is_direct_routing_flag` | `is_direct_routing()` 仅在 `Direct` 时 true |
@@ -1127,7 +1118,7 @@ mod tests {
         }
         state.increment(2);
 
-        // With only two workers, p2c_select_from must pick both and choose id=2 (lower load).
+        // 仅有两个 worker 时，p2c_select_from 必须同时考虑二者并选中 id=2（负载更低）。
         let result = p2c_select_from(&state, &[1, 2]);
         assert_eq!(result, 2);
     }
@@ -1144,7 +1135,7 @@ mod tests {
         for _ in 0..5 {
             state.increment(1);
         }
-        // Worker 2 has no entry — should be treated as 0, so it wins.
+        // worker 2 没有条目——应视为 0，因此它会胜出。
         let result = p2c_select_from(&state, &[1, 2]);
         assert_eq!(result, 2);
     }
@@ -1278,7 +1269,7 @@ mod tests {
     #[tokio::test]
     async fn device_aware_cpu_only_selects_least_loaded_instance() {
         let state = RoutingOccupancyState::default();
-        // All candidates are CPU. Make worker 2 the least-loaded one.
+        // 所有候选都是 CPU。让 worker 2 成为负载最低者。
         for _ in 0..3 {
             state.increment(1);
         }
@@ -1304,7 +1295,7 @@ mod tests {
     #[tokio::test]
     async fn device_aware_non_cpu_only_selects_least_loaded_instance() {
         let state = RoutingOccupancyState::default();
-        // All candidates are non-CPU. Make worker 2 the least-loaded one.
+        // 所有候选都是非 CPU。让 worker 2 成为负载最低者。
         for _ in 0..3 {
             state.increment(1);
         }
@@ -1330,18 +1321,18 @@ mod tests {
     #[test]
     fn device_aware_group_uses_ratio_budget() {
         let state = RoutingOccupancyState::default();
-        // CPU ids: 1,2 ; non-CPU ids: 3,4
+        // CPU id：1,2；非 CPU id：3,4
         for _ in 0..4 {
             state.increment(3);
             state.increment(4);
         }
-        // CPU inflight can differ across instances; budgeting uses total CPU inflight.
+        // CPU 在途数可在不同实例间不同；预算使用 CPU 在途总数。
         for _ in 0..3 {
             state.increment(1);
         }
-        // total_non_cpu_inflight=8, cpu_count=2, non_cpu_count=2, ratio=2
-        // allowed_cpu_inflight = 8*2/(2*2)=4
-        // total_cpu_inflight=3 < 4 => choose CPU group.
+        // 预算示例：total_non_cpu_inflight=8，cpu_count=2，non_cpu_count=2，ratio=2。
+        // allowed_cpu_inflight = 8*2/(2*2)=4。
+        // total_cpu_inflight=3 < 4，因此选择 CPU 组。
         let instance_ids = vec![1, 2, 3, 4];
         let device_type_map = HashMap::from([
             (1, Some(DeviceType::Cpu)),
@@ -1353,7 +1344,7 @@ mod tests {
         let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 2);
         assert_eq!(candidates, vec![1, 2]);
 
-        // Within selected CPU group, final choice should be the least-loaded instance (id=2).
+        // 在所选 CPU 组内，最终应选负载最低的实例（id=2）。
         let selected =
             futures::executor::block_on(state.select_exact_min_and_increment(&candidates)).unwrap();
         assert_eq!(selected, 2);
@@ -1386,9 +1377,8 @@ mod tests {
         rt.shutdown();
     }
 
-    /// When the router selects an instance that has deregistered between selection
-    /// and transport resolution, it should fall back to another available instance
-    /// rather than returning a 500 error.
+    /// 当 router 选中的实例在选择与传输解析之间已注销时，
+    /// 应回退到另一个可用实例，而不是返回 500 错误。
     #[tokio::test]
     async fn transport_resolution_falls_back_when_selected_instance_disappears() {
         let rt = Runtime::from_current().unwrap();
@@ -1402,37 +1392,34 @@ mod tests {
         let portname = servicegroup.portname("test_portname".to_string());
         let client = portname.client().await.unwrap();
 
-        // Register one real instance so it appears in instance_source.
+        // 注册一个真实实例，使其出现在 instance_source 中。
         portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
         let real_id = client.instance_ids()[0];
 
-        // Inject a stale ID into instance_avail that does NOT exist in
-        // instance_source. This simulates the race window where an instance
-        // deregistered after selection but before transport resolution.
+        // 向 instance_avail 注入一个在 instance_source 中不存在的过期 ID。
+        // 这模拟实例在选择后、传输解析前注销的竞争窗口。
         let stale_id = real_id + 1000;
         client.override_instance_avail(vec![stale_id, real_id]);
 
-        // Build a router and call direct() targeting the *real* instance to
-        // verify the router can still resolve transport for known instances.
+        // 构建 router 并调用 direct() 以 *真实* 实例为目标，
+        // 验证 router 仍能为已知实例解析传输。
         let router =
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
-        // Round robin should succeed — even if it picks stale_id first, the
-        // fallback logic should resolve transport via real_id.
-        // We cannot fully test the network send without a worker, but we can
-        // verify it doesn't fail at the transport resolution stage by checking
-        // that the error (if any) is a transport/network error, not
-        // "Instance not found".
+        // 轮询应成功——即使它先选中 stale_id，回退逻辑也应通过
+        // real_id 解析传输。
+        // 在没有 worker 的情况下无法完整测试网络发送，但可以
+        // 通过检查错误（若有）是否为传输/网络错误，而不是
+        // "Instance not found"，来验证这一点。
         let request = SingleIn::new(42u64);
         let result = router.generate(request).await;
 
-        // The request may fail at the network level (no actual worker), but it
-        // must NOT fail with "Instance X not found" — that would mean the
-        // fallback did not work.
+        // 请求可能在网络层失败（没有真实 worker），但绝不能
+        // 以 "Instance X not found" 失败——那说明回退没有生效。
         if let Err(err) = &result {
             let msg = format!("{err}");
             assert!(
@@ -1444,8 +1431,8 @@ mod tests {
         rt.shutdown();
     }
 
-    /// When no instances are available at all (both primary and fallback),
-    /// the router should return a clear error.
+    /// 当完全没有可用实例（主路径和回退都没有）时，
+    /// router 应返回清晰错误。
     #[tokio::test]
     async fn transport_resolution_errors_when_no_instances_available() {
         let rt = Runtime::from_current().unwrap();
@@ -1459,7 +1446,7 @@ mod tests {
         let portname = servicegroup.portname("test_portname".to_string());
         let client = portname.client().await.unwrap();
 
-        // Register an instance so we can create the router (needs transport setup).
+        // 注册一个实例，以便创建 router（需要传输初始化）。
         portname.register_portname_instance().await.unwrap();
         client.wait_for_instances().await.unwrap();
 
@@ -1468,8 +1455,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        // Override avail to contain only a stale ID with no real backing
-        // instance AND no other available fallback.
+        // 覆盖 avail，使其只包含一个没有真实后端实例、
+        // 且没有其他可用回退的过期 ID。
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
 
@@ -1486,32 +1473,31 @@ mod tests {
         rt.shutdown();
     }
 
-    /// The watcher dedup guard must be released even if the spawned task panics.
-    /// Without this, a panic anywhere in the watcher body would leave a stale
-    /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
-    /// request cancellation for that portname until process restart.
+    /// 即使派生任务 panic，watcher 的去重守卫也必须释放。
+    /// 否则，watcher 体内任意位置的 panic 都会留下过期的
+    /// `ENDPOINT_WATCHER_ACTIVE` 条目，静默地禁用该 portname 的
+    /// 孤儿待处理请求取消，直到进程重启。
     ///
-    /// We exercise the Drop-guard pattern directly against the same static
-    /// rather than driving `spawn_instance_removal_watcher` end-to-end (which
-    /// would require staging a panicking discovery stream). The test mirrors
-    /// the production code's GuardRelease shape; if the production code stops
-    /// using a Drop guard, the integration would regress and the existing
-    /// orphan-cancellation tests would fail.
+    /// 我们直接针对同一个静态对象演练 Drop guard 模式，而不是
+    /// 端到端驱动 `spawn_instance_removal_watcher`（那需要构造一个
+    /// 会 panic 的 discovery 流）。该测试复现了生产代码的
+    /// GuardRelease 形状；如果生产代码停止使用 Drop guard，
+    /// 该集成就会回归，现有的孤儿取消测试也会失败。
     #[tokio::test]
     async fn watcher_dedup_guard_released_on_panic() {
         let portname_id = PortNameId {
             namespace: "panic-test-ns".to_string(),
-            servicegroup: "panic-test-comp".to_string(),
+            servicegroup: "panic-test-sg".to_string(),
             name: "panic-test-portname".to_string(),
         };
 
-        // Mimic the production code's pre-spawn dedup insert.
+        // 模拟生产代码在 spawn 前的去重插入。
         let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
         map.insert(portname_id.clone(), ());
 
         let portname_id_clone = portname_id.clone();
         let join = tokio::spawn(async move {
-            // Same shape as in spawn_instance_removal_watcher.
+            // 与 `spawn_instance_removal_watcher` 中的形状一致。
             struct GuardRelease(PortNameId);
             impl Drop for GuardRelease {
                 fn drop(&mut self) {
@@ -1532,14 +1518,14 @@ mod tests {
         );
     }
 
-    /// Normal-exit path: the Drop guard releases the entry when the task
-    /// finishes without panicking. This is the everyday case (cancel_token
-    /// fires or discovery stream closes).
+    /// 正常退出路径：任务在未 panic 的情况下结束时，Drop guard
+    /// 会释放条目。这是日常情况（cancel_token 触发或 discovery
+    /// 流关闭）。
     #[tokio::test]
     async fn watcher_dedup_guard_released_on_normal_exit() {
         let portname_id = PortNameId {
             namespace: "normal-test-ns".to_string(),
-            servicegroup: "normal-test-comp".to_string(),
+            servicegroup: "normal-test-sg".to_string(),
             name: "normal-test-portname".to_string(),
         };
 
@@ -1557,7 +1543,7 @@ mod tests {
                 }
             }
             let _release = GuardRelease(portname_id_clone);
-            // task body returns normally
+            // 任务体正常返回
         })
         .await
         .unwrap();

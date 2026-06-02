@@ -8,10 +8,10 @@
 //! PushEndpoint"的旧模式，使 NATS 入站层与 HTTP/TCP 服务器在抽象层面对齐——三者均
 //! 实现 `RequestPlaneServer`，对调用方屏蔽传输差异。
 //! - 端点 service group 由 [`crate::servicegroup::Registry`] 按 `{namespace}_{servicegroup}`
-//!   slugify 后的名字查表；
-//! - 每个端点拥有独立 `CancellationToken`，便于细粒度 `unregister_portname`；
+//!   slugify 之后的名字查表；
+//! - 每个端点都有独立的 `CancellationToken`，便于细粒度执行 `unregister_portname`；
 //! - 内部委托给 [`PushEndpoint::start`] 跑请求循环，本文件只负责 wiring、
-//!   注册表、cancel token 与 join handle 的生命周期管理。
+//!   注册表、cancel token 和 join handle 的生命周期管理。
 //!
 //! ## 外部契约
 //! - `pub struct NatsMultiplexedServer` 字段全私有；
@@ -21,16 +21,16 @@
 //!   / `is_healthy`；签名与 trait 完全一致。
 //! - 模块**不**导出任何辅助类型；`PortNameTask` 私有。
 //! - `address()` 固定返回 `"nats://connected"`，`transport_name()` 返回 `"nats"`，
-//!   `is_healthy()` 固定 `true` —— 这些常量行为是契约。
+//!   `is_healthy()` 固定 `true` —— 这些常量行为本身就是契约。
 //!
 //! ## 实现要点
-//! - 端点 NATS subject 用 `{portname_name}-{instance_id:x}`，与
-//!   `PortName::name_with_id() / subject_to()` 一致；这是跨进程契约。
-//! - `register_portname` 末尾 `sleep(10ms)` 防御性等待 NATS 端点真正开始监听，
-//!   避免 discovery 抢先把端点注册到外部目录而请求到达时 NATS 还没准备好。
+//! - 端点 NATS subject 使用 `{portname_name}-{instance_id:x}`，与
+//!   `PortName::name_with_id() / subject_to()` 保持一致；这是跨进程契约。
+//! - `register_portname` 末尾通过 `sleep(10ms)` 做防御性等待，确保 NATS 端点真正开始监听，
+//!   避免 discovery 抢先把端点注册到外部目录，而请求到达时 NATS 还没准备好。
 //! - `PortNameTask` 保存 `cancel_token + join_handle`，`unregister_portname`
-//!   先 cancel 再 await join，让 `PushEndpoint` 的 graceful shutdown 完成 inflight。
-//! - `servicegroup_registry.inner.lock().await` 后立即 `drop(registry)` 释放锁，
+//!   先 cancel 再 await join，让 `PushEndpoint` 的 graceful shutdown 能完成 inflight。
+//! - 在 `servicegroup_registry.inner.lock().await` 之后立即 `drop(registry)` 释放锁，
 //!   避免在 `tokio::spawn` 持有期间长时间锁住 registry。
 
 use super::*;
@@ -46,11 +46,10 @@ use tokio_util::sync::CancellationToken;
 
 // === SECTION: 类型与构造 ===
 
-/// Multiplexed NATS server that handles multiple portnames
+/// 处理多个 portname 的多路复用 NATS 服务端。
 ///
-/// Unlike the previous per-portname approach, this server manages multiple
-/// portnames, getting the service group dynamically from the servicegroup registry
-/// for each portname registration.
+/// 与之前每个 portname 一个实例的方案不同，这个服务端统一管理多个 portname，
+/// 并在每次注册时从 servicegroup registry 动态获取对应的 service group。
 pub struct NatsMultiplexedServer {
     nats_client: async_nats::Client,
     servicegroup_registry: crate::servicegroup::Registry,
@@ -65,13 +64,13 @@ struct PortNameTask {
 }
 
 impl NatsMultiplexedServer {
-    /// Create a new multiplexed NATS server
+    /// 创建一个新的多路复用 NATS 服务端。
     ///
-    /// # Arguments
+    /// # 参数
     ///
-    /// * `nats_client` - NATS client for connection management
-    /// * `servicegroup_registry` - ServiceGroup registry to get service groups from
-    /// * `cancellation_token` - Token for graceful shutdown
+    /// * `nats_client` - 用于连接管理的 NATS 客户端
+    /// * `servicegroup_registry` - 用来获取 service group 的 ServiceGroup 注册表
+    /// * `cancellation_token` - 用于优雅关闭的令牌
     pub fn new(
         nats_client: async_nats::Client,
         servicegroup_registry: crate::servicegroup::Registry,
@@ -107,8 +106,8 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "NatsMultiplexedServer::register_portname called"
         );
 
-        // Get the service group from the servicegroup registry
-        // Service name format matches ServiceGroup::service_name(): "{namespace}_{servicegroup}" slugified
+        // 从 servicegroup registry 中取出 service group。
+        // 服务名格式与 ServiceGroup::service_name() 一致："{namespace}_{servicegroup}" 再做 slugify。
         use crate::transports::nats::Slug;
         let service_name_raw = format!("{}_{}", namespace, servicegroup_name);
         let service_name = Slug::slugify(&service_name_raw).to_string();
@@ -127,14 +126,14 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in registry", service_name))?;
         drop(registry);
 
-        tracing::info!("Successfully retrieved service group");
+        tracing::info!("已成功取回 service group");
 
-        // Construct the full NATS subject with instance ID
-        // Format: {portname_name}-{instance_id_hex}
-        // This matches PortName::name_with_id() and subject_to() format
+        // 构造包含 instance ID 的完整 NATS subject。
+        // 格式：{portname_name}-{instance_id_hex}
+        // 这与 PortName::name_with_id() 和 subject_to() 的格式一致。
         let portname_with_id = format!("{}-{:x}", portname_name, instance_id);
 
-        // Create NATS service portname with the full subject
+        // 用完整 subject 创建 NATS service portname。
         let service_endpoint = servicegroup
             .endpoint(&portname_with_id)
             .await
@@ -155,11 +154,11 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "Registering NATS portname"
         );
 
-        // Create cancellation token for this specific portname
+        // 为这个特定 portname 创建取消令牌。
         let portname_cancel = CancellationToken::new();
         let portname_cancel_clone = portname_cancel.clone();
 
-        // Build the push portname
+        // 构建 push portname。
         let push_endpoint = PushEndpoint::builder()
             .service_handler(service_handler)
             .cancellation_token(portname_cancel_clone)
@@ -173,8 +172,8 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "Starting NATS push portname listener (blocking)"
         );
 
-        // Spawn task to handle this portname using PushEndpoint
-        // Note: PushEndpoint::start() is a blocking loop that runs until cancelled
+        // 启动任务，使用 PushEndpoint 处理这个 portname。
+        // 注意：PushEndpoint::start() 是一个阻塞循环，会一直运行到被取消为止。
         let portname_name_clone = portname_name.clone();
         let join_handle = tokio::spawn(async move {
             if let Err(e) = push_endpoint
@@ -201,12 +200,11 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             }
         });
 
-        // Give the portname a moment to start listening
-        // This prevents a race condition where discovery registers the portname
-        // before NATS is actually ready to receive requests
+        // 让 portname 稍微有一点时间开始监听。
+        // 这样可以避免 discovery 先注册该 portname，而 NATS 还没准备好接收请求的竞态。
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Store task info for later cleanup
+        // 保存任务信息，供后续清理。
         self.handlers.insert(
             portname_name.clone(),
             PortNameTask {
@@ -225,10 +223,10 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
                 portname_name = %portname_name,
                 "Unregistering NATS portname"
             );
-            // Cancel the token to trigger graceful shutdown
+            // 取消令牌，触发优雅关闭。
             task.cancel_token.cancel();
 
-            // Wait for the portname task to complete (which includes waiting for inflight requests)
+            // 等待 portname 任务完成（其中包括等待 in-flight 请求）。
             tracing::debug!(
                 portname_name = %portname_name,
                 "Waiting for NATS portname task to complete"
@@ -249,8 +247,8 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     fn address(&self) -> String {
-        // Return NATS server URL from connection info
-        // NATS client doesn't expose server info directly, return generic address
+        // 返回 NATS 服务端 URL。
+        // NATS 客户端不会直接暴露服务端信息，因此这里返回通用地址。
         "nats://connected".to_string()
     }
 
@@ -259,8 +257,8 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     fn is_healthy(&self) -> bool {
-        // Check if NATS client is connected
-        // NATS client doesn't expose connection state directly, assume healthy
+        // 检查 NATS 客户端是否已连接。
+        // NATS 客户端不会直接暴露连接状态，因此这里直接视为健康。
         true
     }
 }

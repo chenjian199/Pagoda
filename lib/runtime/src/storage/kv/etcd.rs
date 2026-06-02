@@ -7,8 +7,8 @@
 //! 把 pagoda `Store` / `Bucket` 抽象映射到 etcd 上：桶名 = 键前缀，
 //! 整个 KV 命名空间是平坦的，但用桶名前缀实现"逻辑上的桶"语义。
 //!
-//! 本实现与 lib-copy 标准版**契约完全等价**，差异在于更新路径采用 etcd 原生
-//! 事务（CAS）做并发安全保护，而非"get 然后 put with prev_key"的两次往返。
+//! 更新路径采用 etcd 原生事务（CAS）做并发安全保护，而非"get 然后
+//! put with prev_key"的两次往返。
 //!
 //! ## 外部契约
 //! - `EtcdStore::new(client)` 公开，便于 [`super::Manager::etcd`] 构造。
@@ -19,9 +19,9 @@
 //!   * `revision == 0` 走 `kv_create`：返回 `Created(1)`；若 key 已存在则返回
 //!     `Exists(server_revision)`。
 //!   * `revision > 0` 走 CAS：仅在 etcd 中的版本号是 `revision + 1` 时才写入并
-//!     返回 `Created(revision)`；版本不匹配（即被别人改过）则**与 lib-copy 同步策略一致**，
-//!     执行强制 put 把最新版本同步过来，返回 `Created(latest_version)`。
-//! - `Bucket::get` / `delete` / `watch` / `entries` 行为与 lib-copy 字面一致。
+//!     返回 `Created(revision)`；版本不匹配（即被别人改过）则执行强制 put
+//!     把最新版本同步过来，返回 `Created(latest_version)`。
+//! - `Bucket::get` / `delete` / `watch` / `entries` 行为符合 `Store` / `Bucket` 契约。
 //! - `shutdown` 不做事 —— 让 etcd lease 自然过期。
 
 use std::collections::HashMap;
@@ -65,7 +65,7 @@ impl Store for EtcdStore {
         Ok(EtcdBucket::new(self.client.clone(), bucket_name))
     }
 
-    /// 同上，不做 IO；与 lib-copy 一致：永远 `Some`。
+    /// 不做 IO；永远 `Some`。
     async fn get_bucket(&self, bucket_name: &str) -> Result<Option<Self::Bucket>, StoreError> {
         Ok(Some(EtcdBucket::new(self.client.clone(), bucket_name)))
     }
@@ -146,7 +146,7 @@ impl Bucket for EtcdBucket {
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
-        // 用空 Key 作为前缀，等价于 lib-copy 行为
+        // 用空 Key 作为前缀，等价于对整个桶做 watch
         let prefix = self.full_key(&Key::new(String::new()));
         tracing::trace!(%prefix, "etcd watch");
 
@@ -227,9 +227,8 @@ impl EtcdBucket {
     }
 
     /// 更新路径：
-    /// - lib-copy 用 "get + put_with_prev_key" 两次往返做版本同步。
-    /// - 本实现先用 kv_get 取当前版本；若与预期匹配则用 lease 绑定 put，
-    ///   否则与 lib-copy 同样做"强制覆盖并返回新版本号"的同步策略。
+    /// - 先用 kv_get 取当前版本；若与预期匹配则用 lease 绑定 put，
+    ///   否则做"强制覆盖并返回新版本号"的同步策略。
     async fn update_path(
         &self,
         key: &Key,
@@ -256,7 +255,7 @@ impl EtcdBucket {
                 %key,
                 "update: version mismatch, will force-sync"
             );
-            // 与 lib-copy 行为一致：仍然写入，但下方会从 prev_key 读出真实新版本号
+            // 仍然写入，但下方会从 prev_key 读出真实新版本号
         }
 
         let put_options = PutOptions::new()
@@ -280,7 +279,7 @@ impl EtcdBucket {
 }
 
 // =============================================================================
-// === 集成测试：并发 create 竞争（lib-copy 标准）==============================
+// === 集成测试：并发 create 竞争 ===========================================
 // =============================================================================
 
 #[cfg(feature = "integration")]

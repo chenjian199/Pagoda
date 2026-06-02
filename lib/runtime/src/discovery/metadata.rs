@@ -22,9 +22,9 @@
 //!
 //! - 三个 HashMap 的 key 一律使用各自 InstanceId 的 `to_path()` 结果，
 //!   保证“同一实例多次注册”的幂等覆盖语义；
-//! - 历史版本曾使用 K8s SSA `schema=disabled` 写元数据，空对象会被写回 `null`，
+//! - 在 K8s SSA `schema=disabled` 场景下，空对象会被写回 `null`，
 //!   因此所有字段都保留 [`deserialize_null_default`] 以容忍 `null`，
-//!   即使切换到原生 K8s 路径后仍保留作为防御性兜底；
+//!   即使切换到原生 K8s 路径后仍作为防御性兜底；
 //! - [`MetadataSnapshot::has_changes_from`] 比较 generation 而非全字段：
 //!   底层 watcher 已保证 generation 变化等价于内容变化，避免 O(n) 深比较。
 
@@ -39,7 +39,7 @@ use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
 
 /// 把 JSON `null` 或缺失字段反序列化为 `T::default()`。
 ///
-/// **历史背景**：K8s Server-Side Apply 在 `schema = "disabled"` 下，空对象 `{}`
+/// **设计动机**：K8s Server-Side Apply 在 `schema = "disabled"` 下，空对象 `{}`
 /// 经常被回写为 `null`。若不容忍，整条记录反序列化失败 → worker 从快照中消失
 /// → 上层 `list` 返回 0 条 → 流量全 404。典型触发场景是 vLLM elastic EP
 /// 缩容时 `unregister_event_channel` 把 `event_channels` 清空。

@@ -13,7 +13,7 @@
 //! - 再导出: `etcd_client::{ConnectOptions, KeyValue, LeaseClient}` 以及 `lock::*`;
 //! - [`Client::builder`] -> [`ClientOptionsBuilder`] 是构造首选入口;
 //! - 行为契约:`kv_create` 是 *幂等* 的 —— key 已存在时返回 `Ok(Some(version))`
-//!   而非 Err(PR #4212 后的对齐 StoreOutcome::Exists 的设计);
+//!   而非 Err(与 `StoreOutcome::Exists` 语义对齐);
 //! - `kv_watch_prefix` 不回放历史;`kv_get_and_watch_prefix` 先回放后追加;
 //! - `KvCache::new` 完成"拉取现有键 + 初始值补写 + 启动后台 watcher"三步初始化;
 //! - 私有 `default_servers()` 与 `Client::etcd_client()` 被同模块测试访问,不可改名;
@@ -166,7 +166,7 @@ impl Client {
     ) -> Result<Option<u64>> {
         let put_options = self.put_options_for(lease_id);
 
-        // when version==0 则写入新值;否则 get 已有值供调用方读取版本号.
+        // 当 version==0 则写入新值;否则 get 已有值供调用方读取版本号.
         let txn = Txn::new()
             .when(vec![Compare::version(key, CompareOp::Equal, 0)])
             .and_then(vec![TxnOp::put(key, value, Some(put_options))])
@@ -779,29 +779,28 @@ mod tests {
             .expect("etcd client should be available");
         let lease_id = drt.connection_id();
 
-        // Create the key
+        // 创建 key
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
-        // Try to create the key again - this should return Ok(Some(version)) indicating key already exists
-        // Note: Prior to PR #4212 (Nov 10, 2025), kv_create returned Err when key existed.
-        // PR #4212 changed the behavior to return Ok(Some(version)) for idempotency, matching
-        // the StoreOutcome::Exists pattern used in the KeyValueStore abstraction.
-        // The transaction now includes .or_else(TxnOp::get) to retrieve existing key info
-        // instead of failing, making the operation idempotent for distributed systems.
+        // 再次创建同一个 key —— 应返回 Ok(Some(version)) 表示 key 已存在.
+        // kv_create 是幂等的: key 已存在时返回 Ok(Some(version)) 而非 Err,
+        // 与 KeyValueStore 抽象中的 StoreOutcome::Exists 语义保持一致.
+        // 事务通过 .or_else(TxnOp::get) 取回已有 key 的信息而不是直接失败,
+        // 使该操作在分布式系统中保持幂等.
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(
             result.is_ok() && result.unwrap().is_some(),
             "Expected Ok(Some(version)) when key already exists"
         );
 
-        // Create or validate should succeed as the values match
+        // 值相同时 create_or_validate 应成功
         let result = client
             .kv_create_or_validate(key.to_string(), value.to_vec(), Some(lease_id))
             .await;
         assert!(result.is_ok());
 
-        // Try to create the key with a different value
+        // 用不同的值创建同一个 key
         let different_value = b"different_value";
         let result = client
             .kv_create_or_validate(key.to_string(), different_value.to_vec(), Some(lease_id))
@@ -824,31 +823,31 @@ mod tests {
     }
 
     async fn test_kv_cache_operations(drt: DistributedRuntime) -> Result<()> {
-        // Make the client and unwrap it
+        // 创建客户端并 unwrap
         let client = Client::new(ClientOptions::default(), drt.runtime().clone())
             .await
             .expect("etcd client should be available");
 
-        // Create a unique test prefix to avoid conflicts with other tests
+        // 生成唯一的测试前缀以避免与其他测试冲突
         let test_id = uuid::Uuid::new_v4().to_string();
         let prefix = format!("v1/test_kv_cache_{}/", test_id);
 
-        // Initial values
+        // 初始值
         let mut initial_values = HashMap::new();
         initial_values.insert("key1".to_string(), b"value1".to_vec());
         initial_values.insert("key2".to_string(), b"value2".to_vec());
 
-        // Create the KV cache
+        // 创建 KV 缓存
         let kv_cache = KvCache::new(client.clone(), prefix.clone(), initial_values).await?;
 
-        // Test get
+        // 测试 get
         let value1 = kv_cache.get("key1").await;
         assert_eq!(value1, Some(b"value1".to_vec()));
 
         let value2 = kv_cache.get("key2").await;
         assert_eq!(value2, Some(b"value2".to_vec()));
 
-        // Test get_all
+        // 测试 get_all
         let all_values = kv_cache.get_all().await;
         assert_eq!(all_values.len(), 2);
         assert_eq!(
@@ -860,29 +859,29 @@ mod tests {
             Some(&b"value2".to_vec())
         );
 
-        // Test put - using None for lease_id
+        // 测试 put —— lease_id 传 None
         kv_cache.put("key3", b"value3".to_vec(), None).await?;
 
-        // Allow some time for the update to propagate
+        // 等待更新传播
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Verify the new value
+        // 校验新值
         let value3 = kv_cache.get("key3").await;
         assert_eq!(value3, Some(b"value3".to_vec()));
 
-        // Test update
+        // 测试更新
         kv_cache
             .put("key1", b"updated_value1".to_vec(), None)
             .await?;
 
-        // Allow some time for the update to propagate
+        // 等待更新传播
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Verify the updated value
+        // 校验更新后的值
         let updated_value1 = kv_cache.get("key1").await;
         assert_eq!(updated_value1, Some(b"updated_value1".to_vec()));
 
-        // Test external update (simulating another client updating a value)
+        // 测试外部更新（模拟另一个客户端更新某个值）
         client
             .kv_put(
                 &format!("{}key2", prefix),
@@ -891,14 +890,14 @@ mod tests {
             )
             .await?;
 
-        // Allow some time for the update to propagate
+        // 等待更新传播
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Verify the cache was updated
+        // 校验缓存已被更新
         let external_update = kv_cache.get("key2").await;
         assert_eq!(external_update, Some(b"external_update".to_vec()));
 
-        // Clean up - delete the test keys
+        // 清理 —— 删除测试用的 key
         let etcd_client = client.etcd_client();
         let _ = etcd_client
             .kv_client()
@@ -911,7 +910,7 @@ mod tests {
         Ok(())
     }
 
-    // === SECTION: 合并自原 mod supplemental_tests ===
+    // === SECTION: 合并自 supplemental_tests 模块 ===
     // ## 测试过程
     // - `client_builder_*`/`client_options_default_*`: 不依赖 etcd,验证选项构造与
     //   `default_servers()` 在不同环境变量组合下的行为;
@@ -943,7 +942,7 @@ mod tests {
             .build()
             .ok()?;
         let client = Client::new(options, runtime).await.ok()?;
-        // etcd client can be lazily connected; probe a real operation first.
+        // etcd 客户端可能是懒连接;先探测一个真实操作.
         if client
             .kv_get("__supplemental_probe__", None)
             .await
@@ -1063,7 +1062,7 @@ mod tests {
         assert!(dbg.contains("etcd::Client"));
         assert!(dbg.contains("primary_lease=0"));
 
-        // Ensure internal client clone is usable.
+        // 确保内部客户端克隆可用.
         let resp = client
             .etcd_client()
             .kv_client()
@@ -1173,7 +1172,7 @@ mod tests {
             .expect("kv_get_and_watch_prefix should succeed");
         let mut rx = watcher_with_existing.rx;
 
-        // include_existing=true should emit current value first
+        // include_existing=true 应先发出当前值
         let initial = recv_event(&mut rx)
             .await
             .expect("should receive initial put event");
@@ -1214,7 +1213,7 @@ mod tests {
             WatchEvent::Put(_) => panic!("expected Delete event"),
         }
 
-        // include_existing=false should not replay old key
+        // include_existing=false 不应重放旧 key
         let watcher_no_existing = client
             .kv_watch_prefix(prefix.clone())
             .await
@@ -1241,7 +1240,7 @@ mod tests {
             WatchEvent::Delete(_) => panic!("expected Put event"),
         }
 
-        // KvCache covers new/start_watcher/get/get_all/put/delete paths
+        // KvCache 覆盖 new/start_watcher/get/get_all/put/delete 路径
         let mut initial_values = HashMap::new();
         initial_values.insert("a".to_string(), b"1".to_vec());
         initial_values.insert("b".to_string(), b"2".to_vec());

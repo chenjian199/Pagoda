@@ -37,13 +37,13 @@ use super::registry::Registry;
 
 pub struct Context<T: Data> {
     current: T,
-    controller: Arc<Controller>, //todo: hold this as an arc
+    controller: Arc<Controller>, // TODO：以 Arc 形式持有
     registry: Registry,
     stages: Vec<String>,
 }
 
 impl<T: Send + Sync + 'static> Context<T> {
-    // Create a new context with initial data
+    // 使用初始数据创建一个新的上下文。
     pub fn new(current: T) -> Self {
         Context {
             current,
@@ -80,12 +80,12 @@ impl<T: Send + Sync + 'static> Context<T> {
         }
     }
 
-    /// Get the id of the context
+    /// 获取上下文的 id。
     pub fn id(&self) -> &str {
         self.controller.id()
     }
 
-    /// Get the content of the context
+    /// 获取上下文的内容。
     pub fn content(&self) -> &T {
         &self.current
     }
@@ -94,33 +94,33 @@ impl<T: Send + Sync + 'static> Context<T> {
         &self.controller
     }
 
-    /// Insert an object into the registry with a specific key.
+    /// 以指定的 key 向 registry 中插入一个对象。
     pub fn insert<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: U) {
         self.registry.insert_shared(key, value);
     }
 
-    /// Insert a unique and takable object into the registry with a specific key.
+    /// 以指定的 key 向 registry 中插入一个独占且可取出的对象。
     pub fn insert_unique<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: U) {
         self.registry.insert_unique(key, value);
     }
 
-    /// Retrieve an object from the registry by key and type.
+    /// 按 key 与类型从 registry 中取回一个对象。
     pub fn get<V: Send + Sync + 'static>(&self, key: &str) -> Result<Arc<V>, String> {
         self.registry.get_shared(key)
     }
 
-    /// Clone a unique object from the registry by key and type.
+    /// 按 key 与类型从 registry 中克隆一个独占对象。
     pub fn clone_unique<V: Clone + Send + Sync + 'static>(&self, key: &str) -> Result<V, String> {
         self.registry.clone_unique(key)
     }
 
-    /// Take a unique object from the registry by key and type.
+    /// 按 key 与类型从 registry 中取出一个独占对象。
     pub fn take_unique<V: Send + Sync + 'static>(&mut self, key: &str) -> Result<V, String> {
         self.registry.take_unique(key)
     }
 
-    /// Transfer the Context to a new Object without updating the registry
-    /// This returns a tuple of the previous object and the new Context
+    /// 在不更新 registry 的前提下将 Context 转移到一个新对象上。
+    /// 返回一个元组，包含原对象与新的 Context。
     pub fn transfer<U: Send + Sync + 'static>(self, new_current: U) -> (T, Context<U>) {
         (
             self.current,
@@ -133,7 +133,7 @@ impl<T: Send + Sync + 'static> Context<T> {
         )
     }
 
-    /// Separate out the current object and context
+    /// 将当前对象与上下文分离开来。
     pub fn into_parts(self) -> (T, Context<()>) {
         self.transfer(())
     }
@@ -146,18 +146,18 @@ impl<T: Send + Sync + 'static> Context<T> {
         self.stages.push(stage.to_string());
     }
 
-    /// Transforms the current context to another type using a provided function.
+    /// 使用提供的函数将当前上下文变换为另一种类型。
     pub fn map<U: Send + Sync + 'static, F>(self, f: F) -> Context<U>
     where
         F: FnOnce(T) -> U,
     {
-        // Use the transfer method to move the current value out
+        // 使用 transfer 方法把当前值移出。
         let (current, temp_context) = self.transfer(());
 
-        // Apply the transformation function to the current value
+        // 对当前值应用变换函数。
         let new_current = f(current);
 
-        // Use transfer again to create the new context with the transformed type
+        // 再次使用 transfer 以变换后的类型创建新上下文。
         temp_context.transfer(new_current).1
     }
 
@@ -166,13 +166,13 @@ impl<T: Send + Sync + 'static> Context<T> {
         F: FnOnce(T) -> Result<U, E>,
         U: Send + Sync + 'static,
     {
-        // Use the transfer method to move the current value out
+        // 使用 transfer 方法把当前值移出。
         let (current, temp_context) = self.transfer(());
 
-        // Apply the transformation function to the current value
+        // 对当前值应用变换函数。
         let new_current = f(current)?;
 
-        // Use transfer again to create the new context with the transformed type
+        // 再次使用 transfer 以变换后的类型创建新上下文。
         Ok(temp_context.transfer(new_current).1)
     }
 }
@@ -185,7 +185,7 @@ impl<T: Data> std::fmt::Debug for Context<T> {
     }
 }
 
-// Implement Deref to allow Context<T> to act like &T
+// 实现 Deref，使 Context<T> 可以像 &T 一样使用。
 impl<T: Data> Deref for Context<T> {
     type Target = T;
 
@@ -194,14 +194,14 @@ impl<T: Data> Deref for Context<T> {
     }
 }
 
-// Implement DerefMut to allow Context<T> to act like &mut T
+// 实现 DerefMut，使 Context<T> 可以像 &mut T 一样使用。
 impl<T: Data> DerefMut for Context<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.current
     }
 }
 
-// Implement the custom trait for Context<T>
+// 为 Context<T> 实现自定义 trait。
 impl<T> From<T> for Context<T>
 where
     T: Send + Sync + 'static,
@@ -211,12 +211,12 @@ where
     }
 }
 
-// Define a custom trait for conversion from Context<T> to Context<U>
+// 定义一个用于把 Context<T> 转换为 Context<U> 的自定义 trait。
 pub trait IntoContext<U: Data> {
     fn into_context(self) -> Context<U>;
 }
 
-// Implement the custom trait for converting Context<T> to Context<U>
+// 为将 Context<T> 转换为 Context<U> 实现这个自定义 trait。
 impl<T, U> IntoContext<U> for Context<T>
 where
     T: Send + Sync + 'static + Into<U>,
@@ -251,12 +251,12 @@ impl StreamContext {
         }
     }
 
-    /// Retrieve an object from the registry by key and type.
+    /// 按 key 与类型从 registry 中取回一个对象。
     pub fn get<V: Send + Sync + 'static>(&self, key: &str) -> Result<Arc<V>, String> {
         self.registry.get_shared(key)
     }
 
-    /// Clone a unique object from the registry by key and type.
+    /// 按 key 与类型从 registry 中克隆一个独占对象。
     pub fn clone_unique<V: Clone + Send + Sync + 'static>(&self, key: &str) -> Result<V, String> {
         self.registry.clone_unique(key)
     }
@@ -325,7 +325,7 @@ impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
     }
 }
 
-// TODO - refactor here - this came from the pagoda.llm-async-engine crate
+// 此处待重构——取消传播的上下文控制逻辑后续可进一步抽象
 
 use tokio::sync::watch::{Receiver, Sender, channel};
 
@@ -338,7 +338,7 @@ enum State {
 
 // === SECTION: Controller 取消传播控制器 ===
 
-/// A context implementation with cancellation propagation.
+/// 带有取消传播能力的上下文实现。
 #[derive(Debug)]
 pub struct Controller {
     id: String,
@@ -404,7 +404,7 @@ impl AsyncEngineContext for Controller {
     }
 
     fn stop_generating(&self) {
-        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        // 复制 child 的 Arc，避免父节点意外挂到子节点下面时产生死锁。
         let children = self
             .child_context
             .lock()
@@ -420,7 +420,7 @@ impl AsyncEngineContext for Controller {
     }
 
     fn stop(&self) {
-        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        // 复制 child 的 Arc，避免父节点意外挂到子节点下面时产生死锁。
         let children = self
             .child_context
             .lock()
@@ -436,7 +436,7 @@ impl AsyncEngineContext for Controller {
     }
 
     fn kill(&self) {
-        // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
+        // 复制 child 的 Arc，避免父节点意外挂到子节点下面时产生死锁。
         let children = self
             .child_context
             .lock()

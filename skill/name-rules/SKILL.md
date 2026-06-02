@@ -43,7 +43,7 @@ description: Pagoda 项目命名规约 Skill。用于新增、重命名或迁移
 | `Dynamo` | `Pagoda` |
 | `DYNAMO` | `PAGODA` |
 | `dynamo_*` | `pagoda_*` |
-| `DYN_*` | `PAG_*` |
+| `DYN_*` | `PGD_*` |
 | `dynamo-xxx` | `pagoda-xxx` |
 | `dynamo_xxx` | `pagoda_xxx` |
 

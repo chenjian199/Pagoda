@@ -273,22 +273,22 @@ impl PortNameDiscoverySource {
 ///   的间隔。
 #[derive(Clone, Debug)]
 pub struct Client {
-    // This is me
+    // 本 client 代表的端点身份
     pub portname: PortName,
-    // Shared portname discovery source backing both snapshots and raw events.
+    // 共享的发现源，同时支撑快照与原始事件两路
     portname_discovery_source: Arc<PortNameDiscoverySource>,
-    // These are the remotes I know about from watching key-value store
+    // 通过 watch 键值存储得知的远端实例集合
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
-    // These are the instance source ids less those reported as down from sending rpc
+    // 实例集合去掉被 rpc 报告为下线的那些 ID
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
-    // These are the instance source ids less those reported as busy (above threshold)
+    // 实例集合去掉被报告为繁忙（超过阈值）的那些 ID
     instance_free: Arc<ArcSwap<Vec<u64>>>,
-    // Watch sender for available instance IDs (for sending updates)
+    // 可用实例 ID 列表的 watch 发送端（用于推送更新）
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
-    // Watch receiver for available instance IDs (for cloning to external subscribers)
+    // 可用实例 ID 列表的 watch 接收端（用于 clone 给外部订阅者）
     instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
-    /// Interval for periodic reconciliation of instance_avail with instance_source.
-    /// This ensures instances removed via `report_instance_down` are eventually restored.
+    /// 周期对账 instance_avail 与 instance_source 的间隔。
+    /// 确保被 `report_instance_down` 移除的实例最终能被恢复。
     reconcile_interval: Duration,
 }
 
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     // ==================================================================
-    // === lib-copy 标准契约测试（原样保留，验证 API 行为一致）============
+    // === 标准契约测试（验证 API 行为的稳定性）=====================
     // ==================================================================
 
     #[tokio::test]
@@ -1099,7 +1099,7 @@ mod tests {
             .unwrap();
         assert_ne!(picked1, picked2);
 
-        // state2 should see the same counts (same underlying Arc)
+        // state2 应看到相同计数（共享同一底层 Arc）
         assert_eq!(state2.load(10), state1.load(10));
         assert_eq!(state2.load(20), state1.load(20));
         assert_eq!(state2.load(30), state1.load(30));
@@ -1123,10 +1123,10 @@ mod tests {
         let client = portname.client().await.unwrap();
         let watcher = client.instance_avail_watcher();
 
-        // Set initial instances
+        // 设置初始实例
         client.instance_avail.store(Arc::new(vec![1, 2, 3]));
 
-        // Report instance down - this should notify the watcher
+        // 报告实例下线——应通知订阅者
         client.report_instance_down(2);
 
         let current = watcher.borrow().clone();
@@ -1151,7 +1151,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Initially, instance_avail should be empty
+        // 初始时 instance_avail 应为空
         assert!(client.instance_ids_avail().is_empty());
 
         client.instance_avail.store(Arc::new(vec![1, 2, 3]));
@@ -1181,7 +1181,7 @@ mod tests {
         assert_eq!(state.load(2), 1);
         assert_eq!(state.load(3), 1);
 
-        // Retain only instances 1 and 3 (instance 2 was removed)
+        // 仅保留实例 1 和 3（实例 2 已被移除）
         state.retain(&[1, 3]);
 
         assert_eq!(state.load(1), 1);

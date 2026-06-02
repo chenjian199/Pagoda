@@ -4,11 +4,10 @@
 //! # NATS JetStream KV 后端
 //!
 //! ## 设计意图
-//! 将 pagoda 的 `Store`/`Bucket` 抽象桥接到 NATS JetStream KV。本实现与
-//! 标准版**契约完全等价**，但内部走了与之不同的代码组织：
-//! - 入口点 `get_or_create_key_value` 改为"先尝试创建，遇到 AlreadyExists
-//!   再回退到 get"的乐观路径，省去 lib-copy 的"先 get 失败再 create"的两次
-//!   往返；
+//! 将 pagoda 的 `Store`/`Bucket` 抽象桥接到 NATS JetStream KV。本实现采用如下
+//! 代码组织：
+//! - 入口点 `get_or_create_key_value` 采用"先尝试创建，遇到 AlreadyExists
+//!   再回退到 get"的乐观路径，省去"先 get 失败再 create"的两次往返；
 //! - resync 路径用扁平 `match` 而非嵌套 if-let，分支语义更直观；
 //! - `entries()` 改为流式收集（`map` + `collect_into`），避免显式可变 HashMap。
 //!
@@ -24,7 +23,7 @@
 //!   * `revision > 0` → update：成功 `Created(rev)`；`WrongLastRevision` 触发
 //!     resync —— 用当前 revision + 1 重试，或退回 create。
 //! - `watch` 翻译 `Operation::Put/Delete/Purge`（Purge 视作 Delete）。
-//! - `entries` 返回的 `Key` **不带桶名前缀** —— 与 lib-copy 一致（NATS KV 本身就是单桶）。
+//! - `entries` 返回的 `Key` **不带桶名前缀**（NATS KV 本身就是单桶）。
 
 use std::{collections::HashMap, pin::Pin, time::Duration};
 
@@ -58,7 +57,7 @@ impl NATSStore {
 
     /// 获取或创建 KV bucket。
     ///
-    /// 与先尝试 create（乐观），遇到 AlreadyExists 再 fallback 到 get。
+    /// 先尝试 create（乐观），遇到 AlreadyExists 再 fallback 到 get。
     /// 这样在"第一次 deploy"场景下能省一次 RTT。
     async fn get_or_create_key_value(
         &self,

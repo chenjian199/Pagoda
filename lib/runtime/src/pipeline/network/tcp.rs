@@ -52,11 +52,6 @@ pub struct TcpStreamConnectionInfo {
 
 impl From<TcpStreamConnectionInfo> for ConnectionInfo {
     fn from(info: TcpStreamConnectionInfo) -> Self {
-        // Need to consider the below. If failure should be fatal, keep the below with .expect()
-        // But if there is a default value, we can use:
-        // unwrap_or_else(|e| {
-        //     eprintln!("Failed to serialize TcpStreamConnectionInfo: {:?}", e);
-        //     "{}".to_string() // Provide a fallback empty JSON string or default value
         ConnectionInfo {
             transport: TCP_TRANSPORT.to_string(),
             info: serde_json::to_string(&info)
@@ -81,10 +76,10 @@ impl TryFrom<ConnectionInfo> for TcpStreamConnectionInfo {
     }
 }
 
-/// First message sent over a CallHome stream which will map the newly created socket to a specific
-/// response data stream which was registered with the same subject.
+/// CallHome 流里发送的第一条消息，用于把新创建的 socket 映射到先前按相同 subject
+/// 注册的特定响应数据流。
 ///
-/// This is a transport specific message as part of forming/completing a CallHome TcpStream.
+/// 这是 CallHome TcpStream 建立过程中的一条传输专用消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CallHomeHandshake {
     subject: String,
@@ -134,10 +129,10 @@ mod tests {
             .connection_info
             .clone();
 
-        // set up the other rank
+        // 设置另一侧的 rank。
         let context_rank1 = Context::with_id((), context_rank0.id().to_string());
 
-        // connect to the server socket
+        // 连接到服务端 socket。
         let mut send_stream = client::TcpClient::create_response_stream(
             context_rank1.context(),
             connection_info,
@@ -147,18 +142,13 @@ mod tests {
         .unwrap();
         println!("Client connected");
 
-        // the client can now setup it's end of the stream and if it errors, it can send a message
-        // to the server to stop the stream
-        //
-        // this step must be done before the next step on the server can complete, i.e.
-        // the server's stream is now blocked on receiving the prologue message
-        //
-        // let's improve this and use an enum like Ok/Err; currently, None means good-to-go, and
-        // Some(String) means an error happened on this downstream node and we need to alert the
-        // upstream node that an error occurred
+        // 客户端现在可以初始化流的这一端；如果出错，也可以向服务端发送消息以停止流。
+        // 这个步骤必须先于服务端的下一步完成，也就是服务端当前会阻塞在接收 prologue。
+        // 这里后续可以改成类似 Ok/Err 的枚举；目前 None 表示可以继续，Some(String)
+        // 表示下游节点出错，需要通知上游节点。
         send_stream.send_prologue(None).await.unwrap();
 
-        // [server] next - now pending connections should be connected
+        // 服务端下一步：此时挂起的连接应该已经完成配对。
         let (_conn_info, stream_provider) = pending_connection.recv_stream.unwrap().into_parts();
         let recv_stream = stream_provider.await.unwrap();
 
@@ -185,8 +175,5 @@ mod tests {
 
         drop(send_stream);
 
-        // let data = recv_stream.rx.recv().await;
-
-        // assert!(data.is_none());
     }
 }

@@ -260,13 +260,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // === lib 标准契约测试 ============================
+    // === 标准契约测试 ============================
     // ------------------------------------------------------------------
 
     #[test]
     fn test_uninitialized_context() {
         clear_context();
-        // Should return None when context not initialized
+        // 未初始化上下文时应返回 None
         assert!(get_pool().is_none());
         assert!(try_acquire_block_permit().is_err());
         assert!(!has_compute_context());
@@ -276,7 +276,7 @@ mod tests {
     #[should_panic(expected = "Thread-local compute context not initialized")]
     fn test_assert_compute_context_panics() {
         clear_context();
-        // Should panic when context not initialized
+        // 未初始化上下文时应当 panic
         assert_compute_context();
     }
 }

@@ -22,13 +22,13 @@
 //!    active_connections / idle_connections / avg_latency_us`。
 //! - `ClientStats::new()` 与 `ClientStats::is_available()` 公开方法。
 //! - **不**抽出 `has_request_activity` / `has_connection_activity` 之类的私有辅助方法；
-//!   `is_available()` 内联表达 `requests_sent > 0 || active_connections > 0`。
+//!   `is_available()` 直接内联表达 `requests_sent > 0 || active_connections > 0`。
 //!
 //! ## 实现要点
-//! - `start_warmup` 默认 no-op，是为了让 HTTP/NATS 客户端不必关心 TCP 才用得到的
-//!   `instance_rx: watch::Receiver<Vec<Instance>>`；签名出现 `tokio` 与
-//!   `crate::servicegroup::Instance` 是契约。
-//! - `is_available` 选用"请求活动 OR 连接活动"作为可用性启发，让"还没发请求但已连上"
+//! - `start_warmup` 默认是 no-op，这样 HTTP/NATS 客户端就不必关心只有 TCP 才用得到的
+//!   `instance_rx: watch::Receiver<Vec<Instance>>`；签名里出现 `tokio` 和
+//!   `crate::servicegroup::Instance` 本身就是契约。
+//! - `is_available` 选择“请求活动 OR 连接活动”作为可用性启发，让“还没发请求但已经连上”
 //!   的客户端也被视为 available，便于 dashboard 展示。
 
 use anyhow::Result;
@@ -38,25 +38,25 @@ use std::collections::HashMap;
 
 // === SECTION: 类型别名 ===
 
-/// Type alias for request headers
+/// 请求 headers 的类型别名。
 pub type Headers = HashMap<String, String>;
 
 // === SECTION: RequestPlaneClient trait ===
 
-/// Unified interface for request plane clients
+/// 请求平面客户端的统一接口。
 ///
-/// This trait abstracts over different transport mechanisms (TCP, HTTP, NATS)
-/// providing a consistent interface for sending requests and receiving acknowledgments.
+/// 该 trait 抽象了不同传输机制（TCP、HTTP、NATS），为“发送请求、
+/// 接收确认”提供一致的接口。
 ///
-/// # Design Principles
+/// # 设计原则
 ///
-/// 1. **Transport Agnostic**: Implementations can be swapped without changing router logic
-/// 2. **Async by Default**: All operations are async to support high concurrency
-/// 3. **Headers Support**: All transports must support custom headers for tracing, etc.
-/// 4. **Health Checks**: Implementations should provide connection health information
-/// 5. **Error Handling**: All errors are wrapped in anyhow::Result for flexibility
+/// 1. **传输无关**：实现可互换，无需改动 router 逻辑；
+/// 2. **默认异步**：所有操作都是 async，以支持高并发；
+/// 3. **Headers 支持**：所有传输都必须支持自定义 headers（用于追踪等）；
+/// 4. **健康检查**：实现应提供连接健康信息；
+/// 5. **错误处理**：所有错误统一包装为 `anyhow::Result`，以保持灵活性。
 ///
-/// # Example
+/// # 示例
 ///
 /// ```ignore
 /// use pagoda_runtime::pipeline::network::egress::RequestPlaneClient;
@@ -76,29 +76,28 @@ pub type Headers = HashMap<String, String>;
 /// ```
 #[async_trait]
 pub trait RequestPlaneClient: Send + Sync {
-    /// Send a request to a specific address and wait for acknowledgment
+    /// 向指定地址发送请求并等待确认。
     ///
-    /// # Arguments
+    /// # 参数
     ///
-    /// * `address` - Transport-specific address:
-    ///   - HTTP: `http://host:port/path`
-    ///   - TCP: `host:port` or `tcp://host:port`
-    ///   - NATS: `subject.name`
-    /// * `payload` - Request payload (encoded as bytes)
-    /// * `headers` - Custom headers for tracing, authentication, etc.
+    /// * `address` —— 与传输相关的地址：
+    ///   - HTTP：`http://host:port/path`
+    ///   - TCP：`host:port` 或 `tcp://host:port`
+    ///   - NATS：`subject.name`
+    /// * `payload` —— 请求负载（字节形式）
+    /// * `headers` —— 用于追踪、认证等的自定义 headers
     ///
-    /// # Returns
+    /// # 返回
     ///
-    /// Returns an acknowledgment response. Note that for streaming responses,
-    /// the actual response data comes over the TCP response plane, not through
-    /// this acknowledgment.
+    /// 返回一个确认响应。注意：对于流式响应，实际响应数据是通过 TCP 响应
+    /// 平面传回的，而不是通过这次确认。
     ///
-    /// # Errors
+    /// # 错误
     ///
-    /// Returns an error if:
-    /// - Connection to the portname fails
-    /// - Request times out
-    /// - Transport-specific errors occur (e.g., NATS server unavailable)
+    /// 出现以下情况时返回错误：
+    /// - 连接 portname 失败；
+    /// - 请求超时；
+    /// - 传输相关错误（例如 NATS 服务器不可用）。
     async fn send_request(
         &self,
         address: String,
@@ -106,55 +105,54 @@ pub trait RequestPlaneClient: Send + Sync {
         headers: Headers,
     ) -> Result<Bytes>;
 
-    /// Get the transport name
+    /// 获取传输名称。
     ///
-    /// Returns a static string identifier for the transport type.
-    /// Used for logging and debugging.
+    /// 返回传输类型的静态字符串标识，用于日志与调试。
     ///
-    /// # Examples
+    /// # 示例
     ///
-    /// - `"tcp"` - Raw TCP transport
-    /// - `"http"` or `"http2"` - HTTP/2 transport
-    /// - `"nats"` - NATS messaging
+    /// - `"tcp"` —— 原生 TCP 传输
+    /// - `"http"` 或 `"http2"` —— HTTP/2 传输
+    /// - `"nats"` —— NATS 消息
     fn transport_name(&self) -> &'static str;
 
-    /// Check connection health
+    /// 检查连接健康状态。
     ///
-    /// Returns `true` if the client is healthy and ready to send requests.
-    /// This is a lightweight check that doesn't perform actual network I/O.
+    /// 如果客户端健康且可以发送请求，则返回 `true`。
+    /// 这是一个不会执行实际网络 I/O 的轻量检查。
     ///
-    /// Implementations should return `false` if:
-    /// - Connection pool is exhausted
-    /// - Underlying transport is disconnected
-    /// - Client has been explicitly closed
+    /// 出现以下情况时实现应返回 `false`：
+    /// - 连接池耗尽；
+    /// - 底层传输已断开；
+    /// - 客户端已被显式关闭。
     fn is_healthy(&self) -> bool;
 
-    /// Get client statistics (optional)
+    /// 获取客户端统计信息（可选）。
     ///
-    /// Returns runtime statistics about the client for monitoring and debugging.
-    /// Default implementation returns empty statistics.
+    /// 返回用于监控和调试的客户端运行时统计。
+    /// 默认实现返回空统计。
     fn stats(&self) -> ClientStats {
         ClientStats::default()
     }
 
-    /// Start a background task that eagerly warms connections for newly-discovered backends.
-    /// Only TCP overrides this; HTTP and NATS clients inherit the no-op.
+    /// 启动一个后台任务，为新发现的后端提前预热连接。
+    /// 只有 TCP 会重写它；HTTP 与 NATS 客户端沿用这个 no-op 默认实现。
     fn start_warmup(
         &self,
         _instance_rx: tokio::sync::watch::Receiver<Vec<crate::servicegroup::Instance>>,
         _cancel_token: tokio_util::sync::CancellationToken,
     ) {
-        // No-op default
+        // 默认 no-op
     }
 
-    /// Close the client gracefully (optional)
+    /// 优雅地关闭客户端（可选）。
     ///
-    /// Implementations should:
-    /// - Close all active connections
-    /// - Wait for in-flight requests to complete (or timeout)
-    /// - Release all resources
+    /// 实现应该：
+    /// - 关闭所有活跃连接
+    /// - 等待在飞请求完成（或超时）
+    /// - 释放所有资源
     ///
-    /// Default implementation does nothing.
+    /// 默认实现什么都不做。
     async fn close(&self) -> Result<()> {
         Ok(())
     }
@@ -162,43 +160,43 @@ pub trait RequestPlaneClient: Send + Sync {
 
 // === SECTION: ClientStats ===
 
-/// Client runtime statistics
+/// 客户端运行时统计信息。
 ///
-/// Used for monitoring and debugging transport client performance.
+/// 用于监控与调试传输客户端的性能。
 #[derive(Debug, Clone, Default)]
 pub struct ClientStats {
-    /// Total number of requests sent
+    /// 发送的请求总数
     pub requests_sent: u64,
 
-    /// Total number of successful responses
+    /// 成功响应总数
     pub responses_received: u64,
 
-    /// Total number of errors
+    /// 错误总数
     pub errors: u64,
 
-    /// Total bytes sent
+    /// 发送的字节总数
     pub bytes_sent: u64,
 
-    /// Total bytes received
+    /// 接收的字节总数
     pub bytes_received: u64,
 
-    /// Number of active connections (for connection-pooled transports)
+    /// 活跃连接数（针对使用连接池的传输）
     pub active_connections: usize,
 
-    /// Number of idle connections in pool
+    /// 池中空闲连接数
     pub idle_connections: usize,
 
-    /// Average request latency in microseconds (0 if not available)
+    /// 平均请求延迟（微秒；不可用时为 0）
     pub avg_latency_us: u64,
 }
 
 impl ClientStats {
-    /// Create new empty statistics
+    /// 创建新的空统计。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Check if statistics are available (non-zero)
+    /// 检查统计是否可用（非零）。
     pub fn is_available(&self) -> bool {
         self.requests_sent > 0 || self.active_connections > 0
     }

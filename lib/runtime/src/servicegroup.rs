@@ -49,7 +49,7 @@
 //! - `#[derive(...)]` 与 `#[builder(...)]` / `#[validate(...)]` /
 //!   `#[serde(...)]` 属性；
 //! - 函数 `validate_allowed_chars`（regex `^[a-z0-9-_]+$`）；
-//! - `Instance` 的 `Display` 格式 `ns/comp/ep/id`；
+//! - `Instance` 的 `Display` 格式 `namespace/servicegroup/portname/id`；
 //! - `Instance` 序列化时对 `device_type: None` 的 `skip_serializing_if`。
 //!
 //! 上述任何一项的变更都属于破坏性改动，必须先评估外部调用方影响。
@@ -111,7 +111,7 @@ pub use portname::build_transport_type;
 /// - [`TransportType::Tcp`]：`host:port/instance_id_hex/portname_name` 形式。
 ///
 /// 在 JSON 中以 `snake_case` 输出，且 `Nats` 变体被特意 rename 为
-/// `nats_tcp`（保留历史兼容性）。
+/// `nats_tcp`（保留向后兼容性）。
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
@@ -240,21 +240,21 @@ pub struct ServiceGroup {
     #[educe(Debug(ignore))]
     drt: Arc<DistributedRuntime>,
 
-    /// Name of the servicegroup
+    /// servicegroup 的名称
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
-    /// Additional labels for metrics
+    /// 指标用的附加标签
     #[builder(default = "Vec::new()")]
     labels: Vec<(String, String)>,
 
-    // todo - restrict the namespace to a-z0-9-_A-Z
-    /// Namespace
+    // 待办 - 把 namespace 限制为 a-z0-9-_A-Z
+    /// 所属命名空间
     #[builder(setter(into))]
     namespace: Namespace,
 
-    /// This hierarchy's own metrics registry
+    /// 本层级自身的指标注册表
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
 }
@@ -475,14 +475,14 @@ fn await_nats_registration(servicegroup: &ServiceGroup) -> anyhow::Result<()> {
 pub struct PortName {
     servicegroup: ServiceGroup,
 
-    // todo - restrict alphabet
-    /// PortName name
+    // 待办 - 限制可用字符集
+    /// portname 的名称
     name: String,
 
-    /// Additional labels for metrics
+    /// 指标用的附加标签
     labels: Vec<(String, String)>,
 
-    /// This hierarchy's own metrics registry
+    /// 本层级自身的指标注册表
     metrics_registry: crate::MetricsRegistry,
 }
 
@@ -595,18 +595,18 @@ pub struct Namespace {
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
 
-    /// Additional labels for metrics
+    /// 指标用的附加标签
     #[builder(default = "Vec::new()")]
     labels: Vec<(String, String)>,
 
-    /// This hierarchy's own metrics registry
+    /// 本层级自身的指标注册表
     #[builder(default = "crate::MetricsRegistry::new()")]
     metrics_registry: crate::MetricsRegistry,
 
-    /// Cache for servicegroups to avoid duplicate registrations and metrics collisions.
-    /// When the same servicegroup is requested multiple times, we return the cached instance
-    /// to ensure all portnames share the same ServiceGroup and MetricsRegistry.
-    /// Uses DashMap for lock-free reads and automatic handling of concurrent inserts.
+    /// servicegroup 缓存，避免重复注册以及指标冲突。
+    /// 当同一个 servicegroup 被多次请求时，返回缓存的实例，
+    /// 确保所有 portname 共享同一个 ServiceGroup 与 MetricsRegistry。
+    /// 使用 DashMap 实现无锁读取，并自动处理并发插入。
     #[builder(default = "Arc::new(DashMap::new())")]
     servicegroup_cache: Arc<DashMap<String, ServiceGroup>>,
 }
@@ -768,13 +768,13 @@ mod tests {
     /// ## 出参
     ///
     /// 传输用 NATS 拼接、`device_type` 默认 CUDA 的 `Instance`。
-    fn fake_instance(ns: &str, comp: &str, ep: &str, id: u64) -> Instance {
+    fn fake_instance(ns: &str, sg: &str, pn: &str, id: u64) -> Instance {
         Instance {
             namespace: ns.to_string(),
-            servicegroup: comp.to_string(),
-            portname: ep.to_string(),
+            servicegroup: sg.to_string(),
+            portname: pn.to_string(),
             instance_id: id,
-            transport: TransportType::Nats(format!("{ns}.{comp}.{ep}.{id}")),
+            transport: TransportType::Nats(format!("{ns}.{sg}.{pn}.{id}")),
             device_type: Some(DeviceType::Cuda),
         }
     }
@@ -875,7 +875,7 @@ mod tests {
     /// `Instance::id()` 与字段 `instance_id` 应严格相等。
     #[test]
     fn instance_id_returns_field() {
-        let inst = fake_instance("ns", "comp", "ep", 42);
+        let inst = fake_instance("ns", "sg", "pn", 42);
         assert_eq!(inst.id(), 42);
     }
 
@@ -883,35 +883,35 @@ mod tests {
     /// `Instance::portname_id()` 应正确从三元组字段提取 `PortNameId`。
     #[test]
     fn instance_portname_id_fields() {
-        let inst = fake_instance("mynamespace", "mycomp", "myep", 7);
+        let inst = fake_instance("mynamespace", "mysg", "mypn", 7);
         let eid = inst.portname_id();
         assert_eq!(eid.namespace, "mynamespace");
-        assert_eq!(eid.servicegroup, "mycomp");
-        assert_eq!(eid.name, "myep");
+        assert_eq!(eid.servicegroup, "mysg");
+        assert_eq!(eid.name, "mypn");
     }
 
     /// ## 测试过程
     /// `Instance::portname_instance_id()` 应额外带上 instance_id。
     #[test]
     fn instance_portname_instance_id_includes_id() {
-        let inst = fake_instance("ns", "comp", "ep", 99);
+        let inst = fake_instance("ns", "sg", "pn", 99);
         let eiid = inst.portname_instance_id();
         assert_eq!(eiid.namespace, "ns");
-        assert_eq!(eiid.servicegroup, "comp");
-        assert_eq!(eiid.portname, "ep");
+        assert_eq!(eiid.servicegroup, "sg");
+        assert_eq!(eiid.portname, "pn");
         assert_eq!(eiid.instance_id, 99);
     }
 
     /// ## 测试过程
-    /// Display 格式必须是 `ns/comp/ep/id`。
+    /// Display 格式必须是 `namespace/servicegroup/portname/id`。
     ///
     /// ## 意义
     /// `Ord` 实现是基于 `to_string()` 的，Display 一旦改动会破坏排序
     /// 稳定性。
     #[test]
     fn instance_display_format() {
-        let inst = fake_instance("ns", "comp", "ep", 99);
-        assert_eq!(inst.to_string(), "ns/comp/ep/99");
+        let inst = fake_instance("ns", "sg", "pn", 99);
+        assert_eq!(inst.to_string(), "ns/sg/pn/99");
     }
 
     /// ## 测试过程
@@ -919,8 +919,8 @@ mod tests {
     /// 字符串字典序。
     #[test]
     fn instance_ordering_is_lexicographic() {
-        let a = fake_instance("ns", "alpha", "ep", 1);
-        let b = fake_instance("ns", "beta", "ep", 1);
+        let a = fake_instance("ns", "alpha", "pn", 1);
+        let b = fake_instance("ns", "beta", "pn", 1);
         assert!(a < b);
     }
 
@@ -932,7 +932,7 @@ mod tests {
     /// 平面额外增加冗余字段。
     #[test]
     fn instance_serde_omits_device_type_when_none() {
-        let mut inst = fake_instance("ns", "comp", "ep", 1);
+        let mut inst = fake_instance("ns", "sg", "pn", 1);
         inst.device_type = None;
         let json = serde_json::to_string(&inst).unwrap();
         assert!(!json.contains("device_type"));
@@ -942,7 +942,7 @@ mod tests {
     /// `device_type = Some(Cuda)` 时序列化结果应包含 `device_type` 字段。
     #[test]
     fn instance_serde_includes_device_type_when_some() {
-        let inst = fake_instance("ns", "comp", "ep", 1);
+        let inst = fake_instance("ns", "sg", "pn", 1);
         let json = serde_json::to_string(&inst).unwrap();
         assert!(json.contains("device_type"));
     }
@@ -951,7 +951,7 @@ mod tests {
     /// 完整 `Instance` JSON roundtrip，断言所有字段一致。
     #[test]
     fn instance_serde_full_roundtrip() {
-        let inst = fake_instance("ns", "comp", "ep", 7);
+        let inst = fake_instance("ns", "sg", "pn", 7);
         let json = serde_json::to_string(&inst).unwrap();
         let back: Instance = serde_json::from_str(&json).unwrap();
         assert_eq!(inst, back);

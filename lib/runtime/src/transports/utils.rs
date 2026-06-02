@@ -16,13 +16,12 @@
 //! 的 client 立刻不可用。
 //!
 //! ## 实现要点
-//! - 本实现：
-//!   1. 把"长寿的 driver 任务"从 `std::future::pending::<()>().await` 改成
-//!      监听一个 oneshot shutdown 信号 —— 语义等价（永远不发就永远不退），
-//!      但读起来更直白，调试时也能加 trace log。
-//!   2. 工人线程命名为 `transports-rt-N`，便于 `htop` / perf 中识别。
-//!   3. oneshot 发送失败时**不再 panic**，而是 log warn ——
-//!      接收端可能因取消已被 drop，这并不是 fatal。
+//!   1. driver 任务在发回结果后以 `std::future::pending::<()>().await` 永久挂起，
+//!      使运行时的生命周期完全由 `Arc` 引用计数决定（无人持有即被 drop）。
+//!   2. 运行时工作线程命名为 `transports-rt`、driver 线程命名为
+//!      `transports-rt-driver`，便于 `htop` / perf 中识别。
+//!   3. oneshot 发送失败时**不 panic**，而是 log warn ——
+//!      接收端可能因取消已被 drop，这并不是致命错误。
 
 use std::{future::Future, sync::Arc};
 

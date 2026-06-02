@@ -15,8 +15,8 @@
 //!
 //! ## 外部契约
 //!
-//! - 所有公开类型的 `derive` / `#[serde(...)]` 必须与历史版本保持兼容
-//!   （否则跨后端反序列化会破坏存量数据）；
+//! - 所有公开类型的 `derive` / `#[serde(...)]` 必须保持向后兼容
+//!   （否则跨后端反序列化会破坏已有数据）；
 //! - `PortNameInstanceId / ModelCardInstanceId / EventChannelInstanceId` 的
 //!   `to_path` / `from_path` 是 KV / annotation key 的契约，不得改格式；
 //! - `Discovery::register` 的默认实现负责跨 backend **model 名称冲突检测**：
@@ -519,7 +519,7 @@ pub struct ModelCardInstanceId {
 }
 
 impl ModelCardInstanceId {
-    /// `{ns}/{comp}/{ep}/{instance_id:x}[/{model_suffix}]`
+    /// `{namespace}/{servicegroup}/{portname}/{instance_id:x}[/{model_suffix}]`
     pub fn to_path(&self) -> String {
         match &self.model_suffix {
             Some(s) => format!(
@@ -560,7 +560,7 @@ pub struct EventChannelInstanceId {
 }
 
 impl EventChannelInstanceId {
-    /// `{ns}/{comp}/{topic}/{instance_id:x}`
+    /// `{namespace}/{servicegroup}/{topic}/{instance_id:x}`
     pub fn to_path(&self) -> String {
         format!(
             "{}/{}/{}/{:x}",
@@ -760,7 +760,7 @@ pub trait Discovery: Send + Sync {
             portname: portname.clone(),
         };
 
-        // pre-check
+        // 预检查。
         if let Some(conflicting) =
             find_conflicting_model_name(&self.list(query.clone()).await?, &requested)?
         {

@@ -7,14 +7,14 @@
 //! 将"桶"映射为目录，"key"映射为文件。提供本地、跨进程可见的 KV 存储，
 //! 主要用于单机多进程的 dev/test 与离线调试。
 //!
-//! 本实现契约完全等价，但内部走了与之不同的实现路径：
+//! 本实现采用如下实现路径：
 //! - 用 `DashMap` / `DashSet` 替代 `parking_lot::Mutex<HashMap/HashSet>`
 //!   作为活动目录与 owned-files 集合，避免在 keep-alive / 过期清理时持有
 //!   粗粒度互斥锁；
-//! - keep-alive / 过期清理改用 tokio 异步任务 + `select!` 监听 cancel_token，
+//! - keep-alive / 过期清理用 tokio 异步任务 + `select!` 监听 cancel_token，
 //!   响应停机更迅速；
 //! - watcher 的回调用 `try_send`，慢消费者下宁可丢事件也不阻塞 notify 后端线程；
-//! - 临时文件命名换前缀 `.dyn-tmp-` 并附加 nanos+rand；
+//! - 临时文件命名使用前缀 `.pgd-tmp-` 并附加 nanos+rand；
 //! - 错误路径上更细颗粒地区分 `MissingKey` 与 `FilesystemError`。
 //!
 //! ## 外部契约
@@ -28,8 +28,7 @@
 //! - `Bucket::get` 不存在 → `Ok(None)`。
 //! - `Bucket::delete` 不存在 → `Err(MissingKey)`；存在则从 owned-files 移除后删盘。
 //! - `Bucket::watch` 流的 `Key` **以 root 为前缀剥离后** url-decode 得到，跳过临时文件。
-//! - `Bucket::entries` 返回的 `Key` **包含桶名前缀**（如 `v1/tests/key1/multi/part`），
-//!   与 lib-copy 一致。
+//! - `Bucket::entries` 返回的 `Key` **包含桶名前缀**（如 `v1/tests/key1/multi/part`）。
 //! - `shutdown` 删除所有 owned files；非 `Drop`，因为 `DistributedRuntime` 在
 //!   Python 端可能不会触发 Drop。
 
@@ -62,9 +61,7 @@ const DEFAULT_TTL: Duration = Duration::from_secs(10);
 const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 
 /// 原子写临时文件前缀。watcher 应过滤掉这些文件。
-///
-/// 与 lib-copy 的 `.tmp_` 不同 —— 即便两实现在同一目录共存也不会互相冲突识别。
-const TEMP_FILE_PREFIX: &str = ".dyn-tmp-";
+const TEMP_FILE_PREFIX: &str = ".pgd-tmp-";
 
 /// 异步事件转发的内部 channel 容量。
 const WATCH_CHANNEL_CAPACITY: usize = 256;
@@ -93,8 +90,7 @@ impl FileStore {
             connection_id: rand::random::<u64>(),
             active_dirs: Arc::new(DashMap::new()),
         };
-        // 用 tokio 异步任务跑 keep-alive 与过期清理。
-        // 注：lib-copy 在 std::thread 里跑；我们改在 tokio 上，是为了能用
+        // 用 tokio 异步任务跑 keep-alive 与过期清理，以便用
         // select! 即时响应 cancel_token，停机时延更小。
         let bg = fs.clone();
         tokio::spawn(async move { bg.expiry_loop().await });
@@ -367,7 +363,7 @@ impl Directory {
         Ok(())
     }
 
-    /// 生成不会与 lib-copy 冲突的临时文件名。
+    /// 生成唯一的临时文件名。
     fn temp_path(&self) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -609,7 +605,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     // ---------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留）================================
+    // === 标准契约测试 ================================================
     // ---------------------------------------------------------------------
 
     #[tokio::test]

@@ -28,7 +28,7 @@
 //! - 宏内参数 `$type` 同时作为类型构造器（`Self {...}` 中的 `inner: Frontend::default()`）
 //!   与 trait 接收器；宏体不引入新的 lifetime 或 bound。
 //! - `impl_frontend!(ServiceFrontend);` 与 `impl_frontend!(SegmentSource);`
-//!   两次调用按顺序声明，与基线一致；调换顺序在功能上等价但会偏离基线契约。
+//!   两次调用按顺序声明；调换顺序在功能上等价但会偏离声明顺序契约。
 
 use crate::engine::AsyncEngineContextProvider;
 

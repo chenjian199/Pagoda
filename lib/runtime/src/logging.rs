@@ -29,8 +29,8 @@
 //!
 //! ## 外部契约
 //! - 公开函数与类型（`init` / `make_system_request_span` / `is_valid_trace_id` /
-//!   `is_valid_span_id` / `parse_traceparent` / `DistributedTraceIdLayer` /
-//!   `DistributedTraceContext` / `TraceParent` / `GenericHeaders` 等）的签名均保持不变。
+//!   `is_valid_span_id` / `parse_traceparent` / `DistributedTraceIdLayer` / 等公开项
+//!   `DistributedTraceContext` / `TraceParent` / `GenericHeaders` 等）签名均保持不变。
 //! - `is_valid_trace_id` / `is_valid_span_id` 的 W3C 合法性定义保持不变：
 //!   * trace ID：32 位、全十六进制；
 //!   * span ID：16 位、全十六进制。
@@ -83,11 +83,11 @@ use tracing::Span;
 use tracing::field::Field;
 use tracing::span;
 use tracing_subscriber::Layer;
-use tracing_subscriber::Registry;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanData;
+use tracing_subscriber::Registry;
 use uuid::Uuid;
 
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
@@ -103,7 +103,6 @@ use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
-// use tracing_subscriber::Registry;
 
 use std::time::Duration;
 use tracing::{info, instrument};
@@ -123,7 +122,7 @@ const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 /// Default service name
 const DEFAULT_OTEL_SERVICE_NAME: &str = "pagoda";
 
-/// Once instance to ensure the logger is only initialized once
+/// 单例实例，确保 logger 只会初始化一次
 static INIT: Once = Once::new();
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -154,12 +153,12 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
+/// 检查是否启用 OTLP trace 导出（接受："1"、"true"、"on"、"yes"，不区分大小写）
 fn otlp_exporter_enabled() -> bool {
     env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
 }
 
-/// Get the service name from environment or use default
+/// 从环境变量获取服务名，或使用默认值
 fn get_service_name() -> String {
     std::env::var(env_logging::otlp::OTEL_SERVICE_NAME)
         .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
@@ -174,14 +173,14 @@ fn is_valid_hex_id(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Validate a given trace ID according to W3C Trace Context specifications.
-/// A valid trace ID is a 32-character hexadecimal string (lowercase).
+/// 按照 W3C Trace Context 规范验证给定的 trace ID。
+/// 合法的 trace ID 是一个 32 位十六进制字符串（小写）。
 pub fn is_valid_trace_id(trace_id: &str) -> bool {
     is_valid_hex_id(trace_id, 32)
 }
 
-/// Validate a given span ID according to W3C Trace Context specifications.
-/// A valid span ID is a 16-character hexadecimal string (lowercase).
+/// 按照 W3C Trace Context 规范验证给定的 span ID。
+/// 合法的 span ID 是一个 16 位十六进制字符串（小写）。
 pub fn is_valid_span_id(span_id: &str) -> bool {
     is_valid_hex_id(span_id, 16)
 }
@@ -206,7 +205,7 @@ pub struct DistributedTraceContext {
     pub request_id: Option<String>,
 }
 
-/// Pending context data collected in on_new_span, to be finalized in on_enter
+/// 在 on_new_span 中收集的待定上下文数据，会在 on_enter 中完成最终化
 #[derive(Debug, Clone)]
 struct PendingDistributedTraceContext {
     trace_id: Option<String>,
@@ -217,12 +216,12 @@ struct PendingDistributedTraceContext {
     request_id: Option<String>,
 }
 
-/// Macro to emit a tracing event at a dynamic level with a custom target.
+/// 用于在动态级别和自定义 target 下发出 tracing 事件的宏。
 macro_rules! emit_at_level {
     ($level:expr, target: $target:expr, $($arg:tt)*) => {
-        // tracing::event! requires a compile-time constant level, so we must match
-        // on the runtime level and use a literal Level constant in each arm.
-        // See: https://github.com/tokio-rs/tracing/issues/2730
+        // tracing::event! 需要编译期常量级别，因此必须按运行时级别分支，
+        // 并在每个分支中使用字面量 Level 常量。
+        // 参见：https://github.com/tokio-rs/tracing/issues/2730
         match $level {
             &tracing::Level::ERROR => tracing::event!(target: $target, tracing::Level::ERROR, $($arg)*),
             &tracing::Level::WARN => tracing::event!(target: $target, tracing::Level::WARN, $($arg)*),
@@ -234,13 +233,13 @@ macro_rules! emit_at_level {
 }
 
 impl DistributedTraceContext {
-    /// Create a traceparent string from the context
+    /// 从上下文创建 traceparent 字符串
     pub fn create_traceparent(&self) -> String {
         format!("00-{}-{}-01", self.trace_id, self.span_id)
     }
 }
 
-/// Parse a traceparent string into its servicegroups.
+    /// 将 traceparent 字符串解析到其 servicegroup。
 ///
 /// 中文说明：
 /// 1. 按 W3C Trace Context 定义，`traceparent` 必须是 `version-trace_id-parent_id-flags`
@@ -321,7 +320,7 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        // Read request-id from internal headers, with fallback to deprecated x-pagoda-request-id
+        // 从内部头读取 request-id，并回退到已废弃的 x-pagoda-request-id
         if let Some(header_value) = headers.get("request-id") {
             request_id = Some(header_value.to_string());
         } else if let Some(header_value) = headers.get("x-pagoda-request-id") {
@@ -339,11 +338,11 @@ impl TraceParent {
     }
 }
 
-/// Create a span for inference request portnames (completions, chat, embeddings, etc.).
+/// 为推理请求类 portname 创建 span（补全、对话、嵌入等）。
 ///
-/// Uses `target: "request_span"` which is always allowed through the PGD_LOG filter
-/// (via `request_span=trace` directive in `filters()`). This ensures request context
-/// (request_id, model, trace_id) is always available on log events.
+/// 使用 `target: "request_span"`，它始终可通过 PGD_LOG 过滤
+/// （由 `filters()` 中的 `request_span=trace` 规则放行）。这样可确保请求上下文
+/// （request_id、model、trace_id）始终出现在日志事件中。
 pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
@@ -352,9 +351,9 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
 
     let otel_context = extract_otel_context_from_http_headers(req.headers());
 
-    // Ensure every inference request has a request_id on the span.
-    // This is the single source of truth — workers and get_or_create_request_id
-    // read it back via DistributedTraceIdLayer.
+    // 确保每个推理请求的 span 都带有 request_id。
+    // 这是唯一事实来源——worker 和 get_or_create_request_id
+    // 都会通过 DistributedTraceIdLayer 读回它。
     let request_id = trace_parent
         .request_id
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -385,12 +384,12 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
-/// Create a span for system portnames (health, metrics, models, engine, loras, etc.).
+/// 为系统类 portname 创建 span（健康检查、指标、模型、引擎、loras 等）。
 ///
-/// Same structure as `make_inference_request_span` but uses `target: "system_span"`
-/// which follows normal PGD_LOG filtering (debug level by default). The inference
-/// span target `request_span` is always-on via a `request_span=trace` directive;
-/// system spans are not, keeping high-frequency polling portnames quiet.
+/// 结构与 `make_inference_request_span` 相同，但使用 `target: "system_span"`，
+/// 它遵循普通 PGD_LOG 过滤（默认 debug 级别）。推理 span 的 target
+/// `request_span` 通过 `request_span=trace` 规则始终放行；系统 span 不这样做，
+/// 从而让高频轮询类 portname 保持安静。
 pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
@@ -398,7 +397,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     let trace_parent = TraceParent::from_headers(req.headers());
     let otel_context = extract_otel_context_from_http_headers(req.headers());
 
-    // Ensure every system request has a request_id on the span.
+    // 确保每个系统请求的 span 都带有 request_id。
     let request_id = trace_parent
         .request_id
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -429,7 +428,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
     span
 }
 
-/// Extract OpenTelemetry context from HTTP headers for distributed tracing
+/// 从 HTTP 头中提取 OpenTelemetry 上下文，用于分布式追踪。
 fn extract_otel_context_from_http_headers(
     headers: &http::HeaderMap,
 ) -> Option<opentelemetry::Context> {
@@ -450,7 +449,7 @@ fn extract_otel_context_from_http_headers(
         }
     }
 
-    // Early return if traceparent is empty
+    // 若 traceparent 为空则提前返回。
     if traceparent_value.is_empty() {
         return None;
     }
@@ -465,7 +464,7 @@ fn extract_otel_context_from_http_headers(
     }
 }
 
-/// Create a handle_payload span from NATS headers with servicegroup context
+/// 使用 servicegroup 上下文，从 NATS 头创建 handle_payload span。
 pub fn make_handle_payload_span(
     headers: &async_nats::HeaderMap,
     servicegroup: &str,
@@ -510,7 +509,7 @@ pub fn make_handle_payload_span(
     }
 }
 
-/// Create a handle_payload span from TCP/HashMap headers with servicegroup context
+/// 使用 servicegroup 上下文，从 TCP/HashMap 头创建 handle_payload span。
 pub fn make_handle_payload_span_from_tcp_headers(
     headers: &std::collections::HashMap<String, String>,
     servicegroup: &str,
@@ -561,7 +560,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
     }
 }
 
-/// Extract OpenTelemetry trace context from TCP/HashMap headers for distributed tracing
+/// 从 TCP/HashMap 头提取 OpenTelemetry trace 上下文，用于分布式追踪。
 fn extract_otel_context_from_tcp_headers(
     headers: &std::collections::HashMap<String, String>,
 ) -> (
@@ -603,7 +602,7 @@ fn extract_otel_context_from_tcp_headers(
     (context_with_trace, trace_id, parent_span_id)
 }
 
-/// Extract OpenTelemetry trace context from NATS headers for distributed tracing
+/// 从 NATS 头提取 OpenTelemetry trace 上下文，用于分布式追踪。
 pub fn extract_otel_context_from_nats_headers(
     headers: &async_nats::HeaderMap,
 ) -> (
@@ -645,7 +644,7 @@ pub fn extract_otel_context_from_nats_headers(
     (context_with_trace, trace_id, parent_span_id)
 }
 
-/// Inject OpenTelemetry trace context into NATS headers using W3C Trace Context propagation
+/// 使用 W3C Trace Context 传播，将 OpenTelemetry trace 上下文注入 NATS 头。
 pub fn inject_otel_context_into_nats_headers(
     headers: &mut async_nats::HeaderMap,
     context: Option<opentelemetry::Context>,
@@ -664,26 +663,26 @@ pub fn inject_otel_context_into_nats_headers(
     TRACE_PROPAGATOR.inject_context(&otel_context, &mut injector);
 }
 
-/// Inject trace context from current span into NATS headers
+/// 将当前 span 的 trace 上下文注入 NATS 头。
 pub fn inject_current_trace_into_nats_headers(headers: &mut async_nats::HeaderMap) {
     inject_otel_context_into_nats_headers(headers, None);
 }
 
-// Inject trace headers into a generic HashMap for HTTP/TCP transports
+// 将 trace 头注入通用 HashMap，供 HTTP/TCP 传输使用。
 pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<String, String>) {
     if let Some(trace_context) = get_distributed_tracing_context() {
-        // Inject W3C traceparent header
+        // 注入 W3C traceparent 头。
         headers.insert(
             "traceparent".to_string(),
             trace_context.create_traceparent(),
         );
 
-        // Inject optional tracestate
+        // 注入可选的 tracestate。
         if let Some(tracestate) = trace_context.tracestate {
             headers.insert("tracestate".to_string(), tracestate);
         }
 
-        // Inject custom request IDs
+        // 注入自定义 request ID。
         if let Some(x_request_id) = trace_context.x_request_id {
             headers.insert("x-request-id".to_string(), x_request_id);
         }
@@ -693,7 +692,7 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
     }
 }
 
-/// Create a client_request span linked to the parent trace context
+/// 创建与父 trace 上下文关联的 client_request span。
 pub fn make_client_request_span(
     operation: &str,
     request_id: &str,
@@ -774,8 +773,8 @@ impl<S> Layer<S> for DistributedTraceIdLayer
 where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    // Capture close span time
-    // Currently not used but added for future use in timing
+    // 记录 span 关闭时间。
+    // 当前尚未使用，但为后续计时用途预留。
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(&id) {
             let mut extensions = span.extensions_mut();
@@ -787,8 +786,8 @@ where
         }
     }
 
-    // Collects span attributes and metadata in on_new_span
-    // Final initialization deferred to on_enter when OtelData is available
+    // 在 on_new_span 中收集 span 属性和元数据。
+    // 最终初始化延后到 on_enter，以便拿到 OtelData。
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
             let mut trace_id: Option<String> = None;
@@ -800,7 +799,7 @@ where
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
 
-            // Extract trace_id from span attributes
+            // 从 span 属性中提取 trace_id。
             if let Some(trace_id_input) = visitor.fields.get("trace_id") {
                 if !is_valid_trace_id(trace_id_input) {
                     tracing::trace!("trace id  '{trace_id_input}' is not valid! Ignoring.");
@@ -809,7 +808,7 @@ where
                 }
             }
 
-            // Extract span_id from span attributes
+            // 从 span 属性中提取 span_id。
             if let Some(span_id_input) = visitor.fields.get("span_id") {
                 if !is_valid_span_id(span_id_input) {
                     tracing::trace!("span id  '{span_id_input}' is not valid! Ignoring.");
@@ -818,7 +817,7 @@ where
                 }
             }
 
-            // Extract parent_id from span attributes
+            // 从 span 属性中提取 parent_id。
             if let Some(parent_id_input) = visitor.fields.get("parent_id") {
                 if !is_valid_span_id(parent_id_input) {
                     tracing::trace!("parent id  '{parent_id_input}' is not valid! Ignoring.");
@@ -837,14 +836,14 @@ where
                 x_request_id = Some(x_request_id_input.to_string());
             }
 
-            // Extract request_id (with backward compat for x_pagoda_request_id)
+            // 提取 request_id（兼容旧的 x_pagoda_request_id）。
             if let Some(request_id_input) = visitor.fields.get("request_id") {
                 request_id = Some(request_id_input.to_string());
             } else if let Some(x_request_id_input) = visitor.fields.get("x_pagoda_request_id") {
                 request_id = Some(x_request_id_input.to_string());
             }
 
-            // Inherit trace context from parent span if available
+            // 若可用，则继承父 span 的 trace 上下文。
             if parent_id.is_none()
                 && let Some(parent_span_id) = ctx.current_span().id()
                 && let Some(parent_span) = ctx.span(parent_span_id)
@@ -863,15 +862,15 @@ where
                 }
             }
 
-            // Validate consistency
+            // 校验一致性。
             if (parent_id.is_some() || span_id.is_some()) && trace_id.is_none() {
                 tracing::error!("parent id or span id are set but trace id is not set!");
-                // Clear inconsistent IDs to maintain trace integrity
+                // 清除不一致的 ID，以保持 trace 完整性。
                 parent_id = None;
                 span_id = None;
             }
 
-            // Store pending context - will be finalized in on_enter
+            // 存储待定上下文，将在 on_enter 中最终化。
             let mut extensions = span.extensions_mut();
             extensions.insert(PendingDistributedTraceContext {
                 trace_id,
@@ -884,11 +883,11 @@ where
         }
     }
 
-    // Finalizes the DistributedTraceContext when span is entered
-    // At this point, OtelData should have valid trace_id and span_id
+    // 在 span 进入时完成 DistributedTraceContext 的最终化。
+    // 此时 OtelData 应已具有有效的 trace_id 和 span_id。
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(id) {
-            // Check if already initialized (e.g., span re-entered)
+            // 检查是否已经初始化（例如 span 重新进入）。
             {
                 let extensions = span.extensions();
                 if extensions.get::<DistributedTraceContext>().is_some() {
@@ -896,12 +895,12 @@ where
                 }
             }
 
-            // Get the pending context and extract OtelData IDs
+            // 获取待定上下文并提取 OtelData 中的 ID。
             let mut extensions = span.extensions_mut();
             let pending = match extensions.remove::<PendingDistributedTraceContext>() {
                 Some(p) => p,
                 None => {
-                    // This shouldn't happen - on_new_span should have created it
+                    // 这不该发生——on_new_span 本应已创建它。
                     tracing::error!("PendingDistributedTraceContext not found in on_enter");
                     return;
                 }
@@ -914,14 +913,14 @@ where
             let x_request_id = pending.x_request_id;
             let request_id = pending.request_id;
 
-            // Try to extract from OtelData if not already set
-            // Need to drop extensions_mut to get immutable borrow for OtelData
+            // 若尚未设置，则尝试从 OtelData 中提取。
+            // 需要先释放 extensions_mut，才能对 OtelData 做不可变借用。
             drop(extensions);
 
             if trace_id.is_none() || span_id.is_none() {
                 let extensions = span.extensions();
                 if let Some(otel_data) = extensions.get::<tracing_opentelemetry::OtelData>() {
-                    // Extract trace_id from OTEL data if not already set
+                    // 若尚未设置，则从 OTEL 数据中提取 trace_id。
                     if trace_id.is_none()
                         && let Some(otel_trace_id) = otel_data.trace_id()
                     {
@@ -931,7 +930,7 @@ where
                         }
                     }
 
-                    // Extract span_id from OTEL data if not already set
+                    // 若尚未设置，则从 OTEL 数据中提取 span_id。
                     if span_id.is_none()
                         && let Some(otel_span_id) = otel_data.span_id()
                     {
@@ -943,7 +942,7 @@ where
                 }
             }
 
-            // Panic if we still don't have required IDs
+            // 若仍缺少必要 ID，则 panic。
             if trace_id.is_none() {
                 panic!(
                     "trace_id is not set in on_enter - OtelData may not be properly initialized"
@@ -969,8 +968,8 @@ where
 
             drop(extensions);
 
-            // Emit SPAN_FIRST_ENTRY event. This only runs if the span passed the layer's filter
-            // (on_enter is not called for filtered-out spans), so no additional check needed.
+            // 发出 SPAN_FIRST_ENTRY 事件。只有 span 通过 layer 过滤器时才会运行，
+            // （被过滤掉的 span 不会调用 on_enter），因此无需额外检查。
             if span_events_enabled() {
                 emit_at_level!(span_level, target: "span_event", message = "SPAN_FIRST_ENTRY");
             }
@@ -978,8 +977,7 @@ where
     }
 }
 
-// Enables functions to retreive their current
-// context for adding to distributed headers
+// 让函数能够获取当前上下文，以便写入分布式头。
 pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
     Span::current()
         .with_subscriber(|(id, subscriber)| {
@@ -994,7 +992,7 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         .flatten()
 }
 
-/// Initialize the logger - must be called when Tokio runtime is available
+/// 初始化 logger - 必须在 Tokio runtime 可用时调用。
 pub fn init() {
     INIT.call_once(|| {
         if let Err(e) = setup_logging() {
@@ -1046,12 +1044,12 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
 
-        // Create OpenTelemetry tracer - conditionally export to OTLP based on env var
+        // 创建 OpenTelemetry tracer - 根据环境变量决定是否导出到 OTLP。
         let service_name = get_service_name();
 
-        // Build tracer and logger providers - with or without OTLP export
+        // 构建 tracer 和 logger provider - 可带或不带 OTLP 导出。
         let (tracer_provider, logger_provider_opt, portname_opt) = if otlp_exporter_enabled() {
-            // Export enabled: create OTLP exporters with batch processors
+            // 已启用导出：创建带批处理器的 OTLP exporter。
             let traces_endpoint =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
                     .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
@@ -1062,7 +1060,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 .with_service_name(service_name.clone())
                 .build();
 
-            // Initialize OTLP span exporter using gRPC (Tonic)
+            // 使用 gRPC（Tonic）初始化 OTLP span exporter。
             let span_exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_tonic()
                 .with_endpoint(&traces_endpoint)
@@ -1073,7 +1071,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 .with_resource(resource.clone())
                 .build();
 
-            // Initialize OTLP log exporter using gRPC (Tonic)
+            // 使用 gRPC（Tonic）初始化 OTLP log exporter。
             let log_exporter = opentelemetry_otlp::LogExporter::builder()
                 .with_tonic()
                 .with_endpoint(&logs_endpoint)
@@ -1090,7 +1088,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 Some(traces_endpoint),
             )
         } else {
-            // No export - traces generated locally only (for logging/trace IDs)
+            // 不导出 - trace 仅在本地生成（用于日志 / trace ID）。
             let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
                 .with_resource(
                     opentelemetry_sdk::Resource::builder_empty()
@@ -1102,10 +1100,10 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             (provider, None, None)
         };
 
-        // Get a tracer from the provider
+        // 从 provider 获取 tracer。
         let tracer = tracer_provider.tracer(service_name.clone());
 
-        // Build the OTLP logs bridge layer (only when export is enabled)
+        // 构建 OTLP 日志桥接层（仅在启用导出时）。
         let otel_logs_layer = logger_provider_opt
             .as_ref()
             .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
@@ -1121,7 +1119,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with(l)
             .init();
 
-        // Log initialization status after subscriber is ready
+        // 在 subscriber 就绪后记录初始化状态。
         if let Some(portname) = portname_opt {
             tracing::info!(
                 portname = %portname,
@@ -1164,23 +1162,23 @@ fn filters(config: LoggingConfig) -> EnvFilter {
         }
     }
 
-    // When span events are enabled, allow "span_event" target at all levels
-    // This ensures SPAN_FIRST_ENTRY events pass the filter when emitted from on_enter
+    // 当启用 span 事件时，允许 "span_event" target 通过所有级别过滤。
+    // 这能确保 on_enter 发出的 SPAN_FIRST_ENTRY 事件通过过滤器。
     if span_events_enabled() {
         filter_layer = filter_layer.add_directive("span_event=trace".parse().unwrap());
     }
 
-    // Always allow infrastructure request spans regardless of PGD_LOG level.
-    // This ensures request context (request_id, model, trace_id) is always
-    // available on log events, even when PGD_LOG=error or PGD_LOG=warn.
-    // Can be overridden via PGD_LOG=request_span=<level> if needed.
+    // 始终允许基础设施请求 span，不受 PGD_LOG 级别影响。
+    // 这能确保请求上下文（request_id、model、trace_id）始终可用于日志事件，
+    // 即使 PGD_LOG=error 或 PGD_LOG=warn 也是如此。
+    // 如有需要，可通过 PGD_LOG=request_span=<level> 覆盖。
     filter_layer = filter_layer.add_directive("request_span=trace".parse().unwrap());
 
     filter_layer
 }
 
-/// Log a message with file and line info
-/// Used by Python wrapper
+/// 记录带文件和行号信息的消息。
+/// 供 Python 封装层使用。
 pub fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     let level = match level {
         "debug" => log::Level::Debug,
@@ -1271,7 +1269,7 @@ impl CustomJsonFormatter {
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Static W3C Trace Context propagator instance to avoid repeated allocations
+/// 静态 W3C Trace Context propagator 实例，避免重复分配。
 static TRACE_PROPAGATOR: Lazy<opentelemetry_sdk::propagation::TraceContextPropagator> =
     Lazy::new(opentelemetry_sdk::propagation::TraceContextPropagator::new);
 
@@ -1410,7 +1408,7 @@ where
                 } else {
                     visitor.fields.remove("request_id");
                 }
-                // Remove old field name if present
+                // 若存在则移除旧字段名。
                 visitor.fields.remove("x_pagoda_request_id");
             } else {
                 tracing::error!(
@@ -1623,23 +1621,23 @@ pub mod tests {
 
                 let lines = load_log(file_name)?;
 
-                // 1. Extract the dynamically generated trace ID and validate consistency
-                // All logs should have the same trace_id since they're part of the same trace
-                // Skip any initialization logs that don't have trace_id (e.g., OTLP setup messages)
+                // 1. 提取动态生成的 trace ID 并验证一致性。
+                // 由于所有日志都属于同一条 trace，因此应具有相同的 trace_id。
+                // 跳过没有 trace_id 的初始化日志（例如 OTLP 设置消息）。
                 //
-                // Note: This test can fail if logging was already initialized by another test running
-                // in parallel. Logging initialization is global (Once) and can only happen once per process.
-                // If no trace_id is found, skip validation gracefully.
+                // 注意：如果 logging 已被其他并行测试初始化，该测试可能失败。
+                // logging 初始化是全局性的（Once），每个进程只能发生一次。
+                // 如果未找到 trace_id，则优雅跳过验证。
                 let Some(trace_id) = lines
                     .iter()
                     .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
                     .map(|s| s.to_string())
                 else {
-                    // Skip test if logging was already initialized - we can't control the output format
+                    // 如果 logging 已经初始化，则跳过测试 - 我们无法控制输出格式。
                     return Ok(());
                 };
 
-                // Verify trace_id is not a zero/invalid ID
+                // 验证 trace_id 不是全零 / 无效值。
                 assert_ne!(
                     trace_id, "00000000000000000000000000000000",
                     "trace_id should not be a zero/invalid ID"
@@ -1649,7 +1647,7 @@ pub mod tests {
                     "trace_id should not be all zeros"
                 );
 
-                // Verify all logs have the same trace_id
+                // 验证所有日志都拥有相同的 trace_id。
                 for log_line in &lines {
                     if let Some(line_trace_id) = log_line.get("trace_id") {
                         assert_eq!(
@@ -1660,7 +1658,7 @@ pub mod tests {
                     }
                 }
 
-                // Validate my_trace_id matches the actual trace ID
+                // 验证 my_trace_id 与真实 trace ID 一致。
                 for log_line in &lines {
                     if let Some(my_trace_id) = log_line.get("my_trace_id") {
                         assert_eq!(
@@ -1671,7 +1669,7 @@ pub mod tests {
                     }
                 }
 
-                // 2. Validate span IDs exist and are properly formatted
+                // 2. 验证 span ID 存在且格式正确。
                 let mut span_ids_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let mut span_timestamps: std::collections::HashMap<String, DateTime<Utc>> = std::collections::HashMap::new();
 
@@ -1686,21 +1684,21 @@ pub mod tests {
                         span_ids_seen.insert(span_id_str.to_string());
                     }
 
-                    // Validate timestamp format and track span timestamps
+                    // 验证时间戳格式并跟踪 span 时间戳。
                     if let Some(time_str) = log_line.get("time").and_then(|v| v.as_str()) {
                         let timestamp = DateTime::parse_from_rfc3339(time_str)
                             .expect("All timestamps should be valid RFC3339 format")
                             .with_timezone(&Utc);
 
-                        // Track timestamp for each span_name
+                        // 为每个 span_name 记录时间戳。
                         if let Some(span_name) = log_line.get("span_name").and_then(|v| v.as_str()) {
                             span_timestamps.insert(span_name.to_string(), timestamp);
                         }
                     }
                 }
 
-                // 3. Validate parent-child span relationships
-                // Extract span IDs for each span by looking at their log messages
+                // 3. 验证父子 span 关系。
+                // 通过查看日志消息提取每个 span 的 span ID。
                 let parent_span_id = lines
                     .iter()
                     .find(|log_line| {
@@ -1740,12 +1738,12 @@ pub mod tests {
                     })
                     .expect("Should find grandchild span with span_id");
 
-                // Verify span IDs are unique
+                // 验证 span ID 是唯一的。
                 assert_ne!(parent_span_id, child_span_id, "Parent and child should have different span IDs");
                 assert_ne!(child_span_id, grandchild_span_id, "Child and grandchild should have different span IDs");
                 assert_ne!(parent_span_id, grandchild_span_id, "Parent and grandchild should have different span IDs");
 
-                // Verify parent span has no parent_id
+                // 验证父 span 没有 parent_id。
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
@@ -1758,7 +1756,7 @@ pub mod tests {
                     }
                 }
 
-                // Verify child span's parent_id is parent_span_id
+                // 验证子 span 的 parent_id 等于 parent_span_id。
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
@@ -1775,7 +1773,7 @@ pub mod tests {
                     }
                 }
 
-                // Verify grandchild span's parent_id is child_span_id
+                // 验证孙子 span 的 parent_id 等于 child_span_id。
                 for log_line in &lines {
                     if let Some(span_name) = log_line.get("span_name")
                         && let Some(span_name_str) = span_name.as_str()
@@ -1792,7 +1790,7 @@ pub mod tests {
                     }
                 }
 
-                // 4. Validate timestamp ordering - spans should log in execution order
+                // 4. 验证时间戳顺序 - span 应按执行顺序记录日志。
                 let parent_time = span_timestamps.get("parent")
                     .expect("Should have timestamp for parent span");
                 let child_time = span_timestamps.get("child")
@@ -1800,7 +1798,7 @@ pub mod tests {
                 let grandchild_time = span_timestamps.get("grandchild")
                     .expect("Should have timestamp for grandchild span");
 
-                // Parent logs first (or at same time), then child, then grandchild
+                // 父 span 先记录（或同时记录），然后是子 span，再然后是孙子 span。
                 assert!(
                     parent_time <= child_time,
                     "Parent span should log before or at same time as child span (parent: {}, child: {})",
@@ -1821,7 +1819,7 @@ pub mod tests {
         Ok(())
     }
 
-    // Test functions at different log levels for filtering tests
+    // 用于过滤测试的不同日志级别测试函数。
     #[tracing::instrument(level = "debug", skip_all)]
     async fn debug_level_span() {
         tracing::debug!("inside debug span");
@@ -1837,28 +1835,28 @@ pub mod tests {
         tracing::warn!("inside warn span");
     }
 
-    // Span from a different target - should be FILTERED OUT at info level
-    // because the filter is warn,pagoda_runtime::logging::tests=debug
+    // 来自不同 target 的 span - 在 info 级别下应被过滤掉。
+    // 因为过滤器是 warn,pagoda_runtime::logging::tests=debug。
     #[tracing::instrument(level = "info", target = "other_module", skip_all)]
     async fn other_target_info_span() {
         tracing::info!(target: "other_module", "inside other target span");
     }
 
-    /// Comprehensive test for span events covering:
-    /// - SPAN_FIRST_ENTRY and SPAN_CLOSED event emission
-    /// - Trace context (trace_id, span_id) in span events
-    /// - Timing information in SPAN_CLOSED events
-    /// - Level-based filtering (positive: allowed levels pass, negative: filtered levels blocked)
-    /// - Target-based filtering (spans from allowed targets pass even at lower levels)
+    /// 针对 span 事件的综合测试，覆盖：
+    /// - SPAN_FIRST_ENTRY 和 SPAN_CLOSED 事件发出
+    /// - span 事件中的 trace 上下文（trace_id、span_id）
+    /// - SPAN_CLOSED 中的计时信息
+    /// - 基于级别的过滤（正向：允许级别通过，反向：过滤掉受限级别）
+    /// - 基于 target 的过滤（允许 target 的 span 即使级别更低也可通过）
     ///
-    /// This test runs in a subprocess to ensure logging is initialized with our specific
-    /// filter settings (PGD_LOG=warn,pagoda_runtime::logging::tests=debug), avoiding
-    /// interference from other tests that may have initialized logging first.
+    /// 该测试在子进程中运行，以确保 logging 使用我们指定的
+    /// 过滤配置（PGD_LOG=warn,pagoda_runtime::logging::tests=debug），避免
+    /// 被其他可能先初始化 logging 的测试干扰。
     #[test]
     fn test_span_events() {
         use std::process::Command;
 
-        // Run cargo test for the subprocess test with specific env vars
+        // 使用指定环境变量运行子进程测试的 cargo test。
         let output = Command::new("cargo")
             .args([
                 "test",
@@ -1875,7 +1873,7 @@ pub mod tests {
             .output()
             .expect("Failed to execute subprocess test");
 
-        // Print output for debugging
+        // 打印输出，便于调试。
         if !output.status.success() {
             eprintln!(
                 "=== STDOUT ===\n{}",
@@ -1894,11 +1892,11 @@ pub mod tests {
         );
     }
 
-    /// Subprocess test that performs the actual span event validation.
-    /// This is called by test_span_events in a separate process with controlled env vars.
+    /// 子进程测试：执行实际的 span 事件校验。
+    /// 它由 test_span_events 在带受控环境变量的独立进程中调用。
     #[tokio::test]
     async fn test_span_events_subprocess() -> Result<()> {
-        // Skip if not running as subprocess (env vars not set)
+        // 如果不是以子进程运行（未设置环境变量），则跳过。
         if std::env::var("PGD_LOGGING_SPAN_EVENTS").is_err() {
             return Ok(());
         }
@@ -1908,22 +1906,22 @@ pub mod tests {
         let guard = StderrOverride::from_file(file_name)?;
         init();
 
-        // Run parent/child/grandchild spans (all INFO level by default)
+        // 运行 parent/child/grandchild span（默认都为 INFO 级别）。
         parent().await;
 
-        // Run spans at explicit levels from our test module
+        // 运行本测试模块中显式指定级别的 span。
         debug_level_span().await;
         info_level_span().await;
         warn_level_span().await;
 
-        // Run span from different target (should be filtered out)
+        // 运行来自不同 target 的 span（应被过滤）。
         other_target_info_span().await;
 
         drop(guard);
 
         let lines = load_log(file_name)?;
 
-        // Helper to check if a span event exists
+        // 检查某个 span 事件是否存在的辅助函数。
         let has_span_event = |msg: &str, span_name: &str| {
             lines.iter().any(|log| {
                 log.get("message").and_then(|v| v.as_str()) == Some(msg)
@@ -1931,7 +1929,7 @@ pub mod tests {
             })
         };
 
-        // Helper to get span events
+        // 获取 span 事件的辅助函数。
         let get_span_events = |msg: &str| -> Vec<&serde_json::Value> {
             lines
                 .iter()
@@ -1939,15 +1937,15 @@ pub mod tests {
                 .collect()
         };
 
-        // === Test 1: SPAN_FIRST_ENTRY events have required fields ===
+        // === 测试 1：SPAN_FIRST_ENTRY 事件具有必需字段 ===
         let span_created_events = get_span_events("SPAN_FIRST_ENTRY");
         for event in &span_created_events {
-            // Must have span_name
+            // 必须有 span_name。
             assert!(
                 event.get("span_name").is_some(),
                 "SPAN_FIRST_ENTRY must have span_name"
             );
-            // Must have valid trace_id (format check)
+            // 必须有合法的 trace_id（格式检查）。
             let trace_id = event
                 .get("trace_id")
                 .and_then(|v| v.as_str())
@@ -1956,7 +1954,7 @@ pub mod tests {
                 trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
                 "SPAN_FIRST_ENTRY must have valid trace_id format"
             );
-            // Must have valid span_id
+            // 必须有合法的 span_id。
             let span_id = event
                 .get("span_id")
                 .and_then(|v| v.as_str())
@@ -1967,7 +1965,7 @@ pub mod tests {
             );
         }
 
-        // === Test 2: SPAN_CLOSED events have timing info ===
+        // === 测试 2：SPAN_CLOSED 事件具有计时信息 ===
         let span_closed_events = get_span_events("SPAN_CLOSED");
         for event in &span_closed_events {
             assert!(
@@ -1980,7 +1978,7 @@ pub mod tests {
                     || event.get("time.duration_us").is_some(),
                 "SPAN_CLOSED must have timing information"
             );
-            // Must have valid trace_id
+            // 必须有合法的 trace_id。
             let trace_id = event
                 .get("trace_id")
                 .and_then(|v| v.as_str())
@@ -1991,9 +1989,9 @@ pub mod tests {
             );
         }
 
-        // === Test 3: Target-based filtering (positive) ===
-        // Spans from pagoda_runtime::logging::tests should pass at ALL levels
-        // because the target is allowed at debug level
+        // === 测试 3：基于 target 的过滤（正向）===
+        // 来自 pagoda_runtime::logging::tests 的 span 应在所有级别通过。
+        // 因为该 target 在 debug 级别被允许。
         assert!(
             has_span_event("SPAN_FIRST_ENTRY", "debug_level_span"),
             "DEBUG span from allowed target MUST pass (target=debug filter)"
@@ -2007,7 +2005,7 @@ pub mod tests {
             "WARN span from allowed target MUST pass (target=debug filter)"
         );
 
-        // parent/child/grandchild are INFO level from allowed target - should pass
+        // parent/child/grandchild 是来自允许 target 的 INFO 级别 span - 应通过。
         assert!(
             has_span_event("SPAN_FIRST_ENTRY", "parent"),
             "parent span (INFO) from allowed target MUST pass"
@@ -2021,19 +2019,19 @@ pub mod tests {
             "grandchild span (INFO) from allowed target MUST pass"
         );
 
-        // === Test 4: Level-based filtering (negative) ===
-        // Verify spans from OTHER targets at debug/info level are filtered out
+        // === 测试 4：基于级别的过滤（反向）===
+        // 验证来自其他 target 的 debug/info 级别 span 会被过滤掉。
         assert!(
             !has_span_event("SPAN_FIRST_ENTRY", "other_target_info_span"),
             "INFO span from non-allowed target (other_module) MUST be filtered out"
         );
 
-        // Also verify no spans from other targets appear at debug/info level
+        // 同时验证其他 target 的 span 不会出现在 debug/info 级别。
         for event in &span_created_events {
             let target = event.get("target").and_then(|v| v.as_str()).unwrap_or("");
             let level = event.get("level").and_then(|v| v.as_str()).unwrap_or("");
 
-            // If level is DEBUG or INFO, target must be our test module
+            // 如果 level 是 DEBUG 或 INFO，target 必须是我们的测试模块。
             if level == "DEBUG" || level == "INFO" {
                 assert!(
                     target.contains("pagoda_runtime::logging::tests"),

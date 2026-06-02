@@ -36,7 +36,7 @@
 //!   Mutex / HashMap / OnceLock` 等全部名称。
 //! - `AsyncEngineContextProvider` 不在 `super::*` 中，需要在此显式 `use`。
 //! - `on_data` 中将 `sinks` 锁先 `remove` 后立即 `drop(sinks)`，再 `tx.send`，
-//!   避免持有锁的同时跨 await；与基线一致。
+//!   避免持有锁的同时跨 await。
 //! - 错误链路均使用 `.inspect_err(|_| ctx.stop_generating())` 显式取消上下文，
 //!   保证调用方的 cancellation token 一定收到信号。
 

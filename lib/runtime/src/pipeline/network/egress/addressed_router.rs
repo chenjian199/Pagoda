@@ -84,16 +84,15 @@ struct RequestControlMessage {
     request_type: RequestType,
     response_type: ResponseType,
     connection_info: ConnectionInfo,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    /// wall-clock 发送时间戳（自 UNIX epoch 起的纳秒数），用于拆解传输层延迟。
+    /// 使用 `SystemTime`，精度取决于前端与后端主机间的 NTP 同步情况。
+    /// 单机性能分析时可靠；跨主机的数值应视为近似值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frontend_send_ts_ns: Option<u64>,
 }
 
-/// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
-/// Protects against gauge leaks when `?` operators cause early returns between
-/// the increment and `InflightDecStream` construction.
+/// RAII guard：drop 时递减 `REQUEST_PLANE_INFLIGHT`，除非已被解除（disarm）。
+/// 防止在递增计数与构造 `InflightDecStream` 之间因 `?` 提前返回而导致计数泄漏。
 struct InflightGuard {
     armed: bool,
 }
@@ -103,8 +102,7 @@ impl InflightGuard {
         Self { armed: true }
     }
 
-    /// Consume the guard without decrementing. Call this when `InflightDecStream`
-    /// takes over responsibility for the decrement.
+    /// 消费该 guard 但不递减计数。当 `InflightDecStream` 接管递减职责时调用。
     fn disarm(mut self) {
         self.armed = false;
     }
@@ -118,7 +116,7 @@ impl Drop for InflightGuard {
     }
 }
 
-/// Wrapper that decrements request-plane inflight gauge when the stream is dropped.
+/// 包装器：当 stream 被 drop 时递减 request-plane 的 inflight 计量器。
 struct InflightDecStream<S> {
     inner: S,
 }
@@ -176,8 +174,8 @@ fn build_request_headers(request_id: &str) -> std::collections::HashMap<String, 
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
-    /// Carries portname name + instance_id so cancellation is scoped to the
-    /// exact (portname, instance) pair, not all portnames on the same runtime.
+    /// 携带 portname 名称与 instance_id，使取消操作精确作用于
+    /// (portname, instance) 这一对，而非同一 runtime 上的所有 portname。
     instance: Option<Instance>,
 }
 
@@ -204,18 +202,18 @@ impl<T> AddressedRequest<T> {
 }
 
 pub struct AddressedPushRouter {
-    // Request transport (unified trait object - works with all transports)
+    // 请求传输（统一 trait object——适用于所有传输）
     req_client: Arc<dyn RequestPlaneClient>,
 
-    // Response transport (TCP streaming - unchanged)
+    // 响应传输（TCP 流式——保持不变）
     resp_transport: Arc<tcp::server::TcpStreamServer>,
 }
 
 impl AddressedPushRouter {
-    /// Create a new router with a request plane client
+    /// 用一个 request plane 客户端创建新的 router。
     ///
-    /// This is the unified constructor that works with any transport type.
-    /// The client is provided as a trait object, hiding the specific implementation.
+    /// 这是适用于任意传输类型的统一构造器。
+    /// 客户端以 trait object 形式注入，隐藏具体实现。
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
         resp_transport: Arc<tcp::server::TcpStreamServer>,
@@ -226,14 +224,14 @@ impl AddressedPushRouter {
         }))
     }
 
-    /// Cancel all pending response-stream registrations for an instance.
+    /// 取消某个 instance 上所有待处理的响应流注册。
     pub async fn cancel_instance_streams(&self, instance_id: &PortNameInstanceId) -> usize {
         self.resp_transport
             .cancel_instance_streams(instance_id)
             .await
     }
 
-    /// Clear the tombstone after an instance reappears in discovery.
+    /// 当 instance 在发现中重新出现后，清除其 tombstone 标记。
     pub async fn clear_instance_tombstone(&self, instance_id: &PortNameInstanceId) {
         self.resp_transport
             .clear_instance_tombstone(instance_id)
@@ -272,7 +270,7 @@ where
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
 
-        // registration options for the data plane in a singe in / many out configuration
+        // 单入多出的 data plane 注册选项。
         let options = StreamOptions::builder()
             .context(engine_ctx.clone())
             .enable_request_stream(false)
@@ -280,11 +278,11 @@ where
             .build()
             .unwrap();
 
-        // register our needs with the data plane
-        // todo - generalize this with a generic data plane object which hides the specific transports
+        // 向 data plane 注册我们的需求。
+        // TODO：将其泛化为通用 data plane 对象，以隐藏具体传输实现。
         let pending_connections: PendingConnections = self.resp_transport.register(options).await;
 
-        // validate and unwrap the RegisteredStream object
+        // 校验并解包 RegisteredStream 对象。
         let pending_response_stream = match pending_connections.into_parts() {
             (None, Some(recv_stream)) => recv_stream,
             _ => {
@@ -292,17 +290,17 @@ where
             }
         };
 
-        // separate out the connection info and the stream provider from the registered stream
+        // 从注册流中拆出 connection info 和 stream provider。
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
 
-        // Snapshot subject before connection_info is moved; used for cleanup.
+        // 在移动 connection_info 之前先快照 subject，供清理时使用。
         let recv_subject: Option<String> =
             serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
                 .ok()
                 .map(|ci| ci.subject);
 
-        // If the instance is already tombstoned, fail fast with a migratable
-        // error instead of writing to the request plane.
+        // 如果 instance 已经被 tombstone，就快速失败并返回可迁移的错误，
+        // 而不是继续写入 request plane。
         if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
             let portname_instance_id = inst.portname_instance_id();
             if !self
@@ -321,10 +319,10 @@ where
             }
         }
 
-        // package up the connection info as part of the "header" servicegroup of the two part message
-        // used to issue the request on the
-        // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
-        // calls. all the information here is provided by the [`StreamOptions`] object and/or the dataplane object
+        // 将 connection info 打包成 two-part message 的“header” servicegroup 的一部分，
+        // 用来发起请求。
+        // TODO：这个对象应该由 register 调用自动创建，通过两个 into_parts() 调用达成。
+        // 这里的所有信息都由 [`StreamOptions`] 对象和/或 data plane 对象提供。
         let control_message = RequestControlMessage {
             id: engine_ctx.id().to_string(),
             request_type: RequestType::SingleIn,
@@ -333,9 +331,9 @@ where
             frontend_send_ts_ns: None,
         };
 
-        // next build the two part message where we package the connection info and the request into
-        // a single Vec<u8> that can be sent over the wire.
-        // --- package this up in the WorkQueuePublisher ---
+        // 接下来构建 two-part message，把 connection info 和 request 打包成一个
+        // 可以通过 wire 发送的 `Vec<u8>`。
+        // --- 把这部分封装进 WorkQueuePublisher ---
         let ctrl = match serde_json::to_vec(&control_message) {
             Ok(v) => v,
             Err(e) => {
@@ -360,9 +358,9 @@ where
 
         let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
 
-        // the request plane / work queue should provide a two part message codec that can be used
-        // or it should take a two part message directly
-        // todo - update this
+        // request plane / work queue 应该提供一个可复用的 two-part message codec，
+        // 或者直接接收 two-part message。
+        // TODO：更新这里。
         let codec = TwoPartCodec::default();
         let buffer = match codec.encode_message(msg) {
             Ok(v) => v,
@@ -375,9 +373,9 @@ where
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
         let tx_start = Instant::now();
 
-        // TRANSPORT ABSTRACT REQUIRED - END HERE
+        // 到这里就已经完成了传输抽象所需的工作。
 
-        // Send request using unified client interface
+        // 通过统一的 client 接口发送请求。
         tracing::trace!(
             request_id,
             transport = self.req_client.transport_name(),
@@ -385,11 +383,11 @@ where
             "Sending request via request plane client"
         );
 
-        // 把 trace headers / request-id / 发送时间戳的注入打包到 helper，临近 socket
-        // 写入再生成时间戳，让网络段耗时不包含序列化/编码开销。
+        // 把 trace headers / request-id / 发送时间戳的注入封装到 helper，
+        // 让时间戳在接近 socket 写入时才生成，这样网络段耗时不包含序列化/编码开销。
         let headers = build_request_headers(&request_id);
 
-        // Phase A: Frontend → Backend (network + queue + ack)
+        // 阶段 A：前端 → 后端（network + queue + ack）。
         let _nvtx_send = pagoda_timeline_range!("transport.tcp.send");
         let send_result = self.req_client.send_request(address, buffer, headers).await;
         drop(_nvtx_send);
@@ -403,17 +401,17 @@ where
         let _nvtx_wait = pagoda_timeline_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
 
-        // RecvError → migratable Disconnected (watcher cancelled the subject
-        // or the worker died before establishing the response stream).
+        // RecvError → 可迁移的 Disconnected（watcher 取消了 subject，
+        // 或者 worker 在建立 response stream 之前就死了）。
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
+                // generate() 在任何 response 字节到来之前就失败了；通过
+                // CannotConnect 迁移，因为主因通常是 worker 本地的
+                // 配置/版本问题。当前 wire prologue 只携带一个
+                // 不透明字符串，所以应用层拒绝也会重试——这很安全，
+                // 因为此时还没有可见副作用。后续可考虑结构化 prologue 错误类型，
+                // 以便更精细地路由。
                 self.cancel_recv_stream_if_present(&recv_subject).await;
                 return Err(anyhow::anyhow!(
                     PagodaError::builder()
@@ -425,8 +423,8 @@ where
                 ));
             }
             Err(_recv_err) => {
-                // oneshot dropped: either the discovery watcher cancelled
-                // this subject or the worker died mid-handshake.
+                // oneshot 被丢弃：要么是 discovery watcher 取消了
+                // 这个 subject，要么是 worker 在握手中途死掉了。
                 self.cancel_recv_stream_if_present(&recv_subject).await;
                 return Err(anyhow::anyhow!(
                     PagodaError::builder()
@@ -438,7 +436,7 @@ where
         };
         drop(_nvtx_wait);
 
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
+        // TODO：改用 Server-Sent Events（SSE）检测流结束。
         let mut is_complete_final = false;
         let mut first_response = true;
         let stream = tokio_stream::StreamNotifyClose::new(
@@ -486,9 +484,8 @@ where
                 // end of stream
                 None
             } else if engine_ctx_.is_stopped() {
-                // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
-                // 'is_killed()' here because it implies the stream ended abnormally which should be
-                // handled by the error branch below.
+                // 如果调用了 `stop_generating()`，就优雅地结束流。这里不要检查
+                // `is_killed()`，因为它意味着流是异常结束的，应该交给下面的错误分支处理。
                 tracing::debug!("Request cancelled and then trying to read a response");
                 None
             } else {
@@ -530,9 +527,9 @@ mod tests {
     //! | `test_request_control_message_round_trip` | `RequestControlMessage` 完整 round-trip + 可选字段省略 |
     //!
     //! ## 说明
-    //! `generate()` 端到端依赖 `TcpStreamServer` 与真实 RequestPlaneClient 实现，
-    //! 由集成测试覆盖；本单元层只锁定可独立验证的契约面：headers 协议、wire 枚举
-    //! 序列化、inflight 计数器孪生不变式、构造器透传。
+    //! `generate()` 的端到端行为依赖 `TcpStreamServer` 和真实的 RequestPlaneClient 实现，
+    //! 由集成测试覆盖；这里的单元测试只锁定可独立验证的契约面：headers 协议、wire 枚举
+    //! 序列化、in-flight 计数器孪生不变式、构造器透传。
     use super::*;
     use crate::servicegroup::Instance;
     use crate::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
@@ -581,7 +578,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        // 与系统时钟差距应不超过 1 秒
+        // 与系统时钟的差距应不超过 1 秒。
         let diff = now_ns.abs_diff(t1);
         assert!(diff < 1_000_000_000, "diff={}ns", diff);
     }
@@ -612,8 +609,8 @@ mod tests {
 
     #[test]
     fn test_inflight_guard_and_stream_drop_semantics_serial() {
-        // 合并三项与全局 REQUEST_PLANE_INFLIGHT 相关的断言，避免并行测试
-        // 互相踩跳；delta 语义在单个函数内严格为「本函数相对起点 0」。
+        // 把三项与全局 REQUEST_PLANE_INFLIGHT 相关的断言合并起来，避免并行测试
+        // 互相干扰；delta 语义在单个函数内严格等于“相对起点 0”。
 
         // 1) armed 默认 → drop 后该抵消一次 inc
         let start = REQUEST_PLANE_INFLIGHT.get();

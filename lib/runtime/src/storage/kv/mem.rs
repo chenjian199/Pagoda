@@ -5,7 +5,7 @@
 //!
 //! ## 设计意图
 //! 提供进程内、零外部依赖的 [`Store`] 实现，主要用于测试与开发态运行。
-//! 本实现与 lib-copy 标准版**契约完全等价**，但内部走了与之不同的并发路径：
+//! 并发路径设计如下：
 //! - 用 `DashMap` 替代全局 `Mutex<HashMap>`，将"桶级别"的写入互斥下沉到分片锁；
 //! - 用 **per-bucket** `tokio::sync::broadcast` 替代"全局 unbounded mpsc + 单
 //!   消费者锁"，使得 `watch()` 不再串行化、并自然支持多订阅者；
@@ -30,7 +30,7 @@
 //!   这对于"无人观察"场景是符合预期的（生产期间无背压堆积）。
 //! - 为了避免广播信道容量满导致丢事件，初始容量取 `WATCH_CAPACITY`；调用方
 //!   可通过及时消费 stream 维持低水位。
-//! - 删除事件仅在"key 确实存在"时才广播，与 lib-copy 行为一致。
+//! - 删除事件仅在"key 确实存在"时才广播。
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -133,7 +133,7 @@ impl MemoryStore {
 impl Store for MemoryStore {
     type Bucket = MemoryBucketRef;
 
-    /// MemoryStore 不实现 TTL —— `_ttl` 被忽略，与 lib-copy 一致。
+    /// MemoryStore 不实现 TTL —— `_ttl` 被忽略。
     async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
@@ -215,7 +215,7 @@ impl Bucket for MemoryBucketRef {
                         // 同 revision 视为幂等 noop
                         (StoreOutcome::Exists(revision), None)
                     } else {
-                        // 不同 revision 视为更新；lib-copy 此处不广播，我们也不广播
+                        // 不同 revision 视为更新；此处不广播
                         *existing = (revision, value);
                         (StoreOutcome::Created(revision), None)
                     }
@@ -234,7 +234,7 @@ impl Bucket for MemoryBucketRef {
     }
 
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
-        // 桶不存在 → 与 lib-copy 一致：返回 Ok(None)（而非错误）。
+        // 桶不存在 → 返回 Ok(None)（而非错误）。
         let Some(state_ref) = self.buckets.get(&self.name) else {
             return Ok(None);
         };
@@ -287,7 +287,7 @@ impl Bucket for MemoryBucketRef {
             loop {
                 match rx.recv().await {
                     Ok(MemoryEvent::Put { key, value }) => {
-                        // 快照里已经出过的 key 不再 yield —— 与 lib-copy 一致
+                        // 快照里已经出过的 key 不再 yield
                         if seen.contains(&key) {
                             continue;
                         }
@@ -312,7 +312,7 @@ impl Bucket for MemoryBucketRef {
         let guard = state.data.lock();
         let mut out = HashMap::with_capacity(guard.len());
         for (k, (_rev, v)) in guard.iter() {
-            // 与 lib-copy 一致：entries 返回的 Key 带桶名前缀
+            // entries 返回的 Key 带桶名前缀
             let full = format!("{}/{}", self.name, k);
             out.insert(Key::new(full), v.clone());
         }
@@ -383,7 +383,7 @@ mod tests {
     /// ## 测试过程
     /// 不存在的桶上调用 `get` 应返回 `Ok(None)` 而不是错误。
     /// ## 意义
-    /// 锁定"读不存在的桶不视为错误"这一便利契约（lib-copy 行为）。
+    /// 锁定"读不存在的桶不视为错误"这一便利契约。
     #[tokio::test]
     async fn get_on_missing_bucket_is_ok_none() {
         let m = MemoryStore::new();

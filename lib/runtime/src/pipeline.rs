@@ -15,7 +15,7 @@
 //! - 公开类型别名（`SingleIn`/`SingleOut`/`ManyIn`/`ManyOut`/各 `*Engine`）签名严格保持。
 //! - `PipelineIO::id(&self) -> String` 必须返回底层 `AsyncEngineContext.id()` 的克隆。
 //! - `Event { id }` 结构体字段顺序与可见性保持。
-//! - `AsyncTransportEngine` trait 仅为 marker（无额外方法），契约与基线一致。
+//! - `AsyncTransportEngine` trait 仅为 marker（无额外方法），契约保持稳定。
 //! - 子模块导出列表（`nodes::*`、`network::egress::*`、`context`、`error`、`registry`）保持。
 //!
 //! ## 实现要点
@@ -50,52 +50,46 @@ pub use anyhow::Error;
 pub use context::Context;
 pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 
-/// Pipeline inputs carry a [`Context`] which can be used to carry metadata or additional information
-/// about the request. This information propagates through the stages, both local and distributed.
+/// 流水线输入携带一个 [`Context`]，用于在请求中附带元数据或额外信息。
+/// 这些信息会随着各处理阶段在本地与分布式两种场景下一路传播。
 pub type SingleIn<T> = Context<T>;
 
-/// Pipeline input for streaming-request engines: a trait-object alias around a
-/// stream that carries its own cancellation context (via the
-/// [`AsyncEngineContextProvider`] half of [`AsyncEngineStream`]).
+/// 流式请求引擎的输入：一个 trait object 别名，包装一个自带取消上下文的流
+///（取消上下文通过 [`AsyncEngineStream`] 的 [`AsyncEngineContextProvider`] 一面提供）。
 ///
-/// This is the input-side mirror of [`ManyOut`]. Both aliases resolve to the
-/// same underlying [`EngineStream<T>`] type; the directional names are
-/// documentary. Earlier definitions wrapped the stream in a `Context<…>`
-/// (`Context<DataStream<T>>`); that shape was uninstantiable because
-/// `DataStream<T>` is `!Sync` while `Context<T: Data>` requires `Sync`. The
-/// trait-object form solves that cleanly: the cancellation surface is part of
-/// the trait contract rather than an outer wrapper.
+/// 这是 [`ManyOut`] 在输入侧的镜像。两个别名都解析到同一个底层
+/// [`EngineStream<T>`] 类型，方向性命名仅用于表意。之所以不采用把流包进
+/// `Context<…>`（`Context<DataStream<T>>`）的形态，是因为该形态无法实例化：
+/// `DataStream<T>` 是 `!Sync`，而 `Context<T: Data>` 要求 `Sync`。trait object
+/// 形态干净地解决了这一点：取消能力成为 trait 契约的一部分，而非外层包装。
 pub type ManyIn<T> = EngineStream<T>;
 
-/// Type alias for the output of pipeline that returns a single value
+/// 返回单个值的流水线输出类型别名
 pub type SingleOut<T> = EngineUnary<T>;
 
-/// Type alias for the output of pipeline that returns multiple values
+/// 返回多个值的流水线输出类型别名
 pub type ManyOut<T> = EngineStream<T>;
 
 pub type ServiceEngine<T, U> = Engine<T, U, Error>;
 
-/// Unary Engine is a pipeline that takes a single input and returns a single output
+/// Unary 引擎是接收单个输入并返回单个输出的流水线
 pub type UnaryEngine<T, U> = ServiceEngine<SingleIn<T>, SingleOut<U>>;
 
-/// `ClientStreaming` Engine is a pipeline that takes multiple inputs and returns a single output
-/// Typically the engine will consume the entire input stream; however, it can also decided to exit
-/// early and emit a response without consuming the entire input stream.
+/// `ClientStreaming` 引擎是接收多个输入并返回单个输出的流水线。
+/// 通常引擎会消费整个输入流；但它也可以提前退出，在未消费完整输入流的情况下发出响应。
 pub type ClientStreamingEngine<T, U> = ServiceEngine<ManyIn<T>, SingleOut<U>>;
 
-/// `ServerStreaming` takes a single input and returns multiple outputs.
+/// `ServerStreaming` 接收单个输入并返回多个输出。
 pub type ServerStreamingEngine<T, U> = ServiceEngine<SingleIn<T>, ManyOut<U>>;
 
-/// `BidirectionalStreaming` takes multiple inputs and returns multiple outputs. Input and output values
-/// are considered independent of each other; however, they could be constrained to be related.
+/// `BidirectionalStreaming` 接收多个输入并返回多个输出。输入值与输出值
+/// 彼此独立；但也可以被约束为相互关联。
 pub type BidirectionalStreamingEngine<T, U> = ServiceEngine<ManyIn<T>, ManyOut<U>>;
 
 pub trait AsyncTransportEngine<T: Data + PipelineIO, U: Data + PipelineIO>:
     AsyncEngine<T, U, Error> + Send + Sync + 'static
 {
 }
-
-// pub type TransportEngine<T, U> = Arc<dyn AsyncTransportEngine<T, U>>;
 
 mod sealed {
     use super::*;

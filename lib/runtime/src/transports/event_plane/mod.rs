@@ -40,12 +40,11 @@
 //!   BrokerEndpoints` 仍 crate-private 但保留供测试访问。
 //!
 //! ## 实现要点
-//! 与 lib-copy 相比，本实现：
 //! 1. 把 `EventPublisher::new_internal` 里那个 600 行的"先准备 transport_setup、
 //!    再 register discovery"超长函数**拆**成两步：[`prepare_publisher_transport`]
 //!    + [`register_publisher_with_discovery`]。每步语义明确、可独立阅读。
-//! 2. `parse_broker_url` 内部改用一次 `match` 而不是先 trim 再 strip_prefix
-//!    串行试错 —— 行为与错误信息字面值完全一致（测试在断言这些字串）。
+//! 2. `parse_broker_url` 内部用一次 `match` 而不是先 trim 再 strip_prefix
+//!    串行试错 —— 错误信息字面值稳定（测试在断言这些字串）。
 //! 3. Drop 处的 spawn fallback 仍用 `catch_unwind`，但提取成一个常量字符串
 //!    避免在 panic 路径再分配。
 
@@ -830,7 +829,7 @@ fn current_timestamp_ms() -> u64 {
 }
 
 // =============================================================================
-// === 单元测试（lib-copy 标准） ===============================================
+// === 单元测试 ===============================================
 // =============================================================================
 
 #[cfg(test)]
@@ -875,7 +874,7 @@ mod tests {
     #[test]
     fn test_timestamp_generation() {
         let ts = current_timestamp_ms();
-        // Jan 1, 2020 ~ Jan 1, 2100
+        // 2020-01-01 至 2100-01-01
         assert!(ts > 1577836800000, "Timestamp should be after 2020");
         assert!(ts < 4102444800000, "Timestamp should be before 2100");
     }
@@ -900,7 +899,7 @@ mod tests {
         assert_eq!(deserialized.payload, Bytes::from("test data"));
     }
 
-    // === SECTION: 合并自原 mod supplemental_tests ===
+    // === SECTION: 合并自 supplemental_tests 模块 ===
     use super::*;
     use crate::config::environment_names::zmq_broker as env_zmq_broker;
     use crate::discovery::EventTransportKind;

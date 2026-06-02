@@ -9,15 +9,15 @@
 //! 在不感知存储介质的前提下工作。模块名特意拼为 `key_value_store` 而非 KV ——
 //! 在 AI 语境下 "KV" 容易与注意力缓存混淆。
 //!
-//! 本实现标准版**契约完全等价**，但内部走了与之不同的实现路径：
+//! 本实现采用如下设计路径：
 //!
-//! - 把 lib-copy 的 `enum KeyValueStoreEnum { Memory, Nats, Etcd, File }` 改成
-//!   `Arc<dyn DynStore>` 的对象安全适配层 `BoxedStoreImpl<S>`。新增一种后端
-//!   时只需实现 `Store`，无需扩展枚举 + 多个 match 分支。
-//! - `watch()` 转发用 `try_send` + 丢失计数 log，而非 lib-copy 的 `send_timeout`：
-//!   慢消费者**会丢事件**但不会拖累生产侧。
-//! - `Selector::from_str` 支持的别名集合从 `etcd / file / mem` 扩展为更宽容的
-//!   `etcd|etcd3 / file|fs / mem|memory|inmem` 写法（lib-copy 三种仍生效）。
+//! - 后端统一抽象为 `Arc<dyn DynStore>` 的对象安全适配层 `BoxedStoreImpl<S>`，
+//!   而非用单一枚举罗列所有后端。新增一种后端时只需实现 `Store`，无需扩展
+//!   枚举 + 多个 match 分支。
+//! - `watch()` 转发用 `try_send` + 丢失计数 log：慢消费者**会丢事件**但不会
+//!   拖累生产侧。
+//! - `Selector::from_str` 支持较为宽容的别名集合：`etcd|etcd3 / file|fs /
+//!   mem|memory|inmem` 多种写法均生效。
 //!
 //! ## 外部契约
 //! - 公开类型：`Key`、`KeyValue`、`WatchEvent`、`Store`、`Bucket`、`StoreOutcome`、
@@ -25,7 +25,7 @@
 //! - `Manager::default()` 等价于 `Manager::memory()`。
 //! - `Manager::memory()` / `::etcd(client)` / `::file(cancel, root)` 公开。
 //! - `Manager::get_or_create_bucket / get_bucket / load / watch / publish / shutdown /
-//!   connection_id` 全部公开、签名与 lib-copy 一致。
+//!   connection_id` 全部公开。
 //! - `Selector` 实现 `Default = Memory`，`FromStr`、`TryFrom<String>`、`Display`。
 //! - `Key`：`new`、`from_url_safe`、`url_safe`、`From<&str>`、`Display`、`AsRef<str>`、
 //!   `From<&Key> for String`。
@@ -235,7 +235,7 @@ impl FromStr for Selector {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> anyhow::Result<Selector> {
-        // 接受比 lib-copy 更宽容的别名集合
+        // 接受较为宽容的别名集合
         match s.to_ascii_lowercase().as_str() {
             "etcd" | "etcd3" => Ok(Self::Etcd(Box::default())),
             "file" | "fs" => {
@@ -401,9 +401,9 @@ impl Manager {
 
     /// 启动后台 watch 任务：先吐出现存条目，再追踪新增/变更。
     ///
-    /// 与 lib-copy 的区别：发往 receiver 用 `try_send`。若 receiver 不消费，
-    /// **会丢事件**（log 警告），但生产侧绝不会阻塞。这个权衡更适合"事件流
-    /// 用作 hint，订阅者愿意接受最终一致"的场景。
+    /// 发往 receiver 用 `try_send`。若 receiver 不消费，**会丢事件**（log 警告），
+    /// 但生产侧绝不会阻塞。这个权衡更适合"事件流用作 hint，订阅者愿意接受最终
+    /// 一致"的场景。
     pub fn watch(
         self: Arc<Self>,
         bucket_name: &str,
@@ -486,7 +486,7 @@ impl Manager {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum StoreOutcome {
-    /// 写入成功，返回的版本号是新版本。注意 "create" 在 lib-copy 语义中也包含
+    /// 写入成功，返回的版本号是新版本。注意 "create" 语义上也包含
     /// update —— 任何新版本都视为 create。
     Created(u64),
     /// 写入为 NOOP：值已存在且版本相同。
@@ -584,7 +584,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // === lib-copy 标准契约测试（原样保留）================================
+    // === 标准契约测试 ================================================
     // ---------------------------------------------------------------------
 
     #[tokio::test]
@@ -612,13 +612,13 @@ mod tests {
             let b2 = s2.get_or_create_bucket(BUCKET_NAME, None).await?;
             let mut stream = b2.watch().await?;
 
-            // Put in before starting the watch-all
+            // 在启动 watch-all 之前先写入
             let v = stream.next().await.unwrap();
             assert_eq!(v, expected[0]);
 
             got_first_tx.send(()).unwrap();
 
-            // Put in after
+            // 启动后再写入
             let v = stream.next().await.unwrap();
             assert_eq!(v, expected[1]);
 
@@ -701,7 +701,7 @@ mod tests {
     }
 
     /// ## 测试过程
-    /// `Selector::from_str` 应识别本实现新增的别名（etcd3 / fs / memory / inmem）以及 lib-copy 三种原名。
+    /// `Selector::from_str` 应识别全部别名：etcd / etcd3、file / fs、mem / memory / inmem。
     /// ## 意义
     /// 锁定 Selector 解析的兼容契约。
     #[test]

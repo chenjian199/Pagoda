@@ -29,7 +29,7 @@
 //!   `decode(impl Buf) -> Result<Frame>` / `size()`。
 //!
 //! ## 实现要点
-//! - 字节序使用大端（`put_u32` / `get_u32` 默认即大端）—— 与 lib-copy 一致。
+//! - 字节序使用大端（`put_u32` / `get_u32` 默认即大端）。
 //! - `Frame::encode` 显式预留 `frame_size()` 容量，避免 `BytesMut` 多次扩容。
 //! - 解码逻辑全部走"先检查 remaining 再 advance"，保证无 panic。
 
