@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "pagoda-tokens"
+description = "Pagoda token management tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dashmap = { workspace = true }
+derive-getters = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+xxhash-rust = { workspace = true }
+bs58 = "0.5"
+
+bytemuck = "1.22"
+
+[dev-dependencies]
+itertools = "0.14"
+rmp-serde = { workspace = true }
+serde_json = { workspace = true }
