@@ -763,8 +763,7 @@ mod tests {
     //! 门面层（lib.rs）的单一统一测试模块。
     //!
     //! ## 测试过程
-    //! 由于标准实现（lib-copy）的 lib.rs 没有自带 `mod tests`，本模块作为门面层公开
-    //! 契约的回归基线，覆盖 `DecodeResult` 状态判定、`Encoding` 哈希、分词器分派、
+    //! 本模块作为门面层公开契约的回归基线，覆盖 `DecodeResult` 状态判定、`Encoding` 哈希、分词器分派、
     //! JSON 字段读取、`Sequence` 增量解码以及停止序列检测等重写路径。
     //!
     //! ## 意义
