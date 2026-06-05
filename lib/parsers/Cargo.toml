@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+#
+# API-compatible implementation based on the public interfaces and behavioral
+# contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
+# Implementation rewritten by PAGODA.
+
+[package]
+name = "pagoda-parsers"
+version.workspace = true
+edition.workspace = true
+description = "Pagoda Parser Library for Tool Calling and Reasoning"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+pagoda-protocols = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+regex = "1"
+openai-harmony = "0.0.3"
+rustpython-parser = "0.4.0"
+num-traits = "0.2"
+
+[dev-dependencies]
+rstest = "0.25"

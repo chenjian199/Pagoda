@@ -1,13 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA. All rights reserved.
-// SPDX-FileCopyrightText: Copyright (c) 2022 Himanshu Neema
-// SPDX-License-Identifier: Apache-2.0 AND MIT
-//
-// Based on async-openai (https://github.com/64bit/async-openai) by Himanshu Neema.
-// Original async-openai Copyright (c) 2022 Himanshu Neema.
-// async-openai portions licensed under the MIT License; see ATTRIBUTIONS-Rust.md.
-//
-// Pagoda modifications Copyright (c) 2026-2028 PAGODA.
-// Pagoda modifications licensed under the Apache License, Version 2.0.
+# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022 Himanshu Neema
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+#
+# Based on async-openai (https://github.com/64bit/async-openai) by Himanshu Neema.
+# Original async-openai Copyright (c) 2022 Himanshu Neema.
+# async-openai portions licensed under the MIT License; see ATTRIBUTIONS-Rust.md.
+#
+# Pagoda modifications Copyright (c) 2026-2028 PAGODA.
+# Pagoda modifications licensed under the Apache License, Version 2.0.
 
 [package]
 name = "pagoda-protocols"
