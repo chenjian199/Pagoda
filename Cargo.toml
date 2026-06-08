@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/config",
+    "lib/mocker",
     "lib/parsers",
     "lib/protocols",
     "lib/runtime",
@@ -28,6 +29,8 @@ pagoda-config = { path = "lib/config", version = "0.0.1" }
 pagoda-parsers = { path = "lib/parsers", version = "0.0.1" }
 pagoda-protocols = { path = "lib/protocols", version = "0.0.1" }
 pagoda-runtime = { path = "lib/runtime", version = "0.0.1" }
+pagoda-mocker = { path = "lib/mocker", version = "0.0.1" }
+pagoda-kv-router = { package = "pagoda-runtime", path = "lib/runtime", version = "0.0.1" }
 pagoda-tokens = { path = "lib/tokens", version = "0.0.1" }
 pagoda-tokenizers = { path = "lib/tokenizers", version = "0.0.1" }
 
