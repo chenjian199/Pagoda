@@ -1,24 +1,46 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
-//!
 //! ## 设计意图
-//! 推理解析器与工具调用解析器是相互独立、串行执行的两个阶段。
+//! GLM-4.5/4.7、Qwen3 等模型会把推理块与工具调用交错输出：
+//!
+//! ```text
+//! <think>reasoning about what tool to call</think>
+//! <tool_call>get_weather<arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call>
+//! <think>reasoning about the result</think>
+//! <tool_call>summarize<arg_key>text</arg_key><arg_value>...</arg_value></tool_call>
+//! ```
+//!
+//! 推理解析器与工具调用解析器是**相互独立、串行**的两个阶段：
+//!
+//! 1. **推理解析器**（`BasicReasoningParser`）把流切分为：
+//!    - `reasoning_content`：`<think>...</think>` 块内的全部内容
+//!    - `normal_text`：块外的全部内容（含工具调用标签）
+//! 2. **工具调用解析器**（`glm47` 等）再处理 `normal_text`，抽取
+//!    `<tool_call>...</tool_call>` 块。
+//!
+//! 这意味着工具调用**必须**出现在 `<think>` 块之外才能被检测到。若模型错误地在
+//! `<think>` 块内发出工具调用（GLM-4.7 在超长上下文下曾出现），工具调用解析器将看不到它。
 //!
 //! ## 外部契约
-//! 解析器接收模型输出片段，返回普通文本与推理文本的拆分结果。
+//! - `BasicReasoningParser`（`new` 四参构造 + `with_tool_start_token` 链式）实现
+//!   `ReasoningParser`：`set_in_reasoning`、`detect_and_parse_reasoning`、
+//!   `parse_reasoning_streaming_incremental`。
+//! - 批式抽取结果对 `normal_text`/`reasoning_text` 做 `trim`；流式则原样累积不 trim。
 //!
-//! ## 实现要点
-//! 通过起止标记和流式缓冲维护跨 chunk 的推理片段状态。
+//! ## `force_reasoning` 与 tokenizer 行为
+//!
+//! 某些模型（如经 ZAI 提供的 GLM-5-FP8）把 `<think>` 当作特殊 tokenizer token 消费，
+//! 从不以字面文本发出。此时用 `force_reasoning=true`（`deepseek_r1` 解析器），它在见到
+//! `</think>` 前把全部输出视为推理。会以文本形式发出 `<think>` 的模型（标准部署、Qwen3、
+//! GLM-4.5）应使用 `force_reasoning=false`（`glm45`、`nemotron_deci`、`qwen3` 解析器）。
 
 use crate::{ParserResult, ReasoningParser};
 
+/// 返回 `s` 的最长后缀且同时是 `delim` 前缀的长度。
 ///
+/// 移植自 ollama 的 `thinking/parser.go::overlap()`。用于检测跨流式块边界切断的部分
+/// 标签（例如 `"Hello world <th"`，其中 `<th` 是 `<think>` 的前缀）。
 fn overlap(s: &str, delim: &str) -> usize {
     let max = delim.len().min(s.len());
     (1..=max)
@@ -36,6 +58,8 @@ pub struct BasicReasoningParser {
     stream_reasoning: bool,
     _buffer: String,
     stripped_think_start: bool,
+    /// 可选标记：在推理块内遇到时强制退出推理模式（例如 Kimi-K2/K2.5 模型有时会发出
+    /// `<|tool_calls_section_begin|>` 却未先闭合 `</think>`）。
     tool_start_token: Option<String>,
 }
 
@@ -57,6 +81,7 @@ impl BasicReasoningParser {
         }
     }
 
+    /// 当 `token` 出现在已打开的推理块内时启用强制退出推理。
     pub fn with_tool_start_token(mut self, token: impl Into<String>) -> Self {
         self.tool_start_token = Some(token.into());
         self
@@ -67,6 +92,7 @@ impl ReasoningParser for BasicReasoningParser {
     fn set_in_reasoning(&mut self, in_reasoning: bool) {
         self._in_reasoning = in_reasoning;
         if in_reasoning {
+            // 标记起始 token 已被剥除，使解析器不再在流中寻找它——模板已注入它。
             self.stripped_think_start = true;
         }
     }
@@ -81,6 +107,7 @@ impl ReasoningParser for BasicReasoningParser {
             };
         }
 
+        // force_reasoning 且无起始标记、无结束标记、无工具起始标记时，整段视为推理。
         let has_tool_start = self
             .tool_start_token
             .as_deref()
@@ -96,6 +123,7 @@ impl ReasoningParser for BasicReasoningParser {
             };
         }
 
+        // 用游标迭代抽取所有 <think>...</think> 对
         let mut reasoning_parts = Vec::new();
         let mut normal_parts = Vec::new();
         let mut cursor = 0;
@@ -103,9 +131,11 @@ impl ReasoningParser for BasicReasoningParser {
 
         while cursor < text.len() {
             if currently_reasoning {
+                // 若前导存在起始 token 则跳过（处理 force_reasoning + 显式 <think>）
                 if text[cursor..].starts_with(&self.think_start_token) {
                     cursor += self.think_start_token.len();
                 }
+                // 寻找最早的推理退出点：</think> 或可选的 tool_start_token（强制退出情形）。
                 let end_offset = text[cursor..].find(&self.think_end_token);
                 let tool_offset = self
                     .tool_start_token
@@ -131,16 +161,19 @@ impl ReasoningParser for BasicReasoningParser {
                         currently_reasoning = false;
                     }
                     (None, None) => {
+                        // 无结束 token——其余为推理（被截断）
                         reasoning_parts.push(&text[cursor..]);
                         cursor = text.len();
                     }
                 }
             } else {
+                // 处于普通文本——寻找起始 token
                 if let Some(start_offset) = text[cursor..].find(&self.think_start_token) {
                     normal_parts.push(&text[cursor..cursor + start_offset]);
                     cursor += start_offset + self.think_start_token.len();
                     currently_reasoning = true;
                 } else {
+                    // 不再有 think 块——其余为普通文本
                     normal_parts.push(&text[cursor..]);
                     cursor = text.len();
                 }
@@ -150,6 +183,9 @@ impl ReasoningParser for BasicReasoningParser {
         let reasoning_text = reasoning_parts.join("").trim().to_string();
         let normal_text = normal_parts.join("").trim().to_string();
 
+        // 注意：此处刻意不更新 self._in_reasoning。本方法被文档规定为「重置或忽略内部流式状态」
+        // （见 trait 文档）。调用方不应在同一解析器实例上混用 detect_and_parse_reasoning 与
+        // parse_reasoning_streaming_incremental。
 
         ParserResult {
             normal_text,
@@ -167,10 +203,15 @@ impl ReasoningParser for BasicReasoningParser {
         let mut accumulated_normal = String::new();
         let mut accumulated_reasoning = String::new();
 
+        // 循环耗尽单块内的所有状态转移。否则若一个块含两个完整 <think>...</think> 块，
         // 将只处理首个转移并缓冲其余，在流结束时有内容丢失风险。
         loop {
             let current_text = self._buffer.clone();
 
+            // 若尚未剥除则剥除前导 <think> 标签。处理两种情形：
+            // 1. force_reasoning=true 且模型也以文本形式发出 <think>
+            // 2. 首次调用且 <think> 出现在缓冲位置 0
+            // 文本中部的 <think>（位置 > 0）落入下方 find() 分支。
             if !self.stripped_think_start
                 && current_text.starts_with(self.think_start_token.as_str())
             {
@@ -180,6 +221,8 @@ impl ReasoningParser for BasicReasoningParser {
                 continue;
             }
 
+            // 缓冲是起始 token 的前缀（如 "<think>" 的 "<thi"）——等待更多数据再决定剥除还是
+            // 当作推理发出。仅当 force_reasoning=true 且尚未剥除标签时适用。
             if !self.stripped_think_start
                 && self._in_reasoning
                 && !current_text.is_empty()
@@ -220,6 +263,9 @@ impl ReasoningParser for BasicReasoningParser {
                     self.stripped_think_start = false; // 允许检测下一个 <think> 块
                     continue; // 处理其余——可能含更多块
                 } else {
+                    // 无完整结束 token——检查缓冲末尾的部分前缀
+                    // （如 "reasoning content</th"，其中 "</th" 是 "</think>" 的前缀）。
+                    // tool_start_token 的部分前缀也须缓冲，使强制退出标记不被切入推理文本。
                     if self.stream_reasoning {
                         let ol_end = overlap(&current_text, &self.think_end_token);
                         let ol_tool = self
@@ -239,10 +285,12 @@ impl ReasoningParser for BasicReasoningParser {
                             self._buffer.clear();
                         }
                     }
+                    // 当 stream_reasoning=false 时，缓冲保留全部内容直到 </think> 到达——
                     // 无需重叠检查。
                     break;
                 }
             } else {
+                // 不在推理中——寻找下一个 <think> 块。
                 if let Some(think_pos) = current_text.find(self.think_start_token.as_str()) {
                     accumulated_normal.push_str(&current_text[..think_pos]);
                     let after_start = think_pos + self.think_start_token.len();
@@ -251,6 +299,10 @@ impl ReasoningParser for BasicReasoningParser {
                     self.stripped_think_start = true;
                     continue; // 处理推理内容
                 } else {
+                    // 无完整起始 token——检查缓冲末尾的部分前缀
+                    // （如 "Hello world <th"，其中 "<th" 是 "<think>" 的前缀）。
+                    // 要求 overlap >= 2，使单独的 `<` 能透传给工具调用 XML 标签
+                    // （如 `<invoke>` 或 `<minimax:tool_call>`）。
                     let ol = overlap(&current_text, &self.think_start_token);
                     if ol >= 2 {
                         let safe_end = current_text.len() - ol;
@@ -277,6 +329,9 @@ impl ReasoningParser for BasicReasoningParser {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 覆盖 `BasicReasoningParser` 在批式与流式下的行为：单/多 `<think>` 块抽取、无推理透传、
+    //! 截断推理、`force_reasoning`、`stream_reasoning` 开关、部分标签跨块切分、
+    //! `tool_start_token` 强制退出等。
     //!
     //! ## 意义
     //! 锁定推理解析的可观察契约，确保与工具调用解析器串行协作时不丢失或错分内容。
@@ -835,11 +890,6 @@ mod tests {
         assert_eq!(r4.normal_text, "<tool_call>B</tool_call>");
         assert_eq!(r4.reasoning_text, "");
     }
-
-    // =========================================================================
-    //
-    //
-    // =========================================================================
 
     #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_opening_tag_batched() {

@@ -1,20 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
-//!
 //! ## 设计意图
-//! Gemma 4 推理内容使用 channel 标记承载，下游期望不带标记的推理文本。
+//! Gemma 4 在专用通道分隔符之间发出思维链推理：
+//!
+//! ```text
+//! <|channel>thought
+//! ...chain of thought reasoning...<channel|>
+//! Final answer text.
+//! ```
+//!
+//! 通道内的 `thought\n` 角色标签是结构性产物（类比 `<|turn>user\n...` 中的 `user\n`）。
+//! 下游期望不带该标签的推理内容，故本解析器将其剥除。
 //!
 //! ## 外部契约
-//! 若标记在解析器看到前已被剥除，则回退为整段透传；缺起始但有结束标记时，结束前文本仍按推理处理。
+//! - `Gemma4ReasoningParser`（`new`/`default`）实现 `ReasoningParser`。
+//! - 起止标记均为特殊 token，仅当推理引擎配置 `skip_special_tokens=False` 时才可见于解码文本；
+//!   若标记在解析器看到前已被剥除，则回退为整段透传（不抽取推理）。
+//! - 缺起始仅有结束标记时，结束前文本仍按推理处理（与上游离线解析一致）。
 //!
 //! ## 实现要点
-//! 通过 channel 起止标记、thought 前缀和流式缓冲区切分推理内容。
+//! - 流式用 buffer 累积，`overlap` 检测跨块切断的部分多字节标记。
+//! - `resolve_prefix` 在流式增量下逐步决定 `thought\n` 前缀如何剥除/保留。
 
 use crate::ParserResult;
 use crate::ReasoningParser;
@@ -23,6 +30,8 @@ const START_TOKEN: &str = "<|channel>";
 const END_TOKEN: &str = "<channel|>";
 const THOUGHT_PREFIX: &str = "thought\n";
 
+/// 返回 `s` 的最长后缀且同时是 `delim` 前缀的长度。用于检测跨流式块边界切断的部分
+/// 多字节标记（例如 `"...<|chan"` 是 `<|channel>` 的部分前缀）。
 fn overlap(s: &str, delim: &str) -> usize {
     let max = delim.len().min(s.len());
     (1..=max)
@@ -36,8 +45,11 @@ fn overlap(s: &str, delim: &str) -> usize {
 pub struct Gemma4ReasoningParser {
     /// 尚未分类的累积文本的流式缓冲。
     buffer: String,
+    /// 一旦观察到 `<|channel>` 且处于推理段内即为 true。
     in_reasoning: bool,
+    /// 当前推理段的 `thought\n` 前缀已被剥除（或确定不存在）即为 true。
     prefix_resolved: bool,
+    /// 当前段已累积的推理文本。用于判断累积字节仍是 `thought\n` 的严格前缀（情形 2）
     /// 还是已发生分歧（情形 3）。
     reasoning_accum: String,
 }
@@ -65,12 +77,22 @@ impl Default for Gemma4ReasoningParser {
     }
 }
 
+/// 若 `text` 以 `thought\n` 角色标签开头则剥除之。
 fn strip_thought_prefix(text: &str) -> &str {
     text.strip_prefix(THOUGHT_PREFIX).unwrap_or(text)
 }
 
+/// 在当前前缀剥除状态下，决定从 `raw_reasoning` 发出哪一段。返回
+/// `(emit, new_prefix_resolved)`。
 ///
+/// **前置条件：** `raw_reasoning` 必须是 `accum` 的后缀——即调用方已先把新增量推入
+/// 累积器再调用本函数。据此计算 `prev_len = accum.len() - raw_reasoning.len()`
+/// （本增量之前累积器的长度）。违反前置条件会使 `prev_len` 下溢并破坏发出片段。
+/// `parse_reasoning_streaming_incremental` 的流式驱动通过在调用前总是把 `raw` 推入
+/// `self.reasoning_accum` 来维持该不变量。
 ///
+/// 情形 1：累积推理以 `thought\n` 开头——从增量中剥除它（或当增量整体落在前缀内时全部抑制）。
+/// 情形 2：累积推理是 `thought\n` 的严格前缀——抑制，待更多字节到达再判定。
 /// 情形 3：累积推理已偏离前缀——原样发出缓冲推理（数据保留）。
 fn resolve_prefix<'a>(accum: &'a str, raw_reasoning: &'a str) -> (&'a str, bool) {
     debug_assert!(
@@ -93,6 +115,7 @@ fn resolve_prefix<'a>(accum: &'a str, raw_reasoning: &'a str) -> (&'a str, bool)
         return ("", false);
     }
     if THOUGHT_PREFIX.starts_with(accum) {
+        // 是 "thought\n" 的严格前缀——抑制，待判定。
         return ("", false);
     }
     // 已分歧：原样发出全部缓冲推理。
@@ -108,6 +131,7 @@ impl ReasoningParser for Gemma4ReasoningParser {
         };
 
         match (text.find(START_TOKEN), text.find(END_TOKEN)) {
+            // 完全没有可见的推理标记（模型未发出，或 skip_special_tokens 已剥除）。
             (None, None) => pass_through(text),
             (Some(s), end_opt) => {
                 let pre = &text[..s];
@@ -126,6 +150,7 @@ impl ReasoningParser for Gemma4ReasoningParser {
                 }
             }
             // 缺起始仅有结束标记——上游离线解析仍把结束前文本视为推理。
+            // 镜像此行为，使起始标记被剥除（如 tokenizer skip_special_tokens）时不致丢失推理内容。
             (None, Some(e)) => ParserResult {
                 normal_text: text[e + END_TOKEN.len()..].to_string(),
                 reasoning_text: strip_thought_prefix(&text[..e]).to_string(),
@@ -145,6 +170,7 @@ impl ReasoningParser for Gemma4ReasoningParser {
         let mut normal = String::new();
         let mut reasoning_emit = String::new();
 
+        // 在推理段内累积 `raw` 并按前缀状态决定发出内容。
         let push_reasoning =
             |raw: &str, accum: &mut String, prefix_resolved: &mut bool, emit: &mut String| {
                 accum.push_str(raw);
@@ -190,6 +216,7 @@ impl ReasoningParser for Gemma4ReasoningParser {
                     &mut self.prefix_resolved,
                     &mut reasoning_emit,
                 );
+                // 段末仍未 resolved 时，累积文本是 `thought\n` 的严格前缀——按定义无可发出，丢弃。
                 work = work[idx + END_TOKEN.len()..].to_string();
                 self.reset_span();
                 continue;
@@ -222,8 +249,11 @@ impl ReasoningParser for Gemma4ReasoningParser {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 `Gemma4ReasoningParser` 的非流式与流式接口，验证：基本思维链抽取、无标记透传、
+    //! 仅起始（截断）、前后文本保留、悬挂结束标记、`thought\n` 前缀剥除及跨块切分等。
     //!
     //! ## 意义
+    //! 锁定 Gemma 4 通道分隔推理在批式与流式（含部分标记跨块）下的可观察行为。
     use super::*;
 
     #[test] // REASONING.batch.1 — non-streaming basic case

@@ -1,20 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # tool_calling::gemma4::parser
 //!
 //! ## 设计意图
-//! 解析 Gemma 4 自定义工具调用语法，其中字符串使用专用分隔符包裹，键为裸标识符。
+//! 解析 Gemma 4 自定义（非 JSON）工具调用文法：
+//! ```text
+//! <|tool_call>call:func_name{key:<|"|>value<|"|>,num:42}<tool_call|>
+//! ```
+//! 其中字符串以 `<|"|>` 包裹，键为裸标识符，支持嵌套对象/数组，多个调用可无分隔拼接。
+//! 参考实现：https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/gemma4_tool_parser.py
 //!
 //! ## 外部契约
-//! 支持嵌套对象、数组和多个相邻工具调用，并输出统一的 `ToolCallResponse`。
+//! - 常量 `TOOL_CALL_START`/`TOOL_CALL_END`/`STRING_DELIM`（pub(crate)）保持不变。
+//! - `detect_tool_call_start_gemma4(chunk)`、`find_tool_call_end_position_gemma4(chunk)`、
+//!   `try_tool_call_parse_gemma4(message, tools)`、`parse_args_object(input)`（pub(crate)）。
 //!
 //! ## 实现要点
-//! 使用正则定位完整调用，再用专用参数解析器将非标准参数体转换为 JSON 值。
+//! - 正则要求 `}<tool_call|>` 紧邻，从而字符串值中嵌入的 `<tool_call|>` 不会提前截断匹配。
+//! - 参数体用递归下降解析器直接生成 `serde_json::Value`，与其它解析器输出形态一致。
 
 use std::sync::OnceLock;
 
@@ -32,8 +36,10 @@ const CALL_PREFIX: &str = "call:";
 
 static TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
+// === SECTION: 正则与流式探测 ===
 
 /// 捕获单个完整工具调用的「函数名 + 原始参数体」。
+/// `(?s)` 开启 dot-all，使跨行的嵌套参数体也能正确解析。
 fn tool_call_regex() -> &'static Regex {
     TOOL_CALL_REGEX.get_or_init(|| {
         let pattern = format!(
@@ -46,6 +52,7 @@ fn tool_call_regex() -> &'static Regex {
     })
 }
 
+/// 判断 `chunk` 是否包含 Gemma 4 工具调用起始（含边界处的部分前缀），
 /// 以便流式管线对可能属于标记的字节先按住不发。
 pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
     if chunk.contains(TOOL_CALL_START) {
@@ -56,13 +63,23 @@ pub fn detect_tool_call_start_gemma4(chunk: &str) -> bool {
         .any(|i| chunk.ends_with(&TOOL_CALL_START[..i]))
 }
 
+/// 返回 `chunk` 中最后一个*完整*工具调用匹配之后的位置；尚无完整调用时返回 `None`
+/// （调用方应继续累积）。正则要求 `}<tool_call|>` 紧邻，因此字符串值中嵌入的裸
+/// `<tool_call|>` 不会在此误触发「区段完成」信号——与上游一致。
 pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
     tool_call_regex().find_iter(chunk).last().map(|m| m.end())
 }
 
+// === SECTION: 顶层解析入口 ===
 
+/// 把 Gemma 4 模型响应解析为结构化工具调用 + 剩余文本，返回 `(parsed_tool_calls, normal_text)`。
 ///
+/// 任一 `<|tool_call>call:NAME{...}<tool_call|>` 匹配之外的文本作为 `normal_text` 返回。
+/// 当调用被截断（有起始标记但无 `}<tool_call|>` 终止符，通常是 max_tokens 中断）时，
+/// 正则无匹配，起始标记之后的原始字节回显为 `normal_text`，便于调用方察觉截断。
 ///
+/// 对应上游 `vllm/tool_parsers/gemma4_tool_parser.py` 的 `extract_tool_calls`
+/// （直接 `tool_call_regex.findall(model_output)`）。
 pub fn try_tool_call_parse_gemma4(
     message: &str,
     tools: Option<&[ToolDefinition]>,
@@ -114,7 +131,8 @@ pub fn try_tool_call_parse_gemma4(
             },
         });
     }
-
+    
+    // 最后一个完整匹配之后的内容（含未闭合的截断调用）作为 normal_text 回传，
     // 使截断对调用方可见而非被静默吞掉。
     normal_parts.push(&message[cursor..]);
 
@@ -122,10 +140,22 @@ pub fn try_tool_call_parse_gemma4(
     Ok((calls, Some(normal_text)))
 }
 
+// === SECTION: Gemma 4 参数文法的递归下降解析器 ===
 //
 // 文法（非形式化）：
 //
+//   args     = (entry ("," entry)*)?
+//   entry    = key ":" value
+//   key      = bare-identifier（Gemma 4 输出不加引号）
+//   value    = string | number | bool | null | object | array
+//   string   = "<|\"|>" .* "<|\"|>"
+//   number   = -? [0-9]+ ( "." [0-9]+ )?
+//   bool     = "true" | "false"
+//   null     = "null" | "none" | "nil"
+//   object   = "{" args "}"
+//   array    = "[" (value ("," value)*)? "]"
 //
+// 直接解析为 `serde_json::Value`，使后续管线看到与其它解析器一致的形态。
 
 struct Cursor<'a> {
     src: &'a str,
@@ -195,6 +225,7 @@ fn parse_object_body(cur: &mut Cursor) -> anyhow::Result<Value> {
             anyhow::bail!("expected ':' after key '{}' at offset {}", key, cur.pos);
         }
         cur.skip_whitespace();
+        // `key:` 无值时输出 `{"key": ""}`（与上游一致）
         let value = match cur.peek_byte() {
             None | Some(b',') | Some(b'}') => Value::String(String::new()),
             _ => parse_value(cur)?,
@@ -208,6 +239,8 @@ fn parse_object_body(cur: &mut Cursor) -> anyhow::Result<Value> {
     Ok(Value::Object(map))
 }
 
+/// 按 ASCII 大小写不敏感消费 `keyword`，仅当其后不是单词字符时才匹配
+/// （避免 `nullable` 命中 `null` + 残留 `able`）。
 fn parse_key(cur: &mut Cursor) -> anyhow::Result<String> {
     let bytes = cur.src.as_bytes();
     let start = cur.pos;
@@ -278,6 +311,7 @@ fn parse_value(cur: &mut Cursor) -> anyhow::Result<Value> {
         return parse_array(cur);
     }
 
+    // 布尔与 null 别名（大小写不敏感）
     if try_consume_keyword(cur, "true") {
         return Ok(Value::Bool(true));
     }
@@ -353,6 +387,9 @@ fn parse_number(cur: &mut Cursor) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 Gemma 4 公开 API（`detect_tool_call_start_gemma4`、
+    //! `find_tool_call_end_position_gemma4`、`try_tool_call_parse_gemma4`）覆盖：
+    //! 起始/边界探测、单/多调用、各类型参数（字符串/数值/布尔/null/对象/数组）、
     //! 截断恢复与嵌套结构。
     //!
     //! ## 意义

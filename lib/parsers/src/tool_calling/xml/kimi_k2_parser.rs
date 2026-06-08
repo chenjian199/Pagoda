@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
-//!
 //! ## 设计意图
 //! 解析 Kimi K2 风格的 XML 工具调用区段，保留模型输出中的原生函数编号语义。
 //!

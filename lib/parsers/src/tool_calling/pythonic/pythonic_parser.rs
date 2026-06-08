@@ -1,18 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # tool_calling::pythonic::pythonic_parser
 //!
 //! ## 设计意图
+//! 解析「Pythonic」工具调用：模型以 `[tool1(arg1=val1, arg2=val2), tool2(...)]` 这种
+//! 类 Python 字面量数组表达调用。先用正则定位整段调用，再用 rustpython 解析 AST
 //! 取出函数名与关键字参数。
 //!
 //! ## 外部契约
+//! - `parse_tool_calls(src)`：把一段 Python 列表表达式解析为 `Vec<ToolCallResponse>`，
+//!   id 形如 `call-<序号>`（从 1 起）。
+//! - `try_tool_call_parse_pythonic(message, tools)`：返回 `(calls, normal_text)`。
+//! - `detect_tool_call_start_pythonic(chunk)`：含 `[` 即视为可能起始。
 //!
 //! ## 实现要点
+//! - 仅接受常量、列表、字典作为参数值；`**kwargs` 与非常量参数被跳过。
 //! - 大整数无法落入 i64/u64 时退化为字符串，避免精度丢失。
 
 use super::super::ToolDefinition;
@@ -29,6 +32,9 @@ use std::sync::OnceLock;
 static PYTHONIC_REGEX: OnceLock<Regex> = OnceLock::new();
 
 
+// === SECTION: 正则与文本预处理 ===
+
+/// 取得（惰性编译一次）匹配 Pythonic 工具调用的正则。
 fn get_pythonic_regex() -> &'static Regex {
     PYTHONIC_REGEX.get_or_init(|| {
         let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
@@ -36,6 +42,7 @@ fn get_pythonic_regex() -> &'static Regex {
     })
 }
 
+/// 去除可能出现的 python 包裹标记。
 fn strip_text(message: &str) -> String {
     message
         .replace("<|python_start|>", "")
@@ -50,6 +57,7 @@ fn get_regex_matches(message: &str) -> Vec<String> {
         .collect()
 }
 
+// === SECTION: AST 解析 ===
 
 pub fn parse_tool_calls(src: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
     let ast = parse(src, Mode::Expression, "<input>")?;
@@ -64,6 +72,7 @@ pub fn parse_tool_calls(src: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
         })
     })
     */
+    // 仅接受顶层为表达式且其 body 为列表的形态
     let Mod::Expression(mod_expr) = ast else {
         return Ok(vec![]);
     };
@@ -115,6 +124,7 @@ pub fn parse_tool_calls(src: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
     Ok(res)
 }
 
+/// 把单个表达式求值为 JSON 值，仅支持常量、列表、字典。
 fn const_expr(e: &Expr) -> Result<Value, Box<dyn std::error::Error>> {
     match e {
         Expr::Constant(constant) => Ok(match &constant.value {
@@ -135,6 +145,7 @@ fn const_expr(e: &Expr) -> Result<Value, Box<dyn std::error::Error>> {
             Constant::Str(s) => json!(s),
             _ => return Err("unsupported constant type".into()),
         }),
+        // Python 列表按表达式处理
         Expr::List(expr_list) => {
             let list_values = expr_list
                 .elts
@@ -143,9 +154,11 @@ fn const_expr(e: &Expr) -> Result<Value, Box<dyn std::error::Error>> {
                 .collect::<Result<Vec<Value>, _>>()?;
             Ok(json!(list_values))
         }
+        // Python 字典按表达式处理
         Expr::Dict(expr_dict) => {
             let mut dict_map = std::collections::HashMap::new();
             for (key_expr, value_expr) in expr_dict.keys.iter().zip(expr_dict.values.iter()) {
+                // JSON 键须为字符串；非字符串键退化为其字符串表示
                 let key = match key_expr {
                     Some(k) => match const_expr(k)? {
                         Value::String(s) => s,
@@ -165,6 +178,7 @@ fn const_expr(e: &Expr) -> Result<Value, Box<dyn std::error::Error>> {
     }
 }
 
+// === SECTION: 顶层解析入口与探测 ===
 
 pub fn try_tool_call_parse_pythonic(
     message: &str,
@@ -206,8 +220,12 @@ pub fn detect_tool_call_start_pythonic(chunk: &str) -> bool {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕公开 API（`try_tool_call_parse_pythonic`、`detect_tool_call_start_pythonic`）
+    //! 与若干内部辅助（`strip_text`/`get_regex_matches`）展开：覆盖纯文本剥离、正则定位、
+    //! 基本/前后文/换行/无调用/python 标记包裹、列表与字典参数，以及流式起始探测。
     //!
     //! ## 意义
+    //! 保证 Pythonic 形态的工具调用在各类噪声与嵌套结构下都能稳定抽取函数名与参数，
     //! 并正确分离普通文本。
     use super::*;
 

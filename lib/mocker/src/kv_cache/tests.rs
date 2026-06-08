@@ -1,10 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
 //! `LocalVllmKvCache` 的行为测试，全部围绕公开 API（`process` / `get_prefill_cost`
 //! 与一组只读计数）与对外可观察的 KV 事件流展开。

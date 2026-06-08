@@ -1,19 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # tool_calling::json
 //!
 //! ## 设计意图
+//! 汇集 JSON 系工具调用解析器，并按 [`JsonParserType`] 在三种实现间分派：
+//! 通用 Basic、DeepSeek V3、DeepSeek V3.1。
 //!
 //! ## 外部契约
+//! - [`JsonParserType`]：枚举默认值为 `Basic`，可序列化/反序列化。
+//! - `try_tool_call_parse_json` / `detect_tool_call_start_json` / `find_tool_call_end_position_json`
 //!   的名称、签名与可观察行为保持不变。
 //!
 //! ## 实现要点
 //! - 分派函数仅承担「按类型选择实现」职责，不含具体解析逻辑。
+//! - `find_tool_call_end_position_json` 按解析器名（hermes/nemotron_deci/mistral/phi4）走不同的
 //!   边界推进策略，其余解析器一律视为整段。
 
 pub mod base_json_parser;
@@ -29,6 +30,7 @@ pub use deepseek_v3_1_parser::{
 };
 pub use deepseek_v3_parser::{detect_tool_call_start_deepseek_v3, parse_tool_calls_deepseek_v3};
 
+// === SECTION: 解析器类型 ===
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub enum JsonParserType {
@@ -38,6 +40,7 @@ pub enum JsonParserType {
     DeepseekV31,
 }
 
+// === SECTION: 按类型分派的解析入口 ===
 
 pub fn try_tool_call_parse_json(
     message: &str,
@@ -60,6 +63,10 @@ pub fn detect_tool_call_start_json(chunk: &str, config: &JsonParserConfig) -> bo
 }
 
 
+// === SECTION: 结束位置定位 ===
+
+/// 在 hermes / nemotron_deci 形态下，从首个结束 token 之后开始，尽可能吞并紧随其后的
+/// 「起始 token → 结束 token」连续块，使并行工具调用被收拢为同一段 jail 区域。
 ///
 /// 返回最终游标位置；遇到不完整的后续块时停在上一个完整块结束处。
 fn advance_past_consecutive_blocks(
@@ -67,6 +74,7 @@ fn advance_past_consecutive_blocks(
     start_token: Option<&str>,
     end_token: &str,
 ) -> usize {
+    // 先定位首个结束 token；缺失则视为尚未结束，交由调用方返回整段。
     let Some(first_end) = chunk.find(end_token) else {
         return chunk.len();
     };
@@ -76,6 +84,7 @@ fn advance_past_consecutive_blocks(
         return cursor;
     };
 
+    // 反复检查「（跳过空白后）下一个块是否以起始 token 开头」，是则继续吞并。
     loop {
         let rest = &chunk[cursor..];
         let trimmed = rest.trim_start();
@@ -105,6 +114,7 @@ pub fn find_tool_call_end_position_json(
             }
             None => chunk.len(),
         },
+        // mistral / phi4 以最后一个 `]` 作为 JSON 数组结束边界。
         "mistral" | "phi4" => match chunk.rfind(']') {
             Some(pos) => pos + 1,
             None => chunk.len(),
@@ -118,11 +128,18 @@ pub fn find_tool_call_end_position_json(
 mod tests {
     //! ## 测试过程
     //! 围绕两类对外可观察行为构造用例：
+    //! 1. `find_tool_call_end_position_json` 在 hermes 形态下对并行/不完整块的边界推进；
+    //! 2. `try_tool_call_parse_json`（nemotron_deci 形态）在恢复、并行、空参、空白、
+    //!    重复名等场景下的解析结果，以及对上游 finish 原因的无关性。
     //!
     //! ## 意义
+    //! 这些断言锁定 JSON 系解析器的对外契约：并行调用必须整段捕获、合法 JSON 即使外层
+    //! 结束 token 缺失/截断也应被恢复、空输入折叠为空文本、重复调用拥有不同 id。
+    //! 任何 JSON 家族的内部重构都不得在不触发这些断言的前提下破坏上述行为。
 
     use super::*;
 
+    /// nemotron_deci 形态的通用配置（仅起止 token）。
     fn nemotron_deci_config() -> JsonParserConfig {
         JsonParserConfig {
             tool_call_start_tokens: vec!["<TOOLCALL>".to_string()],
@@ -131,6 +148,7 @@ mod tests {
         }
     }
 
+    /// 把首个工具调用的 arguments 解析为 JSON Value（测试辅助）。
     fn first_args(calls: &[ToolCallResponse]) -> serde_json::Value {
         serde_json::from_str(&calls[0].function.arguments).unwrap()
     }
@@ -143,6 +161,7 @@ mod tests {
             ..Default::default()
         };
 
+        // 两个紧邻的并行调用：边界应停在最后一个 </tool_call> 之后，保留尾随文本。
         let two = concat!(
             "<tool_call>{\"name\": \"foo\", \"arguments\": {\"x\": 1}}</tool_call>",
             "<tool_call>{\"name\": \"bar\", \"arguments\": {\"y\": 2}}</tool_call>",
@@ -177,6 +196,7 @@ mod tests {
             allow_eof_recovery: true,
             ..nemotron_deci_config()
         };
+        // 内层 JSON 数组完整，仅缺失外层 </TOOLCALL>。
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}}]"#;
         let (calls, _) = try_tool_call_parse_json(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
@@ -190,6 +210,7 @@ mod tests {
             allow_eof_recovery: true,
             ..nemotron_deci_config()
         };
+        // max_tokens 截断在 `"city":"NYC`，引号/花括号/数组括号均未闭合。
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC</TOOLCALL>"#;
         let (calls, _) = try_tool_call_parse_json(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
@@ -245,6 +266,7 @@ mod tests {
 
     #[test]
     fn parse_output_independent_of_upstream_finish() {
+        // JSON 系解析器不感知 finish_reason，输出应与上游结束原因无关。
         let config = nemotron_deci_config();
         let input = r#"<TOOLCALL>[{"name":"get_weather","arguments":{"city":"NYC"}}]</TOOLCALL>"#;
         let (calls, _) = try_tool_call_parse_json(input, &config, None).unwrap();

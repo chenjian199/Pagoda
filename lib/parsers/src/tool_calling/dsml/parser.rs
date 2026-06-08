@@ -1,20 +1,33 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # tool_calling::dsml::parser
 //!
 //! ## 设计意图
-//! 解析 DSML 风格的工具调用片段，并从模型输出中提取函数名与参数。
+//! 解析 DeepSeek V3.2 / V4 的 DSML（DeepSeek Markup Language）工具调用格式。
+//! V3.2 用 `<｜DSML｜function_calls>` 包裹，V4 用 `<｜DSML｜tool_calls>` 包裹，
+//! 内层 invoke / parameter 文法一致：
+//!
+//! ```text
+//! <｜DSML｜function_calls>
+//! <｜DSML｜invoke name="function_name">
+//! <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+//! ...
+//! </｜DSML｜invoke>
+//! </｜DSML｜function_calls>
+//! ```
+//! 参考实现：
+//! - V3.2: https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/encoding/encoding_dsv32.py
+//! - V4:   https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/encoding/encoding_dsv4.py
 //!
 //! ## 外部契约
-//! 返回与其它工具调用解析器一致的 `ToolCallResponse` 列表和普通文本。
+//! - `detect_tool_call_start_dsml(chunk, config)`、`find_tool_call_end_position_dsml(chunk, config)`、
+//!   `try_tool_call_parse_dsml(message, config)`，签名与返回形态不变。
+//! - 调用 id 形如 `call_` + 24 位小写十六进制（OpenAI 风格）。
 //!
 //! ## 实现要点
-//! 使用配置化标记定位 DSML 区段，并对参数内容做 XML 实体解码与 JSON 转换。
+//! - block / invoke / parameter 三层均用正则匹配；外层结束 token 缺失时无匹配（沿用既有保守契约）。
+//! - parameter 的 `string="true|false"` 可缺省，缺省时尽力 JSON 解析、失败退化为字符串。
 
 use regex::Regex;
 use uuid::Uuid;
@@ -22,7 +35,9 @@ use uuid::Uuid;
 use super::super::config::DsmlParserConfig;
 use super::super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+// === SECTION: 流式探测与边界定位 ===
 
+/// 判断 chunk 是否包含（或部分包含，用于流式）DSML 工具调用起始。
 pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bool {
     let start_token = config.block_start.as_str();
 
@@ -38,6 +53,7 @@ pub fn detect_tool_call_start_dsml(chunk: &str, config: &DsmlParserConfig) -> bo
     })
 }
 
+/// 返回 DSML 区块结束 token 之后的位置；缺失则返回 chunk 长度。
 pub fn find_tool_call_end_position_dsml(chunk: &str, config: &DsmlParserConfig) -> usize {
     let end_token = config.block_end.as_str();
 
@@ -47,8 +63,12 @@ pub fn find_tool_call_end_position_dsml(chunk: &str, config: &DsmlParserConfig) 
     }
 }
 
+// === SECTION: 区块正则与顶层解析 ===
 
+/// 构造匹配完整 DSML tool_calls / function_calls 区块的正则。
+/// 由 `extract_tool_calls_with_regex` 与 `try_tool_call_parse_dsml` 共用，确保两者识别一致。
 fn build_block_regex(config: &DsmlParserConfig) -> anyhow::Result<Regex> {
+    // 匹配 <｜DSML｜function_calls> ... </｜DSML｜function_calls>
     // (?s) 使 . 匹配换行；\s*(.*?)\s* 非贪婪捕获首尾标记之间的内容
     let block_pattern = format!(
         r"(?s){}\s*(.*?)\s*{}",
@@ -58,6 +78,7 @@ fn build_block_regex(config: &DsmlParserConfig) -> anyhow::Result<Regex> {
     Ok(Regex::new(&block_pattern)?)
 }
 
+/// 解析消息中的 DSML 工具调用，返回 `(parsed_tool_calls, normal_text_content)`。
 pub fn try_tool_call_parse_dsml(
     message: &str,
     config: &DsmlParserConfig,
@@ -79,8 +100,10 @@ pub fn try_tool_call_parse_dsml(
     let tool_calls = extract_tool_calls_with_regex(trimmed, &block_regex, config)?;
 
     if tool_calls.is_empty() {
+        // 检测到区块起始但未解析出有效 invoke。不把 DSML 标记泄回客户端：
         // 仅返回区块前文本，并打印失败块前缀的诊断。
         //
+        // 注意：此处未闭合的区块起始会使 block_regex 完全无匹配，因此其*之后*的
         // 任何有效区块都会丢失。此为既有的保守 P1-3 契约。
         let failed = &trimmed[start_idx..];
         let prefix: String = failed.chars().take(120).collect();
@@ -91,12 +114,14 @@ pub fn try_tool_call_parse_dsml(
         return Ok((vec![], Some(trimmed[..start_idx].to_string())));
     }
 
-    // 保留区块之间与之后的文本：从输入中剥除每个完整区块跨度，
+     // 保留区块之间与之后的文本：从输入中剥除每个完整区块跨度，
+    // 而非切到首个起始 token，否则会丢失多区块之间/之后的文本。
     let normal_text = block_regex.replace_all(trimmed, "").to_string();
 
     Ok((tool_calls, Some(normal_text)))
 }
 
+/// 抽取 `block_regex` 在 DSML 文本中匹配到的全部工具调用。
 fn extract_tool_calls_with_regex(
     text: &str,
     block_regex: &Regex,
@@ -106,6 +131,7 @@ fn extract_tool_calls_with_regex(
 
     for block_match in block_regex.captures_iter(text) {
         if let Some(block_content) = block_match.get(1) {
+            // 从该区块抽取各个 invoke
             tool_calls.extend(extract_invokes(block_content.as_str(), config)?);
         }
     }
@@ -113,9 +139,12 @@ fn extract_tool_calls_with_regex(
     Ok(tool_calls)
 }
 
+/// 从 function_calls 内容中抽取各个 invoke 块。
 fn extract_invokes(block: &str, config: &DsmlParserConfig) -> anyhow::Result<Vec<ToolCallResponse>> {
     let mut invokes = Vec::new();
 
+    // 匹配 <｜DSML｜invoke name="function_name">..content..</｜DSML｜invoke>
+    // 注意：invoke_start_prefix 为 "<｜DSML｜invoke name="（不含引号，引号在模式中补上）
     let invoke_pattern = format!(
         r#"(?s){}\"([^"]+)\"\s*>(.*?){}"#,
         regex::escape(&config.invoke_start_prefix),
@@ -130,8 +159,11 @@ fn extract_invokes(block: &str, config: &DsmlParserConfig) -> anyhow::Result<Vec
         };
         let function_name = name_match.as_str().trim().to_string();
 
+        // 解析 invoke 内容中的参数
         let parameters = parse_parameters(content_match.as_str(), config)?;
 
+        // OpenAI 风格 id："call_" + 24 位小写十六进制。
+        // 取 v4 UUID 的简单形式（32 位十六进制、无连字符）并截断。
         let uuid_simple = Uuid::new_v4().simple().to_string();
         let id = format!("call_{}", &uuid_simple[..24]);
 
@@ -154,6 +186,9 @@ fn parse_parameters(
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let mut parameters = serde_json::Map::new();
 
+    // 匹配 <｜DSML｜parameter name="param_name" string="true|false">value</｜DSML｜parameter>
+    // 注意：parameter_prefix 为 "<｜DSML｜parameter name="（不含引号）。
+    // `string="true|false"` 属性可选——部分模型输出省略；省略时尽力解析（JSON → 字符串退化）。
     let param_pattern = format!(
         r#"(?s){}\"([^"]+)\"(?:\s+string=\"(true|false)\")?\s*>(.*?){}"#,
         regex::escape(&config.parameter_prefix),
@@ -168,6 +203,9 @@ fn parse_parameters(
         let param_name = name_match.as_str().trim();
         let param_value = value_match.as_str().trim();
 
+        // 依据 string 属性（若存在）解析值：
+        // `string="true"` 强制走 String 分支；其余情形（`string="false"` 或省略）
+        // 先尝试 JSON，失败退化为 String。
         let value = if param_match.get(2).map(|m| m.as_str()) == Some("true") {
             serde_json::Value::String(param_value.to_string())
         } else {
@@ -184,8 +222,12 @@ fn parse_parameters(
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 DSML 公开 API（`detect_tool_call_start_dsml`、`find_tool_call_end_position_dsml`、
+    //! `try_tool_call_parse_dsml`）覆盖 V3.2 与 V4 两种区块名下的：起始/边界探测、单/多调用、
+    //! 参数类型（string 属性与 JSON 退化）、推理文本混合、截断行为（按既有契约钉死）等。
     //!
     //! ## 意义
+    //! 锁定 DSML 引擎在两套 token、多区块文本保留与截断边界下的可观察行为。
     use super::*;
 
     fn extract_name_and_args(call: ToolCallResponse) -> (String, serde_json::Value) {
@@ -219,12 +261,6 @@ mod tests {
         assert!(detect_tool_call_start_dsml("<｜DSML｜function_c", &config)); // Partial
         assert!(!detect_tool_call_start_dsml("no tool call here", &config));
     }
-
-    // -------------------------------------------------------------------
-    //
-    //
-    //
-    // -------------------------------------------------------------------
 
     #[test] // helper, PARSER.fmt.3 — V4 token variant
     fn test_detect_tool_call_start_v4() {

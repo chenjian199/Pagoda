@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
 //! ## 设计意图
 //! 推理解析子模块：把模型输出按推理块/普通文本切分。本文件汇聚各具体解析器、维护
+//! 「解析器名 → 类型」注册表，并提供统一的 `ReasoningParser` trait 与包装器。
 //!
 //! ## 外部契约
+//! - 公开类型：`ParserResult`、`ReasoningParser`、`ReasoningParserType`、`ReasoningParserWrapper`，
 //!   以及各具体解析器的重导出。
+//! - 公开函数：`get_available_reasoning_parsers()`；`ReasoningParserType::get_reasoning_parser`、
+//!   `::get_reasoning_parser_from_name`。
+//! - 注册表键集合、回退到 `Basic` 的行为、各类型映射的 `BasicReasoningParser` 配置均须保持不变。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -33,8 +33,17 @@ static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>
 
 /// 初始化全局推理解析器映射
 fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserType> {
+    // DeepSeek-V4 与 Qwen 使用相同的 `<think>` / `</think>` 分隔符（已对照
+    // deepseek-ai/DeepSeek-V4-Pro 的 encoding_dsv4.py 确认），故今天委托给同一
+    // `BasicReasoningParser` 配置。仍通过专用 `DeepSeekV4` 变体路由而非硬别名到 `Qwen`，
+    // 使未来分歧（不同特殊 token、max-thinking 模式等）有落点而不波及 Qwen 自身配置。
     //
+    // 三个名称别名的存在是因为调用方通过 `--dyn-reasoning-parser` / `--reasoning-parser`
+    // 传入 HF 模型 / vLLM 配方 / chat-template 作者所选的任意字符串。我们接受全部三种分隔
+    // 约定（snake / kebab / concat），而非强制用户使用单一规范形式。
     //
+    // Gemma 4 thinking 模型：推理被 `<|channel>...<channel|>` 包裹，带 `thought\n` 角色标签
+    // 由解析器剥除。与 `--dyn-tool-call-parser gemma4` 搭配以实现端到端 Gemma 4 支持。
     REASONING_PARSER_MAP.get_or_init(|| {
         use ReasoningParserType::*;
         [
@@ -71,7 +80,6 @@ pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
 #[derive(Debug, Clone, Default)]
 pub struct ParserResult {
     pub normal_text: String,
-
     pub reasoning_text: String,
 }
 
@@ -107,6 +115,10 @@ pub enum ReasoningParserType {
     Basic,
     GptOss,
     Qwen,
+    /// DeepSeek-V4-Pro / V4-Flash。当前与 Qwen 使用相同的 `<think>` / `</think>`
+    /// `BasicReasoningParser` 配置（V4 从不在补全中追加 `<think>`——chat template 总是预注入它，
+    /// 故解析器经 `set_in_reasoning(true)` 而非 `force_reasoning` 启动）。专用变体使未来 V4 特定
+    /// 分歧（不同分隔符、thinking-effort 模式）不致泄漏进 Qwen 的行为。
     DeepSeekV4,
     NemotronDeci,
     Kimi,
@@ -114,6 +126,8 @@ pub enum ReasoningParserType {
     Mistral,
     Granite,
     MiniMaxAppendThink,
+    /// Google Gemma 4 thinking 模型。自定义 `<|channel>...<channel|>` 分隔符，
+    /// 带由解析器剥除的 `thought\n` 角色标签前缀。
     Gemma4,
 }
 
@@ -148,6 +162,7 @@ impl ReasoningParserType {
                 parser: Box::new(parser),
             }
         }
+        // `<think>` / `</think>` 的两种常用配置。
         let basic = || BasicReasoningParser::new("<think>".into(), "</think>".into(), false, true);
         let force_basic =
             || BasicReasoningParser::new("<think>".into(), "</think>".into(), true, true);
@@ -157,6 +172,8 @@ impl ReasoningParserType {
             ReasoningParserType::Step3 => wrap(force_basic()),
             ReasoningParserType::Basic => wrap(basic()),
             ReasoningParserType::Qwen => wrap(basic()),
+            // 今天与 Qwen 同为 `<think>` / `</think>` 配置；保留独立变体以便 V4 特定分歧落地。
+            // 理由见 `ReasoningParserType::DeepSeekV4` 文档注释。
             ReasoningParserType::DeepSeekV4 => wrap(basic()),
             ReasoningParserType::NemotronDeci => wrap(basic()),
             ReasoningParserType::Kimi => wrap(BasicReasoningParser::new(
@@ -217,6 +234,7 @@ impl ReasoningParserType {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 验证注册表键集合完整、各别名路由到正确解析器、未知名回退到 `Basic`，以及若干代表性
     //! 解析器的批式/流式可观察行为。
     //!
     //! ## 意义

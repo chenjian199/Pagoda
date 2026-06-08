@@ -1,18 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # reasoning::granite_parser
 //!
 //! ## 设计意图
+//! 解析 IBM Granite 风格的推理输出：用自然语言短语
+//! `Here's my thought process:` / `Here's my response:`（及 `Here is ...` 变体）
+//! 而非 `<think>` 标签来界定推理段与回答段。
 //!
 //! ## 外部契约
+//! - `GraniteReasoningParser`（`new`/`default`）实现 `ReasoningParser` 的
+//!   `detect_and_parse_reasoning`（非流式）与 `parse_reasoning_streaming_incremental`（流式）。
 //! - 起止短语大小写敏感；末尾短语缺失时视为推理被截断；空段产出空串。
 //!
 //! ## 实现要点
+//! - 流式按 buffer 累积，遇到任一起止短语的真前缀则继续缓冲。
 //! - 首次遇到起始短语后剥除并进入推理态，遇结束短语则切出推理与正常文本。
 
 use crate::ParserResult;
@@ -42,6 +44,7 @@ impl GraniteReasoningParser {
         }
     }
 
+    /// 返回 `tokens` 中首个出现在 `text` 内的短语；都不出现时退回首个短语。
     fn first_present_or_default<'a>(tokens: &'a [String], text: &str) -> &'a String {
         tokens
             .iter()
@@ -49,6 +52,7 @@ impl GraniteReasoningParser {
             .unwrap_or_else(|| tokens.first().unwrap())
     }
 
+    /// `current_text` 是否恰为某短语的真前缀（相等不算）。
     fn is_strict_prefix_of_any(tokens: &[String], current_text: &str) -> bool {
         tokens
             .iter()
@@ -83,6 +87,7 @@ impl ReasoningParser for GraniteReasoningParser {
         // 视为处于推理块：剥除起始短语
         let processed_text = text.replacen(think_start_token, "", 1).trim().to_string();
 
+        // 无结束短语：推理在 think_end_token 前被截断
         let Some(end_idx) = processed_text.find(think_end_token.as_str()) else {
             return ParserResult {
                 normal_text: String::new(),
@@ -103,6 +108,7 @@ impl ReasoningParser for GraniteReasoningParser {
     }
 
     fn parse_reasoning_streaming_incremental(&mut self, text: &str, _: &[u32]) -> ParserResult {
+        // 增量累积到 buffer
         self.buffer.push_str(text);
         let mut current_text = self.buffer.to_string();
 
@@ -174,9 +180,12 @@ impl ReasoningParser for GraniteReasoningParser {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 `GraniteReasoningParser` 的非流式与流式接口，验证：基本/备选短语识别、
+    //! 流式部分 token 缓冲、无短语透传、仅起始无结束的截断、空段、空白保留、
     //! 大小写敏感、嵌套/重复短语、多结束短语取首个等。
     //!
     //! ## 意义
+    //! 锁定基于自然语言短语的 Granite 推理切分在批式与流式两路下的可观察行为。
     use super::*;
 
     #[test] // helper

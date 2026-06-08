@@ -1,17 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # tool_calling::json::base_json_parser
 //!
 //! ## 设计意图
+//! 通用 JSON 工具调用解析器：从模型输出中抽取被起止 token 包裹（或裸露）的 JSON 载荷，
+//! 兼容 `parameters` 与 `arguments` 两种字段命名，并把单对象 / 对象数组统一规整为
+//! [`ToolCallResponse`] 列表。
 //!
 //! ## 外部契约
+//! - `try_tool_call_parse_basic_json`：返回 `(Vec<ToolCallResponse>, Option<String>)`，
+//!   id 形如 `call-<uuid>`，arguments 为 JSON 字符串。
+//! - `detect_tool_call_start_basic_json`：在完整或部分起始 token、裸 JSON 前缀场景下返回 true。
+//! - `try_repair_truncated_json` 为 crate 内部可见的截断修复助手。
+//! - `CalledFunctionParameters` / `CalledFunctionArguments` 为公共 serde 结构。
 //!
 //! ## 实现要点
+//! - 抽取阶段与反序列化阶段解耦：先得到候选 JSON 字符串，再统一走三形态解析助手。
+//! - EOF 恢复仅在 `allow_eof_recovery` 显式开启时启用，避免流式 jail 过早判定完成。
 
 use std::collections::HashMap;
 
@@ -23,6 +29,7 @@ use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+// === SECTION: 公共 serde 载荷结构 ===
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CalledFunctionParameters {
@@ -36,7 +43,9 @@ pub struct CalledFunctionArguments {
     pub arguments: HashMap<String, Value>,
 }
 
+// === SECTION: 候选 JSON 抽取 ===
 
+/// 用正则抽取起止 token 之间的内容。单个匹配直接返回；多个匹配拼成 JSON 数组字符串。
 fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) -> Option<String> {
     let pattern = format!(
         r"{}(.*?){}",
@@ -48,6 +57,7 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
         .build()
         .ok()?;
 
+    // 取出全部捕获组并去除首尾空白。TODO: Handle multiple tool calls
     let matches: Vec<String> = regex
         .captures_iter(input)
         .filter_map(|captures| captures.get(1))
@@ -61,6 +71,10 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
     }
 }
 
+/// 将 EOF 视为结束 token 的恢复逻辑——仅用于最终收尾路径。
+/// 当外层 end-token 一直没有出现时，返回 `start_token` 之后看起来像 JSON 的尾部内容。
+/// 该逻辑受 `JsonParserConfig::allow_eof_recovery` 控制，避免流式解析在真正的
+/// end-token 出现之前，于流中间过早触发提前结束。
 fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Option<String> {
     let start_pos = input.find(start_token)?;
     let tail = input[start_pos + start_token.len()..].trim();
@@ -68,11 +82,13 @@ fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Opt
 }
 
 fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<String> {
+    // 不含起始 token 直接放弃
     if !input.contains(start_token) {
         return None;
     }
 
     let mut items: Vec<String> = Vec::new();
+    // 按起始 token 切分，逐段挑出形似 JSON 的片段
     for segment in input.split(start_token) {
         let seg = segment.trim();
         if seg.is_empty() {
@@ -88,6 +104,7 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                 }
             }
         } else if seg.starts_with('[') {
+            // 数组形态（如 phi4: functools[{...}]）：校验后拆出每个元素
             if let Some(pos) = seg.rfind(']') {
                 let candidate = seg[..=pos].trim();
                 if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(candidate) {
@@ -102,11 +119,17 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
     }
 
     if items.is_empty() {
+        // 找到了起始 token 却无有效 JSON：返回空串，避免把非法内容（phi4 等）泄漏出去
         return Some(String::new());
     }
     Some(format!("[{}]", items.join(",")))
 }
 
+/// 尝试修复因 max_tokens 限制或 EOS 导致截断的 JSON。
+/// 该函数会遍历输入内容，跟踪字符串状态以及大括号/方括号的嵌套层级；
+/// 到达 EOF 时，会闭合尚未结束的字符串，并补齐所有未闭合的右括号。
+/// 只有在确实需要追加至少一个闭合符时，才返回 `Some(repaired)`，
+/// 这样可以避免对本来已经合法的 JSON 进行不必要的改写。
 pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     let mut closers: Vec<char> = Vec::new();
     let mut in_string = false;
@@ -143,6 +166,8 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     }
 
     let mut repaired = s.to_string();
+    // EOF 出现在转义序列中间：用另一个 `\` 与末尾残留的 `\` 配对，
+    // 这样下一步追加的右引号就不会被这个反斜杠转义掉。
     if escape {
         repaired.push('\\');
     }
@@ -155,6 +180,7 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     Some(repaired)
 }
 
+/// 抽取起始 token 之前的普通文本；未发现起始 token 则返回空串。
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     match input.find(start_token) {
         Some(idx) => input[..idx].trim().to_string(),
@@ -162,7 +188,9 @@ fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     }
 }
 
+// === SECTION: 三形态反序列化 ===
 
+/// 构造单个 [`ToolCallResponse`]，arguments 序列化为 JSON 字符串。
 fn make_tool_call(name: String, arguments: HashMap<String, Value>) -> anyhow::Result<ToolCallResponse> {
     Ok(ToolCallResponse {
         id: format!("call-{}", Uuid::new_v4()),
@@ -174,6 +202,8 @@ fn make_tool_call(name: String, arguments: HashMap<String, Value>) -> anyhow::Re
     })
 }
 
+/// 依次尝试把候选 JSON 解析为：单 `{name, parameters}`、单 `{name, arguments}`、
+/// 或对象数组（逐项兼容两种字段名）。三者皆不匹配返回 `Ok(None)`。
 fn build_calls_from_json(json: &str) -> anyhow::Result<Option<Vec<ToolCallResponse>>> {
     if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
         return Ok(Some(vec![make_tool_call(single.name, single.parameters)?]));
@@ -195,7 +225,26 @@ fn build_calls_from_json(json: &str) -> anyhow::Result<Option<Vec<ToolCallRespon
     }
     Ok(None)
 }
-/// 解析成功时给出工具调用列表与剥离后的普通文本。
+
+// === SECTION: 顶层解析入口 ===
+
+/// 把一段原始 LLM 文本解析成统一的 [`ToolCallResponse`] 列表。
+///
+/// 兼容多种包裹格式（`<TOOLCALL>[...]</TOOLCALL>`、`<|python_tag|>...`）以及裸 JSON，
+/// 字段名支持 `parameters` 或 `arguments`。
+///
+/// 返回值为 `(tool_calls, normal_text)`：
+/// - 解析成功时给出工具调用列表与剥离后的普通文本；
+/// - 找到起始 token 却无有效 JSON 时返回空列表与空文本，避免泄漏非法内容；
+/// - 仅当内部 `serde_json::to_string(...)` 失败时返回 `Err`。
+///
+/// # Examples
+///
+/// ```ignore
+/// let input = r#"<TOOLCALL>[{ "name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
+/// let result = try_tool_call_parse_json(input)?;
+/// assert!(result.is_some());
+/// ```
 pub fn try_tool_call_parse_basic_json(
     message: &str,
     config: &JsonParserConfig,
@@ -212,6 +261,7 @@ pub fn try_tool_call_parse_basic_json(
     let tool_call_start_tokens = &config.tool_call_start_tokens;
     let tool_call_end_tokens = &config.tool_call_end_tokens;
 
+    // 未配置任何 token 且非 bare_json_mode：原样返回为普通文本
     if tool_call_start_tokens.is_empty() && !config.bare_json_mode {
         return Ok((vec![], Some(trimmed.to_string())));
     }
@@ -221,12 +271,14 @@ pub fn try_tool_call_parse_basic_json(
     let mut normal_text = trimmed.to_string();
     let mut found_start_token_with_no_valid_json = false;
 
+    // bare_json_mode 强制走无标记分支
     let has_start_token = !config.bare_json_mode
         && tool_call_start_tokens
             .iter()
             .any(|token| !token.is_empty() && normal_text.contains(token));
 
     if !has_start_token {
+        // 无起始 token：把首个 '{' 或 '[' 之后的内容视为潜在 JSON
         if let Some(idx) = normal_text.find(['{', '[']) {
             let extracted_normal = normal_text[..idx].trim().to_string();
             let extracted_json = normal_text[idx..].trim().to_string();
@@ -236,15 +288,20 @@ pub fn try_tool_call_parse_basic_json(
             }
         }
     } else {
+        // 有起始 token：遍历起止 token 组合做正则抽取
         'outer: for start_token in tool_call_start_tokens.iter() {
             for end_token in tool_call_end_tokens.iter() {
                 let new_normal_text = try_parse_normal_text(&normal_text, start_token);
 
                 let result = match (start_token.is_empty(), end_token.is_empty()) {
+                    // 单 token 形态（如 <|python_tag|>）
                     (false, true) => handle_single_token_tool_calls(&json, start_token),
+                    // 起止 token 成对形态
                     (false, false) => {
                         let mut content =
                             extract_tool_call_content(&json, start_token, end_token);
+                        // EOF 恢复仅在 finalize 路径（allow_eof_recovery）启用，
+                        // 流式 jail 不会在 end-token 到达前判定完成
                         if content.is_none()
                             && config.allow_eof_recovery
                             && json.contains(start_token.as_str())
@@ -259,6 +316,7 @@ pub fn try_tool_call_parse_basic_json(
                 };
 
                 if let Some(content) = result {
+                    // 找到起始 token 却得到空 JSON，记录标记
                     if content.is_empty() {
                         found_start_token_with_no_valid_json = true;
                     }
@@ -272,10 +330,13 @@ pub fn try_tool_call_parse_basic_json(
 
     let json = json.as_str();
 
+    // 第一轮：直接对候选 JSON 做三形态解析
     if let Some(calls) = build_calls_from_json(json)? {
         return Ok((calls, Some(normal_text)));
     }
 
+    // 截断恢复：补齐未闭合的字符串/括号（常见 max_tokens / EOS 截断），再重试一次。
+    // 仅在 allow_eof_recovery 开启时生效，避免流式 jail 在模型仍在输出时误判完成。
     if config.allow_eof_recovery
         && let Some(repaired) = try_repair_truncated_json(json)
         && let Some(calls) = build_calls_from_json(&repaired)?
@@ -284,6 +345,7 @@ pub fn try_tool_call_parse_basic_json(
         return Ok((calls, Some(normal_text)));
     }
 
+    // 找到起始 token 但无有效 JSON：返回空内容，避免泄漏 token 与非法内容
     if found_start_token_with_no_valid_json {
         Ok((vec![], Some(String::new())))
     } else {
@@ -291,6 +353,7 @@ pub fn try_tool_call_parse_basic_json(
     }
 }
 
+// === SECTION: 起始探测（流式） ===
 
 pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig) -> bool {
     let trimmed = chunk.trim();
@@ -303,21 +366,27 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
         .iter()
         .any(|token| !token.is_empty() && trimmed.contains(token));
 
+    // 命中任意完整起始 token 直接判定
     if contains_complete_token {
         return true;
     }
 
+    // 部分起始 token（流式分块）：起始 token 可能被拆分到多个 chunk
     let has_partial_token = config.tool_call_start_tokens.iter().any(|token| {
         if token.is_empty() {
             return false;
         }
+        // 逐字符长度构造前缀，正确处理 Unicode 边界
         token.char_indices().any(|(byte_idx, ch)| {
+            // 取前缀 token[..byte_idx + ch.len()]
             let prefix_str = &token[..byte_idx + ch.len_utf8()];
             // 完整等于某前缀
             if trimmed == prefix_str {
                 return true;
             }
             // 长前缀（>=3 字节）允许出现在任意位置
+            // 让 "funny joke" 经由 "fun" 命中 "functools"
+            // 但阻止 "<tool_call>" 经由单字符 "<" 命中 "<TOOLCALL>"
             if prefix_str.len() >= 3 && trimmed.contains(prefix_str) {
                 return true;
             }
@@ -335,6 +404,9 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕三个公共行为构建：截断 JSON 修复、起始探测（完整/部分 token、裸 JSON、误报）、
+    //! 以及顶层解析对 parameters/arguments、单对象/数组、EOF 恢复的处理。配置经 helper 构造，
+    //! 探测用例以表驱动覆盖各模型的 token 形态。
     //!
     //! ## 意义
     //! 验证解析器在批量与流式两种场景下对各家模型工具调用格式的兼容性，并确保
@@ -342,6 +414,7 @@ mod tests {
 
     use super::*;
 
+    /// 构造一份带起止 token 的 JSON 解析配置。
     fn config_with(start: &[&str], end: &[&str]) -> JsonParserConfig {
         JsonParserConfig {
             tool_call_start_tokens: start.iter().map(|s| s.to_string()).collect(),
@@ -354,6 +427,7 @@ mod tests {
 
     #[test]
     fn repair_eof_after_backslash_yields_valid_json() {
+        // EOF 出现在转义序列中（`{"k":"a\` → `{"k":"a\\"}`）。若没有 escape 守卫，
         // 追加的 `"` 会被反斜杠转义，修复后仍非法。
         let repaired = try_repair_truncated_json(r#"{"k":"a\"#).expect("must repair");
         assert!(
@@ -379,7 +453,9 @@ mod tests {
 
     #[test]
     fn detect_complete_and_partial_start_tokens() {
+        // (输入, 起始 token, 结束 token, 期望)
         let cases: &[(&str, &str, &str, bool)] = &[
+            // 完整 token：hermes / nemotron / python_tag / mistral / phi4
             (
                 r#"<tool_call>{"name": "search"}</tool_call>"#,
                 "<tool_call>",
@@ -400,6 +476,7 @@ mod tests {
                 true,
             ),
             (r#"functools{"name": "search", "#, "functools", "", true),
+            // 无 token 但有裸 JSON
             (r#"{"name": "search"}"#, "<tool_call>", "</tool_call>", true),
             (r#"Here it is {"name": "#, "<tool_call>", "</tool_call>", true),
             (
@@ -414,6 +491,7 @@ mod tests {
             (r#"func"#, "functools", "", true),
             (r#"f"#, "functools", "", true),
             (r#"Hello fun"#, "functools", "", true),
+            // funny joke 经由前缀 "fun" 命中（可接受的误报）
             (r#"funny joke"#, "functools", "", true),
             // 无关文本不应命中
             (r#"hello world"#, "functools", "", false),

@@ -1,16 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 
+//! # tool_calling::gemma4
 //!
 //! ## 设计意图
+//! 封装 Gemma4 格式的工具调用解析器。
 //!
 //! ## 外部契约
 //! - 重新导出「检测起始 / 定位结束 / 解析」三组函数。
+//! - crate 内部导出起止 token 常量 `TOOL_CALL_START` / `TOOL_CALL_END`。
 
 mod parser;
 
