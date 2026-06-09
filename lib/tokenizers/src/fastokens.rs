@@ -103,7 +103,7 @@ mod tests {
     // 词表覆盖：H,T,a,d,e,h,i,l,o,r,s,t,w 及标点。
     const TOKENIZER_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../llm/tests/data/sample-models/minimal-bpe/tokenizer.json"
+        "/tests/data/tokenizer.json"
     );
 
     #[test]

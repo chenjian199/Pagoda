@@ -1,6 +1,6 @@
 # 推理内容解析器边界用例
 
-本文档是 `src/reasoning/` 下 **推理内容解析器** 单元测试的中文分类标准，适用于 Granite、GPT-OSS、Gemma、Qwen3 think-tag、Minimax、DeepSeek V3 think-tag 等 parser。
+本文档是 `src/reasoning/` 下 **推理内容解析器** 单元测试的分类标准，适用于 Granite、GPT-OSS、Gemma、Qwen3 think-tag、Minimax、DeepSeek V3 think-tag 等 parser。
 
 相邻阶段的测试分类包括：
 

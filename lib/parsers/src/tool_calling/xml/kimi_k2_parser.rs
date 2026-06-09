@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::xml::kimi_k2_parser
@@ -252,6 +252,9 @@ fn parse_section_block(
             }
         };
 
+        // 注意：与其他生成 `call-{UUID}` ID 的解析器（XML、DSML）不同，
+        // 此处保留模型原生的 function_id（如 "functions.bash:0"）。
+        // 这与 vllm/sglang 的行为一致，是 Kimi K2 兼容性所必需的。
         results.push(ToolCallResponse {
             id: function_id.to_string(),
             tp: ToolCallType::Function,
@@ -292,8 +295,10 @@ mod tests {
             "text <|tool_calls_section_begin|>",
             &config
         ));
+        // 结尾处部分匹配
         assert!(detect_tool_call_start_kimi_k2("<|tool_calls_sec", &config));
         assert!(detect_tool_call_start_kimi_k2("<|", &config));
+        // 无匹配
         assert!(!detect_tool_call_start_kimi_k2(
             "no tool call here",
             &config
@@ -399,6 +404,7 @@ mod tests {
     #[test] // PARSER.fmt.1 — function-name conventions (`functions.X` vs bare `X`)
     fn test_parse_without_functions_prefix() {
         let config = default_config();
+        // 某些模型可能不带 "functions." 前缀发出
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
 
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -426,6 +432,12 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
+    // 针对在完整围栏内截断的 JSON 参数的恢复（例如
+    // max_tokens 在 `"location":"NYC` 内部触发且无闭合引号）。
+    // 参数捕获正则现在接受 `<|tool_call_argument_begin|>` 与
+    // `<|tool_call_end|>` 之间的任何负载；下游 `serde_json::from_str`
+    // 在负载解析失败时回退为原始字符串参数，行为与已有的
+    // `test_parse_invalid_json_falls_back_to_raw_string` 用例一致。
     #[test] // PARSER.batch.4
     fn test_parse_truncated_json_inside_complete_fences_recovers() {
         let config = default_config();
@@ -434,6 +446,7 @@ mod tests {
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
+        // 截断的 JSON 回退为原始字符串参数。
         assert_eq!(calls[0].function.arguments, r#"{"location":"NYC"#);
     }
 
@@ -442,6 +455,9 @@ mod tests {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;
 
+        // 缺少 section_end 但各个工具调用是完整的（call_begin + args + call_end）。
+        // 当模型在发出 section_end 之前达到 max_tokens 时发生。
+        // 解析器仍应提取完整的单个工具调用。
         let (calls, _normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(
             calls.len(),
@@ -454,6 +470,8 @@ mod tests {
     #[test] // PARSER.batch.4, PARSER.batch.5
     fn test_parse_truncated_mid_argument_no_section_end() {
         let config = default_config();
+        // 模型在参数中间达到 max_tokens——无 call_end、无 section_end。
+        // 真正不完整的工具调用，无法挽救任何内容。
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NY"#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -462,12 +480,15 @@ mod tests {
             0,
             "Truly truncated call (no call_end) should return 0 tool calls"
         );
+        // 区段体被 parse_section_block 消费（其中找不到完整调用），
+        // 因此 normal_text 为空——原始标记不泄露到用户可见文本中。
         assert_eq!(normal, Some("".to_string()));
     }
 
     #[test] // PARSER.batch.2, PARSER.batch.5
     fn test_parse_multiple_calls_no_section_end() {
         let config = default_config();
+        // 两个完整的独立工具调用，但模型在 section_end 之前停止了。
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|>"#;
 
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -483,6 +504,7 @@ mod tests {
     #[test] // PARSER.batch.2, PARSER.batch.4, PARSER.batch.5
     fn test_parse_complete_plus_truncated_no_section_end() {
         let config = default_config();
+        // 第一个调用完整，第二个在参数中间截断。
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"tz"#;
 
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -524,6 +546,7 @@ mod tests {
     #[test] // PARSER.batch.2, PARSER.batch.7
     fn test_parse_deeply_nested_json_multiple_calls() {
         let config = default_config();
+        // 多个工具调用，包含深层嵌套 JSON——针对正则回溯的压力测试
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.create_config:0<|tool_call_argument_begin|>{"database":{"primary":{"host":"db1.example.com","port":5432,"options":{"ssl":true,"pool":{"min":5,"max":20}}},"replica":{"host":"db2.example.com","port":5432}},"features":["auth","logging"]}<|tool_call_end|><|tool_call_begin|>functions.deploy:1<|tool_call_argument_begin|>{"env":"production","services":[{"name":"api","replicas":3,"config":{"memory":"2Gi","cpu":"1000m"}},{"name":"worker","replicas":2,"config":{"memory":"4Gi","cpu":"2000m"}}]}<|tool_call_end|><|tool_call_begin|>functions.notify:2<|tool_call_argument_begin|>{"channels":["slack","email"],"message":"Deployment started"}<|tool_call_end|><|tool_calls_section_end|>"#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -550,10 +573,12 @@ mod tests {
     #[test] // helper, PARSER.fmt.3 — detection helper, singular section-token variant
     fn test_detect_singular_section_start() {
         let config = default_config();
+        // 单数变体：<|tool_call_section_begin|>（不含 's'）
         assert!(detect_tool_call_start_kimi_k2(
             "<|tool_call_section_begin|>",
             &config
         ));
+        // 单数变体的部分匹配
         assert!(detect_tool_call_start_kimi_k2(
             "text <|tool_call_section_b",
             &config
@@ -563,6 +588,7 @@ mod tests {
     #[test] // PARSER.fmt.3 — singular section-token variant
     fn test_parse_with_singular_section_tokens() {
         let config = default_config();
+        // 使用单数形式：tool_call_section_begin/end（不含 's'）
         let input = r#"<|tool_call_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_section_end|>"#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
@@ -574,39 +600,51 @@ mod tests {
     #[test] // helper, PARSER.fmt.3 — detection helper, singular section-token variant
     fn test_find_end_position_singular_variant() {
         let config = default_config();
+        // 单数变体结束 token
         let text = "<|tool_call_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_call_section_end|>more text";
         let pos = find_tool_call_end_position_kimi_k2(text, &config);
         assert_eq!(&text[pos.unwrap()..], "more text");
     }
 
+    // --- 受 vllm/sglang 覆盖缺口启发的测试 ---
 
     #[test] // PARSER.batch.4
     fn test_parse_invalid_json_falls_back_to_raw_string() {
+        // vllm: test_extract_tool_calls_invalid_json
+        // 参数中的无效 JSON 应回退为原始字符串，不应 panic
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{invalid json here}<|tool_call_end|><|tool_calls_section_end|>"#;
 
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
+        // 由于 JSON 解析失败，参数应保留为原始字符串
         assert_eq!(calls[0].function.arguments, "{invalid json here}");
     }
 
     #[test] // PARSER.fmt.1 — function-name conventions (ID regex validation)
     fn test_parse_invalid_function_id_rejected_by_regex() {
+        // vllm: test_extract_tool_calls_invalid_funcall
+        // sglang: test_invalid_tool_call
+        // function_id 正则需要 [\w.\-]+:\d+——无 :digit 的 ID 被拒绝
         let config = default_config();
 
+        // 完全没有冒号+数字后缀
         let input1 = r#"<|tool_calls_section_begin|><|tool_call_begin|>just_a_name<|tool_call_argument_begin|>{"key":"val"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls, _) = try_tool_call_parse_kimi_k2(input1, &config, None).unwrap();
         assert_eq!(calls.len(), 0, "ID without :digit should be rejected");
 
+        // 有冒号但后缀非数字
         let input2 = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:abc<|tool_call_argument_begin|>{"key":"val"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls, _) = try_tool_call_parse_kimi_k2(input2, &config, None).unwrap();
         assert_eq!(calls.len(), 0, "ID with :non-digit should be rejected");
 
+        // 多个冒号（垃圾数据）
         let input3 = r#"<|tool_calls_section_begin|><|tool_call_begin|>:::0<|tool_call_argument_begin|>{"key":"val"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls, _) = try_tool_call_parse_kimi_k2(input3, &config, None).unwrap();
         assert_eq!(calls.len(), 0, "Garbage ID should be rejected");
 
+        // 有效调用与无效调用混合——只应提取有效的
         let input4 = r#"<|tool_calls_section_begin|><|tool_call_begin|>no_colon<|tool_call_argument_begin|>{"a":"b"}<|tool_call_end|><|tool_call_begin|>functions.valid:0<|tool_call_argument_begin|>{"x":"y"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls, _) = try_tool_call_parse_kimi_k2(input4, &config, None).unwrap();
         assert_eq!(calls.len(), 1, "Only valid call should be extracted");
@@ -615,6 +653,9 @@ mod tests {
 
     #[test] // PARSER.batch.7 — special characters in arg values
     fn test_parse_angle_brackets_in_json_arguments() {
+        // vllm: angle_brackets_in_json
+        // 包含 <tag> 结构的 JSON 值不应混淆解析器，
+        // 因为 Kimi 标记使用 <| 前缀，与裸 < 不同
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.render_html:0<|tool_call_argument_begin|>{"template":"<div class=\"main\"><h1>Title</h1><p>Content</p></div>","format":"html"}<|tool_call_end|><|tool_calls_section_end|>"#;
 
@@ -630,6 +671,8 @@ mod tests {
 
     #[test] // PARSER.batch.2 — parallel calls, zero-spacing edge case
     fn test_parse_three_concatenated_calls_no_spacing() {
+        // vllm: concatenated_tool_calls_bug_fix, three_concatenated_tool_calls
+        // 三个工具调用紧密连接，之间无空白
         let config = default_config();
         let input = "<|tool_calls_section_begin|>\
             <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{\"q\":\"rust\"}<|tool_call_end|>\
@@ -657,6 +700,8 @@ mod tests {
 
     #[test] // PARSER.batch.7 — newlines in arg values
     fn test_parse_newlines_in_json_arguments() {
+        // vllm: newlines_in_json
+        // 多行格式化的 JSON 参数（模型可能输出美化格式的 JSON）
         let config = default_config();
         let input = "<|tool_calls_section_begin|><|tool_call_begin|>functions.create_user:0<|tool_call_argument_begin|>{\n  \"name\": \"John Doe\",\n  \"address\": {\n    \"street\": \"123 Main St\",\n    \"city\": \"Springfield\"\n  },\n  \"tags\": [\n    \"admin\",\n    \"active\"\n  ]\n}<|tool_call_end|><|tool_calls_section_end|>";
 
@@ -672,6 +717,8 @@ mod tests {
 
     #[test] // PARSER.fmt.4 — empty wrapper (start+end with no calls between)
     fn test_parse_empty_tool_section() {
+        // vllm: test_empty_tool_section
+        // 区段起始后紧跟区段结束，内部无工具调用
         let config = default_config();
         let input = "Here is my answer. <|tool_calls_section_begin|><|tool_calls_section_end|> And more text.";
 
@@ -708,7 +755,14 @@ mod tests {
         assert_eq!(calls[0].id, id);
     }
 
+    /// `PARSER.batch.4` — 调用缺失 `<|tool_call_end|>` 但外层
+    /// `<|tool_calls_section_end|>` 存在。每个调用的分隔符是正则锚点；
+    /// 缺失时即使块围栏完整也无法匹配调用。锁定静默丢弃行为。
     ///
+    /// TODO(PARSER.batch.4) — BUG, NEEDS FIX: a real call is silently dropped when
+    /// `<|tool_call_end|>` 缺失但区段围栏完整。修复方案：
+    /// 锚定到下一个 `<|tool_call_begin|>` 或 `<|tool_calls_section_end|>`
+    /// 来终止参数区域。修复后翻转本测试。
     #[test] // PARSER.batch.4
     fn test_parse_missing_call_end_inside_complete_section_silent_drop() {
         let config = default_config();
@@ -723,13 +777,24 @@ mod tests {
         );
     }
 
+    /// `PARSER.batch.4` — 中间调用截断。三个调用 A、B、C 在一个
+    /// 完整区段中；B 缺失其 `<|tool_call_end|>`。
+    /// B 的内容是否渗入 C，还是两者都丢失？锁定当前行为。
     ///
+    /// TODO(PARSER.batch.4) — BUG，需要修复：B 的参数吞掉了 C 的全部原始标记，
+    /// C 被丢弃——调用者得到 B 的垃圾参数且永远看不到 C。
+    /// 修复方案：同样锚定到 `<|tool_call_begin|>`，
+    /// 属于上述静默丢弃情况。修复后翻转本测试。
     #[test] // PARSER.batch.2, PARSER.batch.4
     fn test_parse_middle_call_missing_end_corrupts_next() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.a:0<|tool_call_argument_begin|>{"x":"1"}<|tool_call_end|><|tool_call_begin|>functions.b:1<|tool_call_argument_begin|>{"y":"2"}<|tool_call_begin|>functions.c:2<|tool_call_argument_begin|>{"z":"3"}<|tool_call_end|><|tool_calls_section_end|>"#;
 
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        // 当前：A 解析正常。B 的参数正则为非贪婪且尝试匹配
+        // `{...}` 后跟 `<|tool_call_end|>`；由于 B 没有结束 token，
+        // 正则一直延伸到找到 C 的闭合 `}` 以及 C 的 `<|tool_call_end|>`。
+        // 结果：B 保留了其名称，但参数包含了 C 的全部原始标记；C 被消费并丢弃。
         assert_eq!(calls.len(), 2, "A and corrupted-B; C is consumed by B");
         assert_eq!(calls[0].function.name, "a");
         assert_eq!(calls[0].function.arguments, r#"{"x":"1"}"#);
@@ -741,22 +806,39 @@ mod tests {
         );
     }
 
+    /// 解析器级不变量：kimi_k2 解析器不过滤 `tool_choice`——它返回每个看到的格式正确调用，
+    /// jail / response builder 层负责按 `tool_choice=named`/`required`/`none` 过滤。
+    /// 本测试用于捕获解析器层内误加的过滤逻辑。真正的 FRONTEND.tool_choice 覆盖位于
+    /// 集成层（`lib/llm/tests/tool_choice.rs`）。
+    /// 解析器返回两个调用；tool_choice="get_weather" 过滤应在此层之上发生。
+    /// 解析器级不变量：kimi_k2 解析器是字节稳定的——不看 `finish_reason`，
     #[test]
     fn test_parser_does_not_filter_by_tool_choice() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        // 无论上游流结束原因如何输出均相同。实际的 PIPELINE.finish_reason 覆盖
         assert_eq!(calls.len(), 2);
     }
 
+    /// （stop / tool_calls / length 映射）在 `lib/llm/tests/test_streaming_tool_parsers.rs`
+    /// 且属于跨解析器 finish_reason 映射工作项（单独跟踪）。
+    /// 同一载荷，两种"逻辑" finish_reason：解析器只看到字节，行为必须一致。
+    /// `PARSER.batch.9` — 空/null 内容变体。空区段已由
+    /// `test_parse_empty_tool_section` 覆盖；此处锁定真正空（零字节）和 null 形态输入。
     #[test]
     fn test_parser_output_independent_of_upstream_finish() {
         let config = default_config();
+        // 同一载荷，两种"逻辑" finish_reason（stop vs length 截断）：
+        // 解析器只看字节，因此行为必须一致。
         let stop_input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
         let (calls_stop, _) = try_tool_call_parse_kimi_k2(stop_input, &config, None).unwrap();
         assert_eq!(calls_stop.len(), 1);
     }
 
+    /// `PARSER.batch.9` — 空 / null 内容变体。空区段已由
+    /// `test_parse_empty_tool_section` 覆盖；此处锁定真正空（零字节）
+    /// 和类 null（"\n"、纯空白）输入。
     #[test] // PARSER.batch.9
     fn test_parse_empty_and_whitespace_inputs() {
         let config = default_config();
@@ -767,6 +849,7 @@ mod tests {
                 "Empty/whitespace input must yield no calls (input={:?})",
                 input
             );
+            // 空白被裁剪；normal_text 为空字符串。
             assert_eq!(
                 normal.as_deref(),
                 Some(""),
@@ -775,6 +858,8 @@ mod tests {
         }
     }
 
+    /// `PARSER.batch.10` — 重复调用（同一函数名在一个区段内出现两次）。
+    /// 测试分类法中的通用缺口；首个覆盖到此的解析器。
     #[test] // PARSER.batch.10
     fn test_parse_duplicate_calls_same_name() {
         let config = default_config();

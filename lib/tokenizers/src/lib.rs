@@ -774,7 +774,7 @@ mod tests {
     /// 指向最小 BPE 分词器的测试夹具路径。
     const TOKENIZER_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../llm/tests/data/sample-models/minimal-bpe/tokenizer.json"
+        "/tests/data/tokenizer.json"
     );
 
     /// 构建一个可用于测试的门面分词器。

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::pythonic::pythonic_parser
@@ -31,12 +31,12 @@ use std::sync::OnceLock;
 
 static PYTHONIC_REGEX: OnceLock<Regex> = OnceLock::new();
 
-
 // === SECTION: 正则与文本预处理 ===
 
 /// 取得（惰性编译一次）匹配 Pythonic 工具调用的正则。
 fn get_pythonic_regex() -> &'static Regex {
     PYTHONIC_REGEX.get_or_init(|| {
+        // 格式结构：[tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
         let pattern = r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s?)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*?,\s*)*([a-zA-Z]+\w*=.*?\s*)?\)\s*)+\]";
         Regex::new(pattern).expect("Failed to compile pythonic regex pattern")
     })
@@ -117,6 +117,7 @@ pub fn parse_tool_calls(src: &str) -> anyhow::Result<Vec<ToolCallResponse>> {
             tp: ToolCallType::Function,
             function: CalledFunction {
                 name: name.to_string(),
+                // 安全性：`Value::Object` 始终是合法 JSON，序列化不会失败
                 arguments: serde_json::to_string(&Value::Object(obj))?,
             },
         });
@@ -214,6 +215,7 @@ pub fn detect_tool_call_start_pythonic(chunk: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
+    // 启发式：Pythonic 工具调用始终以 chunk 中某处的 '[' 开头
     trimmed.contains('[')
 }
 
@@ -255,6 +257,7 @@ mod tests {
 
     #[test] // helper
     fn test_get_regex_matches_simple_case() {
+        // 简单场景
         let message = "[foo(a=1, b=2), bar(x=3)]";
         let matches = get_regex_matches(message);
         assert_eq!(matches.len(), 1);
@@ -263,6 +266,7 @@ mod tests {
 
     #[test] // helper
     fn test_get_regex_matches_text_before_and_after() {
+        // 参数与值以及前后文本中的空白
         let message = "Hey yo ! [foo(a=1, b=2), bar(x= 3)] Hey yo";
         let matches = get_regex_matches(message);
         assert_eq!(matches.len(), 1);
@@ -271,6 +275,7 @@ mod tests {
 
     #[test] // helper, PARSER.batch.7
     fn test_get_regex_matches_new_line_in_arg_and_value() {
+        // 参数与值中的换行
         let message = "Hey \n yo ! [foo(a=1,b=2), \n bar(x=3)] Hey yo";
         let matches = get_regex_matches(message);
         assert_eq!(matches.len(), 1);
@@ -279,6 +284,7 @@ mod tests {
 
     #[test] // helper
     fn test_get_regex_matches_no_call() {
+        // 无调用
         let message = "Hey yo !";
         let matches = get_regex_matches(message);
         assert_eq!(matches.len(), 0);
@@ -412,6 +418,7 @@ mod tests {
 
     #[test] // helper
     fn test_detect_tool_call_start_pythonic_false_positive() {
+        // 因为我们仅检测 "[" 作为工具调用起始 token，这将是一个误报
         let text = r#"Hey [ There is one tool call here . foo(a=1, b=2)"#;
         let result = detect_tool_call_start_pythonic(text);
         assert!(result);

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::gemma4::parser
@@ -131,7 +131,7 @@ pub fn try_tool_call_parse_gemma4(
             },
         });
     }
-    
+
     // 最后一个完整匹配之后的内容（含未闭合的截断调用）作为 normal_text 回传，
     // 使截断对调用方可见而非被静默吞掉。
     normal_parts.push(&message[cursor..]);
@@ -239,8 +239,6 @@ fn parse_object_body(cur: &mut Cursor) -> anyhow::Result<Value> {
     Ok(Value::Object(map))
 }
 
-/// 按 ASCII 大小写不敏感消费 `keyword`，仅当其后不是单词字符时才匹配
-/// （避免 `nullable` 命中 `null` + 残留 `able`）。
 fn parse_key(cur: &mut Cursor) -> anyhow::Result<String> {
     let bytes = cur.src.as_bytes();
     let start = cur.pos;
@@ -257,6 +255,8 @@ fn parse_key(cur: &mut Cursor) -> anyhow::Result<String> {
     Ok(cur.src[start..cur.pos].to_string())
 }
 
+/// 按 ASCII 大小写不敏感消费 `keyword`，仅当其后不是单词字符时才匹配
+/// （避免 `nullable` 命中 `null` + 残留 `able`）。
 fn try_consume_keyword(cur: &mut Cursor, keyword: &str) -> bool {
     let bytes = cur.src.as_bytes();
     let kw = keyword.as_bytes();
@@ -519,6 +519,9 @@ mod tests {
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "complete");
+        // 截断字节被暴露而非静默丢弃——与上游
+        // `vllm.tool_parsers.gemma4_tool_parser.extract_tool_calls` 一致：
+        // 当起始标记之后无法解析出完整工具调用时。
         let normal = normal.unwrap();
         assert!(
             normal.contains("<|tool_call>call:partial"),
@@ -613,6 +616,7 @@ mod tests {
         assert_eq!(normal, Some(String::new()));
     }
 
+    // Argument-grammar unit tests (parse_args_object directly)
 
     #[test] // PARSER.batch.6 — empty args at the grammar entry point
     fn args_grammar_empty() {
@@ -641,6 +645,10 @@ mod tests {
 
     #[test] // PARSER.batch.4, PARSER.batch.5 — truncated string-arg recovery (mirrors upstream)
     fn args_grammar_unterminated_string_takes_remainder() {
+        // 上游 Gemma 4 解析器：当闭合 `<|"|>` 缺失时，
+        // 开分隔符之后的全部内容成为值。我们镜像
+        // 此行为，使截断的尾部参数不会通过整体参数对象错误回退
+        // 而丢失前面的参数。
         let v = parse_args_object(r#"x:<|"|>oops"#).unwrap();
         assert_eq!(v["x"], "oops");
     }
@@ -672,6 +680,7 @@ mod tests {
 
     #[test] // PARSER.batch.4 — keyword-prefix must not partial-match (`nullable` vs `null`)
     fn args_grammar_keyword_prefix_not_consumed() {
+        // `nullable` 不得被解析为 `null` + 残留的 `able`。
         let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
@@ -688,6 +697,8 @@ mod tests {
     }
 
     #[test] // PARSER.batch.7 — `<tool_call|>` literal inside a string-typed argument
+    // 不得截断调用。提取正则需要 `}<tool_call|>` 邻接，
+    // 因此裸的内嵌标记是安全的。
     fn embedded_tool_call_marker_in_string_value() {
         let input = r#"<|tool_call>call:render{html:<|"|><tool_call|> example<|"|>}<tool_call|>"#;
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -697,7 +708,8 @@ mod tests {
         assert_eq!(args["html"], "<tool_call|> example");
     }
 
-    #[test] // find_tool_call_end_position must respect the regex's
+    #[test] // find_tool_call_end_position 必须尊重正则的
+    // `}<tool_call|>` 邻接，而非仅为裸 `<tool_call|>` 出现。
     fn find_end_position_skips_embedded_marker() {
         let input = r#"<|tool_call>call:render{html:<|"|><tool_call|>x<|"|>}<tool_call|> trailing"#;
         let pos = find_tool_call_end_position_gemma4(input).unwrap();
@@ -705,6 +717,9 @@ mod tests {
     }
 
     #[test] // PARSER.batch.8 — paired reasoning span + tool call in the same emission
+    // （生产环境中推理解析器先运行并剥除 `<|channel>`，
+    // 但工具调用解析器必须在看到完整输出时仍保持正确，
+    // 例如当推理解析被禁用时）。
     fn paired_reasoning_and_tool_call_in_same_emission() {
         let input = concat!(
             "<|channel>thought\nthinking about the request<channel|>",
@@ -715,6 +730,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["location"], "Tokyo");
+        // 推理区间作为 normal_text 保留——工具调用解析器
+        // （目前）不切分它们，也不尝试自行解析 `<|channel>` 标记。
         assert!(normal.unwrap().contains("<|channel>thought"));
     }
 
@@ -736,7 +753,9 @@ mod tests {
         assert_eq!(args["z"], Value::Null);
     }
 
-    #[test] // PARSER.batch.10 — duplicate calls to the same function name. Both must
+    #[test] // PARSER.batch.10 — 对同一函数名的重复调用。两者必须
+    // 以不同 ID 出现；由客户端判断重复调用是否
+    // 为预期行为。
     fn duplicate_tool_call_same_name() {
         let input = concat!(
             "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>",
@@ -756,5 +775,19 @@ mod tests {
         assert_eq!(args1["location"], "NYC");
     }
 
+    // ----- 显式 N/A 覆盖说明（按 lib/parsers/PARSER_CASES.md） -----
     //
+    // PARSER.stream.3  — 流式逐 token 组装：间接。Gemma 4 解析器仅暴露同步提取路径；
+    //           流式 jail（`tools.rs::try_tool_call_parse_stream`）通过上方的
+    //           `detect_tool_call_start_gemma4` 和 `find_tool_call_end_position_gemma4`
+    //           辅助测试驱动，两者均已覆盖。与 kimi_k2 模式一致。
+    // FRONTEND.tool_choice — `tool_choice`（auto / required / named / none）：截至 2026-04
+    //           仓库中的通用缺口——`lib/llm/tests/{tool_choice.rs,parallel_tool_call_integration.rs,
+    //           tool_choice_finish_reasons.rs}` 的跨解析器套件仅运行 `hermes`。
+    //           将 Gemma 4 加入这些套件属于独立的参数化 PR。
+    // PIPELINE.finish_reason — `finish_reason` 语义：同样的通用缺口；目前在
+    //           `lib/llm/tests/tool_choice_finish_reasons.rs` 中仅限 hermes。
+    // PARSER.xml.1 / PARSER.xml.2 — 仅 XML 系列。不适用——Gemma 4 使用自定义
+    //           非 JSON、非 XML 文法。
+    // PARSER.harmony.1 / PARSER.harmony.2 — 仅 Harmony。不适用。
 }

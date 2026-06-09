@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{ParserResult, ReasoningParser};
@@ -78,6 +78,7 @@ mod tests {
     fn test_detect_and_parse_prepends_think_all_as_normal_text() {
         let mut parser = MiniMaxAppendThinkParser::new();
         let result = parser.detect_and_parse_reasoning("reasoning content here", &[]);
+        // 与 SGLang 一致：全部内容为 normal_text，加 `<think>` 前缀。
         assert_eq!(result.normal_text, "<think>reasoning content here");
         assert_eq!(result.reasoning_text, "");
     }
@@ -87,6 +88,7 @@ mod tests {
         let mut parser = MiniMaxAppendThinkParser::new();
         let result =
             parser.detect_and_parse_reasoning("reasoning content</think>normal response", &[]);
+        // SGLang 不按 `</think>` 切分——整个字符串（带前置 `<think>`）以 normal_text 透传。
         assert_eq!(
             result.normal_text,
             "<think>reasoning content</think>normal response"
@@ -107,12 +109,16 @@ mod tests {
         assert_eq!(r2.reasoning_text, "");
 
         let r3 = parser.parse_reasoning_streaming_incremental("</think>The weather is sunny.", &[]);
+        // 不拆分——`</think>` 原样出现在 normal_text 中。
         assert_eq!(r3.normal_text, "</think>The weather is sunny.");
         assert_eq!(r3.reasoning_text, "");
     }
 
     #[test] // REASONING.batch.3 — minimax leaves tool-call shape inline
     fn test_streaming_bare_json_tool_call_is_normal_text() {
+        // 回归测试：在 SGLang 引导解码下，模型发出不带 `</think>` 的裸 JSON 数组。
+        // 解析器不得将其捕获为推理——必须透传以使工具调用 jail 能将其
+        // 提取为结构化 tool_calls。
         let mut parser = MiniMaxAppendThinkParser::new();
         let r = parser.parse_reasoning_streaming_incremental(
             r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#,
@@ -136,6 +142,7 @@ mod tests {
             "</think><minimax:tool_call><invoke name=\"get_weather\">",
             &[],
         );
+        // 整个 chunk 为 normal_text——`</think>` 不被消费。
         assert_eq!(
             r2.normal_text,
             "</think><minimax:tool_call><invoke name=\"get_weather\">"

@@ -1,12 +1,24 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # 工具调用解析器注册与分发
+//!
 //! ## 设计意图
+//! 工具调用解析的总分发层：把解析器名（hermes / pythonic / harmony / deepseek_* /
+//! glm47 / kimi_k2 / gemma4 等）映射到具体配置与实现，统一对外暴露解析、起始探测、
 //! 结束定位三组入口。
 //!
 //! ## 外部契约
+//! - `get_tool_parser_map()`、`get_available_tool_parsers()`、`try_tool_call_parse(...)`、
+//!   `detect_and_parse_tool_call(...)`、`detect_and_parse_tool_call_with_recovery(...)`、
+//!   `detect_tool_call_start(...)`、`find_tool_call_end_position(...)`，签名与返回形态不变。
+//! - 解析器名缺省（None / 空串）回退 `"default"`；未知解析器名返回错误并列出可用名。
+//! - `find_tool_call_end_position` 返回 `None` 表示区段未正确闭合（如 kimi_k2 缺 section_end）。
 //!
 //! ## 实现要点
+//! - `_with_recovery` 仅对 Json / Xml / Glm47 配置打开 `allow_eof_recovery`，其余原样透传；
+//!   流式栅栏必须用非 recovery 版本（见 jail.rs）。
+//! - `default` 在 JSON 结束定位时按 `nemotron_deci` 处理。
 
 use super::ToolDefinition;
 use super::config::{ParserConfig, ToolCallConfig};
@@ -37,9 +49,11 @@ use super::xml::{
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+// === SECTION: 解析器注册表 ===
 
 static PARSER_MAP: OnceLock<HashMap<&'static str, ToolCallConfig>> = OnceLock::new();
 
+/// 新增解析器时务必同步更新此 parser map。
 pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
     PARSER_MAP.get_or_init(|| {
         // 别名表：(名称, 配置构造器)；含历史别名与同格式复用
@@ -65,7 +79,9 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
             ("gemma4", ToolCallConfig::gemma4()),
             ("gemma-4", ToolCallConfig::gemma4()),
             ("default", ToolCallConfig::default()),
+            // nemotron nano 沿用 qwen3_coder 格式
             ("nemotron_nano", ToolCallConfig::qwen3_coder()),
+            // qwen2.5 与 hermes 同为 <tool_call>...</tool_call> 格式
             ("qwen25", ToolCallConfig::hermes()),
         ];
         entries.into_iter().collect()
@@ -76,12 +92,14 @@ pub fn get_available_tool_parsers() -> Vec<&'static str> {
     get_tool_parser_map().keys().copied().collect()
 }
 
+// === SECTION: 配置驱动的解析分发 ===
 
 pub async fn try_tool_call_parse(
     message: &str,
     config: &ToolCallConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    // 依据 parser_config 选择对应解析器实现
     match &config.parser_config {
         ParserConfig::Json(json_config) => try_tool_call_parse_json(message, json_config, tools),
         ParserConfig::Harmony(json_config) => {
@@ -97,7 +115,9 @@ pub async fn try_tool_call_parse(
     }
 }
 
+// === SECTION: 解析器查找辅助 ===
 
+/// 把缺省 / 空的解析器名归一为 `"default"`。
 fn resolve_parser_key(parser_str: Option<&str>) -> &str {
     match parser_str {
         Some(s) if !s.is_empty() => s,
@@ -116,6 +136,11 @@ fn lookup_config(parser_key: &str) -> anyhow::Result<&'static ToolCallConfig> {
     })
 }
 
+/// 同 [`detect_and_parse_tool_call`]，但将 JSON / XML / GLM-4.7 配置的
+/// `allow_eof_recovery` 翻转为 `true`，使收尾 / 非流式聚合路径能从缺失结束 token
+/// 或截断 JSON 中恢复，而非静默丢弃调用。
+/// 流式 jail 必须继续使用非恢复变体——否则 `should_exit_jail_early` 会在结束 token
+/// 实际到达前就触发（见 jail.rs）。
 pub async fn detect_and_parse_tool_call_with_recovery(
     message: &str,
     parser_str: Option<&str>,
@@ -123,6 +148,7 @@ pub async fn detect_and_parse_tool_call_with_recovery(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let base = lookup_config(resolve_parser_key(parser_str))?;
 
+    // 仅对带 EOF-recovery 标志的解析器打开该标志，其余原样透传
     let recovery_config = match &base.parser_config {
         ParserConfig::Json(c) => {
             let mut c = c.clone();
@@ -174,6 +200,9 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     }
 }
 
+/// 返回 `chunk` 中最后一个完整工具调用区段结束后的字节偏移。
+/// 当解析器检测到区段未正确闭合时返回 `None`（如 kimi_k2 缺失 `section_end`），
+/// 提示调用方不应将当前缓冲视为完整结果——后续可能还有更多内容。
 pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Option<usize> {
     let parser_key = resolve_parser_key(parser_str);
     // 未知解析器名时保守返回整段长度（与既有行为一致）
@@ -183,6 +212,7 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
 
     match &config.parser_config {
         ParserConfig::Json(json_config) => {
+            // default 在 JSON 结束定位时按 nemotron_deci 处理
             let effective_parser = if parser_key == "default" {
                 "nemotron_deci"
             } else {
@@ -214,6 +244,10 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕分发层公开 API（`get_tool_parser_map`/`get_available_tool_parsers`、
+    //! `try_tool_call_parse`、`detect_and_parse_tool_call[_with_recovery]`、
+    //! `detect_tool_call_start`、`find_tool_call_end_position`）覆盖：解析器名解析与回退、
+    //! 各模型格式的单/多/无调用、并行调用、EOF 恢复、起始探测与结束定位、XML 专项等。
     //!
     //! ## 意义
     //! 锁定总分发层在全部已注册解析器名下的路由正确性与可观察行为。
@@ -229,6 +263,7 @@ mod tests {
     fn test_get_available_tool_parsers() {
         let parsers = get_available_tool_parsers();
         assert!(!parsers.is_empty());
+        // 新增解析器时务必同步更新此列表
         let available_parsers = [
             "hermes",
             "llama3_json",
@@ -382,6 +417,7 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    // 真实模型输出的测试 — 默认禁用
     #[tokio::test]
     async fn test_nvidia_llama3_nemotron_super_49b_simple() {
         let input = r#"<think>
@@ -958,6 +994,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 
     #[tokio::test]
     async fn test_detect_and_parse_tool_call_error_handling() {
+        // 未知解析器名应返回错误
         let input = r#"{"name": "get_weather", "arguments": {"location": "San Francisco, CA"}}"#;
         let result = detect_and_parse_tool_call(input, Some("unknown_parser"), None).await;
         assert!(result.is_err());
@@ -968,6 +1005,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
             err
         );
 
+        // 已知解析器但无效输入（非 JSON）应返回 Ok(None)
         let input = "not a json";
         let (result, content) = detect_and_parse_tool_call(input, Some("hermes"), None)
             .await
@@ -975,6 +1013,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         assert_eq!(content, Some("not a json".to_string()));
         assert!(result.is_empty());
 
+        // 已知解析器但有效 JSON 形状不对应返回 Ok(None)
         let input = r#"{"foo": "bar"}"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("hermes"), None)
             .await
@@ -995,7 +1034,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             .await
             .unwrap();
         assert_eq!(content, Some(input.to_string()));
-        assert!(result.is_empty()); // This model doesn't produce tool calls
+        assert!(result.is_empty()); // 该模型不产生工具调用
     }
 
     #[tokio::test]
@@ -1339,10 +1378,13 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_phi4_token_leak_reproduction() {
+        // 复现 "functools" 出现在 content 字段中的问题
+        // 当 JSON 格式错误或解析出问题时可能出现
         let input = r#"functools{"name": "get_weather","arguments":{"location":"San Francisco"}}"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4"), None)
             .await
             .unwrap();
+        // Content 应为空，不应包含 "functools"
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1352,32 +1394,43 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_phi4_token_leak_edge_case() {
+        // 仅出现 token 而无 JSON 的情况
+        // 此情况不太关键，但不应泄漏完整 token
         let input = r#"functools"#;
         let (result, _content) = detect_and_parse_tool_call(input, Some("phi4"), None)
             .await
             .unwrap();
-        assert_eq!(result.len(), 0); // No tool calls found
+        // 若无有效 JSON 跟随，content 可能包含 token，但不应崩溃
+        // 关键是不要返回工具调用
+        assert_eq!(result.len(), 0); // 未找到工具调用
+        // 此边界情况的 content 行为不是关键
     }
 
     #[tokio::test]
     async fn test_phi4_token_with_invalid_json() {
+        // token 后跟无效 JSON 的情况
         let input = r#"functools{invalid json}"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4"), None)
             .await
             .unwrap();
+        // Content 应为空，不应包含 "functools" 或泄漏 token
         assert_eq!(content, Some("".to_string()));
-        assert_eq!(result.len(), 0); // No tool calls found due to invalid JSON
+        assert_eq!(result.len(), 0); // 因 JSON 无效，未找到工具调用
     }
 
     #[tokio::test]
     async fn test_phi4_streaming_partial_tokens() {
+        // 验证修复正确处理用户所描述的流式场景
+        // 即 "fun"、"ct"、"ools" 作为独立分块到达
 
+        // 验证 "fun" 被检测为潜在工具调用起始（用于流式 jail）
         let config = super::get_tool_parser_map().get("phi4").unwrap();
         let json_config = match &config.parser_config {
             super::super::config::ParserConfig::Json(cfg) => cfg,
             _ => panic!("Expected JSON parser config"),
         };
 
+        // 验证部分 token 的检测
         use super::super::json::detect_tool_call_start_json;
         assert!(
             detect_tool_call_start_json("fun", json_config),
@@ -1396,6 +1449,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             "'functo' should be detected as potential start"
         );
 
+        // 验证无关文本不被检测
         assert!(
             !detect_tool_call_start_json("hello", json_config),
             "'hello' should not be detected"
@@ -1408,11 +1462,14 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_phi4_false_positive_words() {
+        // 验证 "funk" 或以 "func" 开头但不是 "functools" 的词被正确处理
+        // 即被正确视为普通内容而非工具调用
 
         let input = r#"funk music is great"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4"), None)
             .await
             .unwrap();
+        // 应被视为普通内容，非工具调用
         assert_eq!(
             result.len(),
             0,
@@ -1427,6 +1484,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_phi4_partial_but_complete_words() {
+        // 验证以 "func" 开头但不是 "functools" 的词
 
         let input = r#"The function works well"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("phi4"), None)
@@ -1453,11 +1511,12 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_phi4_funk_variations() {
+        // 验证各种 "funk" 相关词不被视为工具调用
 
         let test_cases = vec![
             "funk",
             "funky",
-            "funktion", // German word for function
+            "funktion", // 德语中"函数"的意思
             "funked",
             "I love funk music",
             "This is funky stuff",
@@ -1484,10 +1543,11 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_phi4_func_but_not_functools() {
+        // 验证以 "func" 开头的完整单词（非部分 "functools"）
 
         let test_cases = vec![
-            "func()",  // Programming syntax
-            "funcdef", // Python keyword variant
+            "func()",  // 编程语法
+            "funcdef", // Python 关键字变体
             "functions are useful",
             "functionally speaking",
         ];
@@ -1678,7 +1738,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let args: serde_json::Value =
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["query"], "search agent benchmark 2024");
-        assert_eq!(args["topn"], 10); // Should be number, not string
+        assert_eq!(args["topn"], 10); // 应为数字，非字符串
         assert_eq!(args["source"], "web");
     }
 
@@ -1703,6 +1763,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
+    /// 别名注册测试：验证 `deepseek-v4` 和 `deepseekv4` 路由到与 `deepseek_v4` 相同的解析器。非 PARSER.*；覆盖注册表管道。
     #[tokio::test]
     async fn test_deepseek_v4_compatibility_aliases() {
         let input = r#"<｜DSML｜tool_calls>
@@ -1746,6 +1807,8 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     #[tokio::test]
     async fn test_qwen25_simple() {
+        // Qwen2.5 工具调用格式（匹配 sglang qwen25_detector）：
+        // <tool_call>\n{"name": ..., "arguments": {...}}\n</tool_call>
         let input = r#"<tool_call>
 {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
 </tool_call>"#;
@@ -1810,6 +1873,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
 
     // === 并行工具调用测试（基于所给示例的综合用例） ===
 
+    /// 验证天气查询类并行工具调用结果的辅助函数
     fn validate_weather_tool_calls(result: &[ToolCallResponse], expected_cities: &[(&str, &str)]) {
         assert_eq!(
             result.len(),
@@ -1842,12 +1906,14 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 i
             );
 
+            // 验证工具调用 ID 格式（应至少 9 个字符）
             assert!(
                 result[i].id.len() >= 9,
                 "Tool call {} ID should be at least 9 characters",
                 i
             );
 
+            // 验证工具调用类型
             assert_eq!(
                 result[i].tp,
                 crate::tool_calling::response::ToolCallType::Function,
@@ -1858,6 +1924,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     // =============================================================================
+    // 1. NEMOTRON/DECI 格式（JSON 数组在 XML 标签内）
     // =============================================================================
 
     #[tokio::test]
@@ -1913,6 +1980,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     }
 
     // =================================================
+    // 2. QWEN3CODER 格式（XML 风格标签）
     // =================================================
 
     #[tokio::test]
@@ -1953,6 +2021,7 @@ fahrenheit
     }
 
     // =============================================================================
+    // 3. xLAM TOOL PARSER FORMAT (Pure JSON Array) - Testing via mistral parser
     // =============================================================================
 
     #[tokio::test]
@@ -1983,6 +2052,7 @@ fahrenheit
     }
 
     // =============================================================================
+    // 4. MINIMAX 格式（XML 标签内多行 JSON）
     // =============================================================================
 
     #[tokio::test]
@@ -1992,6 +2062,8 @@ fahrenheit
 {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}
 </tool_calls>"#;
 
+        // 这需要专用解析器，但可用修改后的 hermes 方法测试
+        // 当前用 nemotron_deci 测试，它处理类似的 XML 包装
         let input_nemotron_format = r#"<TOOLCALL>[
 {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},
 {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}
@@ -2007,24 +2079,29 @@ fahrenheit
     }
 
     // =============================================================================
+    // 5. HARMONY 格式（带 Harmony 编码的多工具调用）
     // =============================================================================
 
     #[tokio::test]
     async fn test_parallel_harmony_format_multiple_tools() {
+        // 用 harmony 解析器测试多工具调用
         let input = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"city": "Orlando", "state": "FL", "unit": "fahrenheit"}<|call|>"#;
 
         let (result, _content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();
 
+        // Harmony 解析器可能以不同方式处理，因此至少验证一个工具调用
         assert!(!result.is_empty(), "Should parse at least one tool call");
 
+        // 验证第一个工具调用
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
         assert!(args.get("city").is_some() || args.get("location").is_some());
     }
 
     // =============================================================================
+    // 6. 混合工具类型的并行调用
     // =============================================================================
 
     #[tokio::test]
@@ -2041,12 +2118,14 @@ fahrenheit
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
 
+        // 验证第一个工具调用（天气）
         let (name1, args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "get_current_weather");
         assert_eq!(args1["city"], "Dallas");
         assert_eq!(args1["state"], "TX");
         assert_eq!(args1["unit"], "fahrenheit");
 
+        // 验证第二个工具调用（网页搜索）
         let (name2, args2) = extract_name_and_args(result[1].clone());
         assert_eq!(name2, "web_search");
         assert_eq!(args2["query"], "Orlando Florida attractions");
@@ -2054,6 +2133,7 @@ fahrenheit
     }
 
     // =============================================================================
+    // 7. 边界情况与错误处理
     // =============================================================================
 
     #[tokio::test]
@@ -2067,6 +2147,7 @@ fahrenheit
             .await
             .unwrap();
 
+        // 仍应解析出合法的首个调用
         assert!(
             !result.is_empty(),
             "Should parse at least the valid tool call"
@@ -2109,6 +2190,7 @@ fahrenheit
     }
 
     // =============================================================================
+    // 8. 大规模并行调用
     // =============================================================================
 
     #[tokio::test]
@@ -2139,6 +2221,7 @@ fahrenheit
     }
 
     // =============================================================================
+    // 9. 复杂参数的并行调用
     // =============================================================================
 
     #[tokio::test]
@@ -2171,12 +2254,14 @@ fahrenheit
         assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 2);
 
+        // 验证第一个工具调用（天气预报）
         let (name1, args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "get_weather_forecast");
         assert_eq!(args1["location"]["city"], "Dallas");
         assert_eq!(args1["days"], 7);
         assert_eq!(args1["include_hourly"], true);
 
+        // 验证第二个工具调用（空气质量）
         let (name2, args2) = extract_name_and_args(result[1].clone());
         assert_eq!(name2, "get_air_quality");
         assert_eq!(args2["coordinates"]["lat"], 32.7767);
@@ -2184,8 +2269,10 @@ fahrenheit
     }
 
     // =============================================================================
+    // 10. 验证辅助工具
     // =============================================================================
 
+    /// 验证工具调用 ID 唯一且格式正确的辅助函数
     fn validate_tool_call_ids(result: &[ToolCallResponse]) {
         let mut ids = std::collections::HashSet::new();
         for (i, tool_call) in result.iter().enumerate() {
@@ -2205,8 +2292,10 @@ fahrenheit
         }
     }
 
+    /// 验证工具调用结构与 OpenAI 兼容性的辅助函数
     fn validate_openai_compatibility(result: &[ToolCallResponse]) {
         for (i, tool_call) in result.iter().enumerate() {
+            // 验证类型为 "function"
             assert_eq!(
                 tool_call.tp,
                 crate::tool_calling::response::ToolCallType::Function,
@@ -2215,12 +2304,14 @@ fahrenheit
                 tool_call.tp
             );
 
+            // 验证函数名非空
             assert!(
                 !tool_call.function.name.is_empty(),
                 "Tool call {} function name should not be empty",
                 i
             );
 
+            // 验证 arguments 是有效的 JSON
             let _: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
                 .unwrap_or_else(|_| panic!("Tool call {} arguments should be valid JSON", i));
         }
@@ -2258,12 +2349,14 @@ fahrenheit
         assert_eq!(result.len(), 3);
         validate_openai_compatibility(&result);
 
+        // 验证所有函数名互不相同
         let names: std::collections::HashSet<_> =
             result.iter().map(|tc| &tc.function.name).collect();
         assert_eq!(names.len(), 3, "All function names should be unique");
     }
 
     // =============================================================================
+    // 11. 性能与压力测试
     // =============================================================================
 
     #[tokio::test]
@@ -2297,7 +2390,7 @@ fahrenheit
 
     #[tokio::test]
     async fn test_parallel_large_arguments() {
-        let large_data = "x".repeat(1000); // 1KB of data
+        let large_data = "x".repeat(1000); // 1KB 数据
         let input = format!(
             r#"<TOOLCALL>[
     {{"name": "process_large_data", "arguments": {{"data": "{}", "size": 1000}}}},
@@ -2312,6 +2405,7 @@ fahrenheit
 
         assert_eq!(result.len(), 2);
 
+        // 验证大参数被保留
         for tool_call in &result {
             let args: serde_json::Value =
                 serde_json::from_str(&tool_call.function.arguments).unwrap();
@@ -2323,6 +2417,7 @@ fahrenheit
     }
 
     // =============================================================================
+    // 12. 额外边界情况与错误场景
     // =============================================================================
 
     #[tokio::test]
@@ -2339,6 +2434,7 @@ fahrenheit
 
         assert_eq!(result.len(), 3);
 
+        // 验证 Unicode 字符被保留
         let (name1, args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "translate_text");
         assert_eq!(args1["text"], "Hello 世界! 🌍");
@@ -2354,6 +2450,8 @@ fahrenheit
 
     #[tokio::test]
     async fn test_parallel_json_escaping_and_quotes() {
+        // 验证带转义的复杂 JSON 不会导致解析器崩溃
+        // 仅验证解析成功，不验证确切转义内容
         let input = r#"<TOOLCALL>[
     {"name": "process_json", "arguments": {"json_string": "{\"key\": \"value with \\\"quotes\\\"\"}", "format": "strict"}},
     {"name": "handle_paths", "arguments": {"windows_path": "C:\\Users\\Test\\Documents\\file.txt", "unix_path": "/home/user/file.txt"}},
@@ -2364,8 +2462,10 @@ fahrenheit
             .await
             .unwrap();
 
+        // 仅验证解析成功且获得预期数量的工具调用
         assert_eq!(result.len(), 3);
 
+        // 验证函数名正确
         let (name1, _args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "process_json");
 
@@ -2390,6 +2490,7 @@ fahrenheit
 
         assert_eq!(result.len(), 3);
 
+        // 验证不同参数类型被保留
         let (name1, args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "type_test");
         assert_eq!(args1["string"], "text");
@@ -2413,6 +2514,7 @@ fahrenheit
 
     #[tokio::test]
     async fn test_parallel_whitespace_variations() {
+        // 测试各种空白模式
         let input = r#"<TOOLCALL>[
     {
         "name": "spaced_function",
@@ -2437,6 +2539,7 @@ fahrenheit
         assert_eq!(result.len(), 3);
         validate_openai_compatibility(&result);
 
+        // 不同空白下均应正确解析
         let names: Vec<_> = result.iter().map(|tc| &tc.function.name).collect();
         assert!(names.contains(&&"spaced_function".to_string()));
         assert!(names.contains(&&"compact_function".to_string()));
@@ -2445,11 +2548,13 @@ fahrenheit
 
     #[tokio::test]
     async fn test_parallel_cross_parser_compatibility() {
+        // 跨不同解析器测试相同的并行工具调用
         let base_calls = r#"[
     {"name": "get_weather", "arguments": {"city": "Dallas", "unit": "fahrenheit"}},
     {"name": "get_weather", "arguments": {"city": "Orlando", "unit": "fahrenheit"}}
 ]"#;
 
+        // 测试不同解析器格式
         let test_cases = vec![
             (
                 format!("<TOOLCALL>{}</TOOLCALL>", base_calls),
@@ -2459,7 +2564,7 @@ fahrenheit
                 format!("[TOOL_CALLS]{}[/TOOL_CALLS]", base_calls),
                 "mistral",
             ),
-            (base_calls.to_string(), "mistral"), // Raw JSON
+            (base_calls.to_string(), "mistral"), // 裸 JSON
         ];
 
         for (input, parser) in test_cases {
@@ -2485,6 +2590,7 @@ fahrenheit
 
     #[tokio::test]
     async fn test_parallel_boundary_conditions() {
+        // 数组中恰好 1 个工具调用（单个与并行的边界）
         let input_single = r#"<TOOLCALL>[
     {"name": "single_call", "arguments": {"test": true}}
 ]</TOOLCALL>"#;
@@ -2496,6 +2602,7 @@ fahrenheit
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].function.name, "single_call");
 
+        // 测试最大合理数量的并行调用
         let mut many_calls = Vec::new();
         for i in 0..50 {
             many_calls.push(format!(
@@ -2513,6 +2620,7 @@ fahrenheit
         assert_eq!(result.len(), 50);
         validate_tool_call_ids(&result);
 
+        // 验证所有调用均已呈现且索引正确
         for (i, tool_call) in result.iter().enumerate() {
             assert_eq!(tool_call.function.name, format!("call_{}", i));
             let args: serde_json::Value =
@@ -2523,6 +2631,7 @@ fahrenheit
 
     #[tokio::test]
     async fn test_parallel_malformed_recovery() {
+        // 测试解析器从格式错误条目中恢复的能力
         let input = r#"<TOOLCALL>[
     {"name": "good_call_1", "arguments": {"param": "value1"}},
     {"malformed": "missing_name_and_arguments"},
@@ -2537,11 +2646,13 @@ fahrenheit
             .await
             .unwrap();
 
+        // 应能恢复并解析有效条目
         assert!(
             !result.is_empty(),
             "Should parse at least some valid tool calls"
         );
 
+        // 统计成功解析的有效工具调用
         let valid_calls: Vec<_> = result
             .iter()
             .filter(|tc| tc.function.name.starts_with("good_call"))
@@ -2552,6 +2663,7 @@ fahrenheit
             "Should parse at least 2 valid tool calls"
         );
 
+        // 验证有效调用内容正确
         for tool_call in valid_calls {
             assert!(tool_call.function.name.starts_with("good_call"));
             let args: serde_json::Value =
@@ -2622,6 +2734,7 @@ fahrenheit
         assert!(result);
     }
 
+    // DeepSeek V3
     #[test]
     fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3() {
         let text = r#"<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
@@ -2642,6 +2755,7 @@ fahrenheit
         assert!(result);
     }
 
+    // DeepSeek V3.1
     #[test]
     fn test_e2e_detect_incomplete_tool_call_start_deepseek_v3_1() {
         let text = r#"<｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Tokyo"}<｜tool▁call▁end｜>"#;
@@ -2665,11 +2779,12 @@ fahrenheit
 
     #[test]
     fn test_e2e_detect_tool_call_start_xml_partial() {
-        let text = r#"<tool_c"#; // Partial start token
+        let text = r#"<tool_c"#; // 部分起始 token
         let result = detect_tool_call_start(text, Some("qwen3_coder")).unwrap();
         assert!(result);
     }
 
+    // === XML 解析器测试 ===
 
     #[tokio::test]
     async fn test_qwen3_coder_simple_tool_call() {
@@ -3002,6 +3117,7 @@ weather forecasting
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "process_list");
+        // 默认以字符串形式返回。
         assert_eq!(args["items"], serde_json::json!("[1, 2, 3, 4, 5]"));
     }
 
@@ -3034,6 +3150,7 @@ weather forecasting
         assert_eq!(args["items"], serde_json::json!([1, 2, 3, 4, 5]));
     }
 
+    // MiniMax-M2.1 解析器测试
     #[tokio::test]
     async fn test_minimax_m2_simple_tool_call() {
         let input = r#"<minimax:tool_call>
@@ -3079,6 +3196,7 @@ weather forecasting
             .unwrap();
         assert_eq!(result.len(), 2);
 
+        // 第一个调用
         let (name1, args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "search_web");
         assert!(args1["query_tag"].is_array());
@@ -3092,6 +3210,7 @@ weather forecasting
             serde_json::json!(["OpenAI", "latest", "release"])
         );
 
+        // 第二个调用
         let (name2, args2) = extract_name_and_args(result[1].clone());
         assert_eq!(name2, "search_web");
         assert!(args2["query_tag"].is_array());

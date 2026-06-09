@@ -3717,7 +3717,6 @@ dependencies = [
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
- "pagoda-runtime",
  "pagoda-tokens",
  "rand 0.9.4",
  "rstest 0.18.2",

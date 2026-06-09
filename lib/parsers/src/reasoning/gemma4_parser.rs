@@ -1,6 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Google Gemma 4 thinking 模型推理解析器。
+//!
 //! ## 设计意图
 //! Gemma 4 在专用通道分隔符之间发出思维链推理：
 //!
@@ -208,6 +210,7 @@ impl ReasoningParser for Gemma4ReasoningParser {
                 break;
             }
 
+            // self.in_reasoning == true
             if let Some(idx) = work.find(END_TOKEN) {
                 let raw = work[..idx].to_string();
                 push_reasoning(
@@ -267,7 +270,7 @@ mod tests {
         assert_eq!(r.normal_text, "The answer is 42.");
     }
 
-    #[test] // REASONING.batch.3 — no reasoning markers, pass through
+    #[test] // REASONING.batch.3 — 无推理标记时透传
     fn detect_no_markers_passes_through() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("just a plain answer", &[]);
@@ -275,7 +278,7 @@ mod tests {
         assert_eq!(r.normal_text, "just a plain answer");
     }
 
-    #[test] // REASONING.batch.5 — reasoning open without close (truncation): everything after
+    #[test] // REASONING.batch.5 — 有起始无结束（截断）：起始标记之后全部为推理内容。
     fn detect_truncated_reasoning_open_only() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("intro <|channel>thought\npartial", &[]);
@@ -283,7 +286,7 @@ mod tests {
         assert_eq!(r.normal_text, "intro ");
     }
 
-    #[test] // REASONING.batch.3 — text before AND after the reasoning span preserved
+    #[test] // REASONING.batch.3 — 推理区间前后的文本均应保留
     fn detect_text_before_and_after() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning(
@@ -294,7 +297,7 @@ mod tests {
         assert_eq!(r.normal_text, "Hello.  Goodbye.");
     }
 
-    #[test] // REASONING.batch.5, REASONING.batch.3 — dangling end marker, missing start (upstream INVALID_SIMPLE)
+    #[test] // REASONING.batch.5, REASONING.batch.3 — 悬挂结束标记，缺失起始（上游 INVALID_SIMPLE）
     fn detect_dangling_end_marker_extracts_prefix_as_reasoning() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("some thinking<channel|>final answer", &[]);
@@ -302,7 +305,7 @@ mod tests {
         assert_eq!(r.normal_text, "final answer");
     }
 
-    #[test] // REASONING.batch.5, REASONING.batch.3 — dangling end + thought prefix on the head (upstream INVALID_COMPLETE)
+    #[test] // REASONING.batch.5, REASONING.batch.3 — 悬挂结束标记 + 头部 thought 前缀（上游 INVALID_COMPLETE）
     fn detect_dangling_end_marker_strips_thought_prefix() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning("thought\nrumination<channel|>final answer", &[]);
@@ -310,7 +313,7 @@ mod tests {
         assert_eq!(r.normal_text, "final answer");
     }
 
-    #[test] // `thought\n` prefix absent (some tokens drop it): pass through unchanged
+    #[test] // `thought\n` 前缀缺失（某些 token 会丢弃它）：原样透传
     fn detect_no_thought_prefix() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.detect_and_parse_reasoning(
@@ -321,7 +324,7 @@ mod tests {
         assert_eq!(r.normal_text, "answer");
     }
 
-    #[test] // REASONING.stream.3 — streaming arrival, single chunk
+    #[test] // REASONING.stream.3 — 流式，单 chunk
     fn streaming_single_chunk() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.parse_reasoning_streaming_incremental(
@@ -332,7 +335,7 @@ mod tests {
         assert_eq!(r.normal_text, "final");
     }
 
-    #[test] // REASONING.stream.3 — streaming with `thought\n` split across deltas
+    #[test] // REASONING.stream.3 — `thought\n` 前缀跨 delta 切分
     fn streaming_thought_prefix_split_across_deltas() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -354,7 +357,7 @@ mod tests {
         assert_eq!(normal, "the answer.");
     }
 
-    #[test] // REASONING.stream.3 — start marker split across deltas
+    #[test] // REASONING.stream.3 — 起始标记跨 delta 切分
     fn streaming_start_marker_split() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -376,7 +379,7 @@ mod tests {
         assert_eq!(normal, "intro outro");
     }
 
-    #[test] // REASONING.stream.3 — end marker split across deltas
+    #[test] // REASONING.stream.3 — 结束标记跨 delta 切分
     fn streaming_end_marker_split() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -397,7 +400,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // REASONING.stream.3 — diverged accumulated text (no `thought\n` prefix at all)
+    #[test] // REASONING.stream.3 — 累积文本已分歧（完全无 `thought\n` 前缀）
     fn streaming_no_thought_prefix_streaming() {
         let mut p = Gemma4ReasoningParser::new();
         let chunks = [
@@ -417,7 +420,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // REASONING.batch.3 — streaming with no markers at all
+    #[test] // REASONING.batch.3 — 流式且完全无标记
     fn streaming_no_markers() {
         let mut p = Gemma4ReasoningParser::new();
         let r = p.parse_reasoning_streaming_incremental("plain text only", &[]);
@@ -425,19 +428,22 @@ mod tests {
         assert_eq!(r.normal_text, "plain text only");
     }
 
-    #[test] // REASONING.batch.2 — multiple reasoning spans back-to-back
+    #[test] // REASONING.batch.2 — 连续多个推理区间
     fn streaming_multiple_reasoning_spans() {
         let mut p = Gemma4ReasoningParser::new();
         let input =
             "<|channel>thought\nfirst<channel|>answer1<|channel>thought\nsecond<channel|>answer2";
         let r = p.parse_reasoning_streaming_incremental(input, &[]);
+        // 两个 span 均拼接到累计增量中。
         assert!(r.reasoning_text.contains("first"));
         assert!(r.reasoning_text.contains("second"));
         assert!(r.normal_text.contains("answer1"));
         assert!(r.normal_text.contains("answer2"));
     }
 
-    #[test] // REASONING.batch.2 — paired reasoning + tool call. The reasoning parser
+    #[test] // REASONING.batch.2 — 推理后接工具调用。推理解析器必须将通道内容提取为
+    // `reasoning_text`，并将后续的 `<|tool_call>...<tool_call|>` 标记
+    // 完整保留在 `normal_text` 中供下游工具调用解析器消费。
     fn paired_reasoning_then_tool_call_non_streaming() {
         let mut p = Gemma4ReasoningParser::new();
         let input = concat!(
@@ -452,5 +458,16 @@ mod tests {
         );
     }
 
+    // ----- 显式 N/A 覆盖说明（按 lib/parsers/PARSER_CASES.md） -----
     //
+    // REASONING.batch.1, REASONING.batch.4, REASONING.batch.6, REASONING.batch.7 — 仅工具调用分类。
+    //          对推理解析器不适用。
+    // FRONTEND.tool_choice, PIPELINE.finish_reason — `tool_choice` 与 `finish_reason`：工具调用关注点，
+    //          对推理不适用。（跨解析器通用缺口；参见 `tool_calling/gemma4/parser.rs` 的说明。）
+    // REASONING.batch.8 — 空/空白输入：已被无标记透传用例隐式覆盖
+    //          （`detect_no_markers_*`、`streaming_no_markers`）。
+    // REASONING.batch.9 — 重复调用：工具调用概念；不适用。多区间推理是其类比，
+    //          已由 `streaming_multiple_reasoning_spans` 覆盖。
+    // PARSER.xml.1 / PARSER.xml.2 — 仅 XML 系列。不适用。
+    // PARSER.harmony.1 / PARSER.harmony.2 — 仅 Harmony。不适用。
 }

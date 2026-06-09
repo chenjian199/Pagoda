@@ -19,7 +19,6 @@ default = []
 
 [dependencies]
 # repo
-pagoda-kv-router = { workspace = true }
 pagoda-tokens = { workspace = true }
 
 # workspace

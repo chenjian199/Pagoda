@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # reasoning::granite_parser
+//! Granite 推理解析器。
 //!
 //! ## 设计意图
 //! 解析 IBM Granite 风格的推理输出：用自然语言短语
@@ -212,10 +212,12 @@ mod tests {
     fn test_streaming_partial_tokens() {
         let mut parser = GraniteReasoningParser::new();
 
+        // Test partial start token
         let result1 = parser.parse_reasoning_streaming_incremental("Here's", &[]);
         assert_eq!(result1.normal_text, "");
         assert_eq!(result1.reasoning_text, "");
 
+        // 补全起始 token 并添加推理内容
         let result2 = parser
             .parse_reasoning_streaming_incremental(" my thought process: This is reasoning", &[]);
         assert_eq!(result2.reasoning_text, " This is reasoning");
@@ -226,15 +228,18 @@ mod tests {
     fn test_streaming_partial_end_tokens() {
         let mut parser = GraniteReasoningParser::new();
 
+        // Start reasoning
         parser
             .parse_reasoning_streaming_incremental("Here's my thought process: Thinking... ", &[]);
 
         parser.parse_reasoning_streaming_incremental("Here", &[]);
 
+        // 部分结束 token 应被缓冲
         let result = parser.parse_reasoning_streaming_incremental("'s my", &[]);
         assert_eq!(result.normal_text, "");
         assert_eq!(result.reasoning_text, "");
 
+        // Complete end token
         let result2 = parser.parse_reasoning_streaming_incremental(" response: Done!", &[]);
         assert_eq!(result2.reasoning_text, "");
         assert_eq!(result2.normal_text, " Done!");
@@ -261,6 +266,7 @@ mod tests {
         assert_eq!(result1.reasoning_text, " This is reasoning content");
         assert_eq!(result1.normal_text, "");
 
+        // More reasoning content without end token
         let result2 = parser.parse_reasoning_streaming_incremental(" and more thinking", &[]);
         assert_eq!(result2.reasoning_text, " and more thinking");
         assert_eq!(result2.normal_text, "");
@@ -292,6 +298,7 @@ mod tests {
         let text = "here's my thought process: lowercase. here's my response: answer.";
         let result = parser.parse_reasoning_streaming_incremental(text, &[]);
 
+        // 不应检测小写 token
         assert_eq!(result.normal_text, text);
         assert_eq!(result.reasoning_text, "");
     }

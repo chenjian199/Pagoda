@@ -1,6 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # 推理与工具调用的交互
+//!
 //! ## 设计意图
 //! GLM-4.5/4.7、Qwen3 等模型会把推理块与工具调用交错输出：
 //!
@@ -43,6 +45,7 @@ use crate::{ParserResult, ReasoningParser};
 /// 标签（例如 `"Hello world <th"`，其中 `<th` 是 `<think>` 的前缀）。
 fn overlap(s: &str, delim: &str) -> usize {
     let max = delim.len().min(s.len());
+    // 跳过位于多字节码点中间的位置（如 Kimi 标签中的多字节 `◁`）
     (1..=max)
         .rev()
         .filter(|&i| delim.is_char_boundary(i))
@@ -144,6 +147,7 @@ impl ReasoningParser for BasicReasoningParser {
 
                 match (end_offset, tool_offset) {
                     (Some(e), Some(t)) if t < e => {
+                        // tool_start 在 </think> 之前到达——强制退出。
                         reasoning_parts.push(&text[cursor..cursor + t]);
                         normal_parts.push(&text[cursor + t..]);
                         cursor = text.len();
@@ -155,6 +159,7 @@ impl ReasoningParser for BasicReasoningParser {
                         currently_reasoning = false;
                     }
                     (None, Some(t)) => {
+                        // 无 </think> 但存在 tool_start——强制退出。
                         reasoning_parts.push(&text[cursor..cursor + t]);
                         normal_parts.push(&text[cursor + t..]);
                         cursor = text.len();
@@ -415,6 +420,7 @@ mod tests {
         assert_eq!(result1.normal_text, " middle");
         assert_eq!(result1.reasoning_text, "first reasoning");
 
+        // 第二个推理块：<think> 前的空格是普通前缀，推理内容被提取
         let result2 = parser
             .parse_reasoning_streaming_incremental(" <think>second reasoning</think> end", &[]);
         assert_eq!(result2.reasoning_text, "second reasoning");
@@ -426,10 +432,12 @@ mod tests {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
+        // 传入部分起始标签
         let result1 = parser.parse_reasoning_streaming_incremental("<th", &[]);
         assert_eq!(result1.normal_text, "");
         assert_eq!(result1.reasoning_text, "");
 
+        // 补全起始标签并添加内容
         let result2 = parser.parse_reasoning_streaming_incremental(
             "ink>reasoning content</think> normal text",
             &[],
@@ -443,11 +451,13 @@ mod tests {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
 
+        // 以完整起始标签和部分内容开始
         let result1 =
             parser.parse_reasoning_streaming_incremental("<think>reasoning content</th", &[]);
         assert_eq!(result1.normal_text, "");
         assert_eq!(result1.reasoning_text, "");
 
+        // 补全闭合标签
         let result2 = parser.parse_reasoning_streaming_incremental("ink> normal text", &[]);
         assert_eq!(result2.normal_text, " normal text");
         assert_eq!(result2.reasoning_text, "reasoning content");
@@ -458,18 +468,22 @@ mod tests {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
 
+        // 首次调用 — 部分起始标签
         let result1 = parser.parse_reasoning_streaming_incremental("<th", &[]);
         assert_eq!(result1.normal_text, "");
         assert_eq!(result1.reasoning_text, "");
 
+        // 第二次调用 — 完整起始标签，开始推理
         let result2 = parser.parse_reasoning_streaming_incremental("ink>part1 ", &[]);
         assert_eq!(result2.normal_text, "");
         assert_eq!(result2.reasoning_text, "");
 
+        // 第三次调用 — 更多推理内容
         let result3 = parser.parse_reasoning_streaming_incremental("part2 ", &[]);
         assert_eq!(result3.normal_text, "");
         assert_eq!(result3.reasoning_text, "");
 
+        // 第四次调用 — 结束推理并转到普通文本
         let result4 = parser.parse_reasoning_streaming_incremental("part3</think> normal", &[]);
         assert_eq!(result4.normal_text, " normal");
         assert_eq!(result4.reasoning_text, "part1 part2 part3");
@@ -480,14 +494,17 @@ mod tests {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
+        // 开始推理块
         let result1 = parser.parse_reasoning_streaming_incremental("<think>reasoning ", &[]);
         assert_eq!(result1.normal_text, "");
         assert_eq!(result1.reasoning_text, "reasoning ");
 
+        // 继续流式推理
         let result2 = parser.parse_reasoning_streaming_incremental("content ", &[]);
         assert_eq!(result2.normal_text, "");
         assert_eq!(result2.reasoning_text, "content ");
 
+        // 结束推理块
         let result3 = parser.parse_reasoning_streaming_incremental("more</think> normal", &[]);
         assert_eq!(result3.normal_text, " normal");
         assert_eq!(result3.reasoning_text, "more");
@@ -501,6 +518,9 @@ mod tests {
             "<think>outer <think>inner</think> reasoning</think> normal",
             &[],
         );
+        // 基于游标的解析：首个 <think> 开始推理，首个 </think> 终止。
+        // "outer <think>inner" 为推理（内层 <think> 只是推理内的普通文本）。
+        // " reasoning</think> normal" 为普通文本（游离的 </think> 穿透）。
         assert_eq!(result.reasoning_text, "outer <think>inner");
         assert_eq!(result.normal_text, "reasoning</think> normal");
     }
@@ -529,6 +549,8 @@ mod tests {
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
         let result = parser
             .detect_and_parse_reasoning("<think>first <think>second reasoning</think> normal", &[]);
+        // 基于游标：首个 <think> 打开推理，找到首个 </think>。
+        // 内层 <think> 只是推理块内的普通文本。
         assert_eq!(result.reasoning_text, "first <think>second reasoning");
         assert_eq!(result.normal_text, "normal");
     }
@@ -565,20 +587,25 @@ mod tests {
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
+        // 处理完整推理块
         let result1 =
             parser.parse_reasoning_streaming_incremental("<think>reasoning</think> normal", &[]);
         assert_eq!(result1.normal_text, " normal");
         assert_eq!(result1.reasoning_text, "reasoning");
 
+        // 处理普通文本 — 不应受先前状态影响
         let result2 = parser.parse_reasoning_streaming_incremental(" more normal text", &[]);
         assert_eq!(result2.normal_text, " more normal text");
         assert_eq!(result2.reasoning_text, "");
 
+        // 后续推理块应被正常解析（交错思考）
+        // 前导 " " 在 <think> 之前是普通文本前缀；" final" 是后缀。
         let result3 = parser
             .parse_reasoning_streaming_incremental(" <think>new reasoning</think> final", &[]);
         assert_eq!(result3.reasoning_text, "new reasoning");
         assert_eq!(result3.normal_text, "  final"); // " " prefix + " final" suffix
 
+        // 以分块方式重复相同测试以更清晰
         let mut parser2 =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -597,18 +624,24 @@ mod tests {
 
     #[test] // REASONING.batch.2, REASONING.batch.3
     fn test_post_reasoning_angle_bracket_not_buffered() {
+        // 推理结束后，单独的 `<` 应立即作为普通文本透传。
+        // 不得将其作为 <think> 或 </think> 的潜在前缀进行缓冲，
+        // 否则下游工具调用 jail 将丢失 `<`（如 `<invoke` 变成 `invoke`）。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
+        // 处理一个完整推理块
         let r1 =
             parser.parse_reasoning_streaming_incremental("<think>reasoning content</think>", &[]);
         assert_eq!(r1.reasoning_text, "reasoning content");
         assert_eq!(r1.normal_text, "");
 
+        // 推理结束后，孤立的 `<` 必须作为普通文本透传
         let r2 = parser.parse_reasoning_streaming_incremental("<", &[]);
         assert_eq!(r2.normal_text, "<");
         assert_eq!(r2.reasoning_text, "");
 
+        // 下一个 token 应独立到达（不与缓冲的 `<` 合并）
         let r3 = parser.parse_reasoning_streaming_incremental("invoke name=\"get_weather\">", &[]);
         assert_eq!(r3.normal_text, "invoke name=\"get_weather\">");
         assert_eq!(r3.reasoning_text, "");
@@ -616,6 +649,8 @@ mod tests {
 
     #[test] // REASONING.batch.2
     fn test_post_reasoning_tool_call_xml_preserved() {
+        // 模拟 MiniMax 工具调用场景：推理后接 XML 工具调用。
+        // `<invoke` 中的 `<` 不得被推理解析器消费。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -626,12 +661,14 @@ mod tests {
         assert_eq!(r2.normal_text, "");
         assert_eq!(r2.reasoning_text, "");
 
+        // 工具调用标记应完整透传
         let r3 = parser.parse_reasoning_streaming_incremental("<minimax:tool_call>", &[]);
         assert_eq!(r3.normal_text, "<minimax:tool_call>");
 
         let r4 = parser.parse_reasoning_streaming_incremental("\n", &[]);
         assert_eq!(r4.normal_text, "\n");
 
+        // 推理结束后作为单独 token 到达的 `<` 不得被缓冲
         let r5 = parser.parse_reasoning_streaming_incremental("<", &[]);
         assert_eq!(r5.normal_text, "<");
 
@@ -683,16 +720,23 @@ mod tests {
 
     #[test] // REASONING.stream.3
     fn test_streaming_transition_chunk() {
+        // </think> 和 <think> 在同一个 chunk 中到达。
+        // 借助循环处理，第二个块的起始内容被立即发出
+        //（stream_reasoning=true），而非缓冲至下次调用。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         let r1 = parser.parse_reasoning_streaming_incremental("<think>first", &[]);
         assert_eq!(r1.reasoning_text, "first");
 
+        // 块内过渡：</think> 之后是普通文本，然后是带更多内容的 <think>。
+        // 循环过渡出推理，发出 " middle " 作为普通文本，进入
+        // 下一个推理块，并立即流式发出 "second"。
         let r2 = parser.parse_reasoning_streaming_incremental("</think> middle <think>second", &[]);
         assert_eq!(r2.reasoning_text, "second");
         assert_eq!(r2.normal_text, " middle ");
 
+        // 第二个推理块的延续
         let r3 = parser.parse_reasoning_streaming_incremental(" more</think> end", &[]);
         assert_eq!(r3.reasoning_text, " more");
         assert_eq!(r3.normal_text, " end");
@@ -700,17 +744,21 @@ mod tests {
 
     #[test] // REASONING.batch.1, REASONING.batch.3
     fn test_interleaved_with_force_reasoning() {
+        // deepseek_r1 模式：force_reasoning=true，首个 token 无 <think> 也视为推理
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
 
+        // 无 <think> 标签 — 因 force_reasoning=true 视为推理
         let r1 = parser.parse_reasoning_streaming_incremental("initial reasoning", &[]);
         assert_eq!(r1.reasoning_text, "initial reasoning");
         assert_eq!(r1.normal_text, "");
 
+        // 强制推理块结束
         let r2 = parser.parse_reasoning_streaming_incremental("</think> answer", &[]);
         assert_eq!(r2.reasoning_text, "");
         assert_eq!(r2.normal_text, " answer");
 
+        // 带显式 <think> 的第二个推理块
         let r3 =
             parser.parse_reasoning_streaming_incremental("<think>second thought</think> done", &[]);
         assert_eq!(r3.reasoning_text, "second thought");
@@ -719,6 +767,7 @@ mod tests {
 
     #[test] // REASONING.stream.3, REASONING.batch.3
     fn test_interleaved_partial_think_tag_between_blocks() {
+        // 首个推理块之后，部分 <think> 标签跨块到达
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -726,10 +775,12 @@ mod tests {
         assert_eq!(r1.reasoning_text, "first");
         assert_eq!(r1.normal_text, " normal");
 
+        // 部分 <think> 前缀："<th"（2 字符，满足阈值）
         let r2 = parser.parse_reasoning_streaming_incremental("<th", &[]);
         assert_eq!(r2.normal_text, "");
         assert_eq!(r2.reasoning_text, "");
 
+        // 补全标签
         let r3 = parser.parse_reasoning_streaming_incremental("ink>second</think> end", &[]);
         assert_eq!(r3.reasoning_text, "second");
         assert_eq!(r3.normal_text, " end");
@@ -737,12 +788,14 @@ mod tests {
 
     #[test] // REASONING.batch.3, helper
     fn test_lone_angle_bracket_between_reasoning_blocks() {
+        // 推理块之间的孤立 `<` 应透传（不缓冲）
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         let r1 = parser.parse_reasoning_streaming_incremental("<think>thought</think>", &[]);
         assert_eq!(r1.reasoning_text, "thought");
 
+        // 孤立 `<` 不得被缓冲 — 可能是工具调用
         let r2 = parser.parse_reasoning_streaming_incremental("<", &[]);
         assert_eq!(r2.normal_text, "<");
         assert_eq!(r2.reasoning_text, "");
@@ -751,6 +804,7 @@ mod tests {
         assert_eq!(r3.normal_text, "tool_call>");
         assert_eq!(r3.reasoning_text, "");
 
+        // 但在此之后真实的 <think> 仍应正常运作
         let r4 =
             parser.parse_reasoning_streaming_incremental("<think>more thought</think> done", &[]);
         assert_eq!(r4.reasoning_text, "more thought");
@@ -759,9 +813,12 @@ mod tests {
 
     #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_force_reasoning_stream_false_buffers_until_end_token() {
+        // force_reasoning=true, stream_reasoning=false：内容被缓冲直到 </think>
+        // 到达，然后作为单个 chunk 返回。这是预期行为。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, false);
 
+        // 无 <think> — 强制进入推理，stream_reasoning=false 表示静默缓冲
         let r1 = parser.parse_reasoning_streaming_incremental("chunk one", &[]);
         assert_eq!(r1.reasoning_text, "");
         assert_eq!(r1.normal_text, "");
@@ -770,6 +827,7 @@ mod tests {
         assert_eq!(r2.reasoning_text, "");
         assert_eq!(r2.normal_text, "");
 
+        // </think> 到达 — 全部缓冲的推理被刷新
         let r3 = parser.parse_reasoning_streaming_incremental("</think> answer", &[]);
         assert_eq!(r3.reasoning_text, "chunk one chunk two");
         assert_eq!(r3.normal_text, " answer");
@@ -777,6 +835,9 @@ mod tests {
 
     #[test] // REASONING.batch.2, REASONING.stream.3, REASONING.batch.1
     fn test_multiple_full_blocks_in_single_streaming_chunk() {
+        // 两个完整 <think>...</think> 块在一个 chunk 中到达。
+        // 循环在单次调用中耗尽所有转移 — 两个块被完全处理，
+        // 无需后续调用来刷新缓冲内容。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -787,6 +848,7 @@ mod tests {
         assert_eq!(r1.reasoning_text, "AB");
         assert_eq!(r1.normal_text, " mid  end");
 
+        // 缓冲已完全排空；后续空调用返回空
         let r2 = parser.parse_reasoning_streaming_incremental("", &[]);
         assert_eq!(r2.reasoning_text, "");
         assert_eq!(r2.normal_text, "");
@@ -794,6 +856,11 @@ mod tests {
 
     #[test] // REASONING.stream.3, helper
     fn test_partial_end_token_stream_reasoning_true() {
+        // 部分 </think> 跨 chunk 切分，stream_reasoning=true。
+        // 部分结束 token 缓冲检查仅在解析器已处于推理模式
+        // （来自先前调用）时执行。若 <think> 和 </th 在同一 chunk 中到达，
+        // stream_reasoning=true 会立即发出推理内容（含 </th）。
+        // 因此 <think> 必须先作为独立 chunk 到达。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -801,10 +868,12 @@ mod tests {
         assert_eq!(r1.reasoning_text, "reasoning");
         assert_eq!(r1.normal_text, "");
 
+        // 处于推理中时的部分结束 token — 被缓冲，无输出
         let r2 = parser.parse_reasoning_streaming_incremental("</th", &[]);
         assert_eq!(r2.reasoning_text, "");
         assert_eq!(r2.normal_text, "");
 
+        // 补全结束 token
         let r3 = parser.parse_reasoning_streaming_incremental("ink> normal", &[]);
         assert_eq!(r3.reasoning_text, "");
         assert_eq!(r3.normal_text, " normal");
@@ -812,21 +881,27 @@ mod tests {
 
     #[test] // REASONING.batch.3, REASONING.batch.8
     fn test_empty_string_input_various_states() {
+        // 空字符串输入在各种状态下应始终返回空结果而不改变状态
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
+        // 状态：空闲
         let r1 = parser.parse_reasoning_streaming_incremental("", &[]);
         assert_eq!(r1.reasoning_text, "");
         assert_eq!(r1.normal_text, "");
 
+        // 进入推理
         parser.parse_reasoning_streaming_incremental("<think>content", &[]);
 
+        // 状态：推理中
         let r2 = parser.parse_reasoning_streaming_incremental("", &[]);
         assert_eq!(r2.reasoning_text, "");
         assert_eq!(r2.normal_text, "");
 
+        // 完成并退出推理
         parser.parse_reasoning_streaming_incremental("</think>", &[]);
 
+        // 状态：推理后（普通文本）
         let r3 = parser.parse_reasoning_streaming_incremental("", &[]);
         assert_eq!(r3.reasoning_text, "");
         assert_eq!(r3.normal_text, "");
@@ -834,14 +909,18 @@ mod tests {
 
     #[test] // REASONING.batch.2, REASONING.stream.3, REASONING.batch.1
     fn test_force_reasoning_stream_false_multiple_blocks() {
+        // force_reasoning=true（deepseek_r1 模式），stream_reasoning=false。
+        // 首个块使用强制推理（无显式 <think>）；后续块使用显式标签。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, false);
 
+        // 无起始标签的强制推理，遇到 </think> 时刷新
         let r1 =
             parser.parse_reasoning_streaming_incremental("initial reasoning</think> normal1 ", &[]);
         assert_eq!(r1.reasoning_text, "initial reasoning");
         assert_eq!(r1.normal_text, " normal1 ");
 
+        // 后续显式 <think> 块正常运作
         let r2 = parser
             .parse_reasoning_streaming_incremental("<think>second block</think> normal2", &[]);
         assert_eq!(r2.reasoning_text, "second block");
@@ -850,7 +929,12 @@ mod tests {
 
     #[test] // REASONING.stream.3 — GLM-5 burst pattern
     fn test_glm5_pattern_a_burst_single_chunk() {
+        // GLM-5 模式 A：整个补全在一个 SSE 事件中到达。
+        // 格式：<think>T1</think><tool_call>A</tool_call><think>T2</think><tool_call>B</tool_call>
         //
+        // 两个推理块都必须被提取到 reasoning_text；两个工具调用
+        // 必须落入 normal_text 供下游工具调用解析器处理。无需后续
+        // 调用 — 循环在单次调用中完全排空缓冲。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -864,6 +948,7 @@ mod tests {
             "<tool_call>A</tool_call><tool_call>B</tool_call>"
         );
 
+        // 缓冲已完全排空；流可在此结束而无内容丢失
         let r2 = parser.parse_reasoning_streaming_incremental("", &[]);
         assert_eq!(r2.reasoning_text, "");
         assert_eq!(r2.normal_text, "");
@@ -871,6 +956,8 @@ mod tests {
 
     #[test] // REASONING.stream.3, REASONING.batch.2, REASONING.batch.3
     fn test_tool_call_xml_between_reasoning_blocks_streaming() {
+        // GLM-5 模式 A 逐块验证：推理块之间的工具调用 XML 块
+        // 经由不同 SSE 事件落入 normal_text 而非 reasoning_text。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -891,12 +978,24 @@ mod tests {
         assert_eq!(r4.reasoning_text, "");
     }
 
+    // =========================================================================
+    // 中字符串部分标签测试（基于重叠的缓冲）
+    //
+    // 以下测试覆盖 <think> 或 </think> 标签在中字符串处被切分的场景
+    // （不在缓冲起始位置）。将多个前向 token 批量合并到单个分块响应中的后端
+    // 可能产生这些模式。
+    //
+    // 从 PR #6448（ryanolson）移植，含额外伪匹配测试。
+    // =========================================================================
+
     #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_opening_tag_batched() {
+        // 后端批量合并 token："Hello world <th" 作为一个 chunk 到达
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         let r1 = parser.parse_reasoning_streaming_incremental("Hello world <th", &[]);
+        // "Hello world " emitted as normal, "<th" held in buffer
         assert_eq!(r1.normal_text, "Hello world ");
         assert_eq!(r1.reasoning_text, "");
 
@@ -908,6 +1007,7 @@ mod tests {
 
     #[test] // REASONING.stream.3, helper
     fn test_batched_tag_boundary_split() {
+        // 激进批量合并：<think> 标签与普通文本前缀切分
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -922,6 +1022,8 @@ mod tests {
 
     #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_closing_tag_stream_reasoning_false() {
+        // stream_reasoning=false 时，内容保持缓冲直到 </think>。
+        // 部分 </think> 在推理模式中跨中字符串切分。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, false);
 
@@ -937,11 +1039,14 @@ mod tests {
 
     #[test] // REASONING.stream.3, helper
     fn test_mid_string_partial_closing_tag_stream_reasoning_true() {
+        // stream_reasoning=true 时，推理内容被增量发出。
+        // 末尾的部分 "</th" 不得作为推理文本发出。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         let r1 =
             parser.parse_reasoning_streaming_incremental("<think>reasoning content and </th", &[]);
+        // "reasoning content and " emitted as reasoning, "</th" held
         assert_eq!(r1.reasoning_text, "reasoning content and ");
         assert_eq!(r1.normal_text, "");
 
@@ -952,6 +1057,7 @@ mod tests {
 
     #[test] // REASONING.stream.3, REASONING.batch.3
     fn test_batched_interleaved_with_mid_string_partial() {
+        // 首个块在 chunk 1 完成，第二个块的 <think> 在边界处切分
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -967,10 +1073,12 @@ mod tests {
 
     #[test] // helper
     fn test_partial_tag_false_positive() {
+        // "<th" 看起来像部分 <think> 但 "thesis" 不是 <think>
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
         let r1 = parser.parse_reasoning_streaming_incremental("value <thesis on", &[]);
+        // "value <thesis on" 的后缀中没有任何部分匹配 "<think>" 的前缀 — 全部发出
         let r2 = parser.parse_reasoning_streaming_incremental(" AI> is great", &[]);
 
         let combined_normal = format!("{}{}", r1.normal_text, r2.normal_text);
@@ -981,6 +1089,7 @@ mod tests {
 
     #[test] // helper
     fn test_partial_closing_tag_fakeout() {
+        // Ollama 风格伪匹配："</th" 被缓冲，但 "ing>" 补全为 "</thing>" 而非 "</think>"
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), false, true);
 
@@ -988,10 +1097,12 @@ mod tests {
         assert_eq!(r1.reasoning_text, "abc");
         assert_eq!(r1.normal_text, "");
 
+        // "ing>def" 补全为 "</thing>def" — 不是闭合标签
         let r2 = parser.parse_reasoning_streaming_incremental("ing>def", &[]);
         assert_eq!(r2.reasoning_text, "</thing>def");
         assert_eq!(r2.normal_text, "");
 
+        // 真正的闭合标签到达
         let r3 = parser.parse_reasoning_streaming_incremental("</think>done", &[]);
         assert_eq!(r3.reasoning_text, "");
         assert_eq!(r3.normal_text, "done");
@@ -999,6 +1110,7 @@ mod tests {
 
     #[test] // internal helper
     fn test_overlap_helper_function() {
+        // overlap 工具函数的直接测试
         assert_eq!(overlap("abc</th", "</think>"), 4);
         assert_eq!(overlap("abc</thing>def", "</think>"), 0);
         assert_eq!(overlap("<", "<think>"), 1);
@@ -1007,13 +1119,15 @@ mod tests {
         assert_eq!(overlap("no match", "<think>"), 0);
         assert_eq!(overlap("", "<think>"), 0);
         assert_eq!(overlap("Hello world <thi", "<think>"), 4);
-        assert_eq!(overlap("text◁", "◁think▷"), 3); // ◁ is 3 bytes
+        // 多字节分隔符（Kimi 解析器使用 ◁think▷ / ◁/think▷）
+        assert_eq!(overlap("text◁", "◁think▷"), 3); // ◁ 占 3 字节
         assert_eq!(overlap("text◁th", "◁think▷"), 5);
         assert_eq!(overlap("text◁/thi", "◁/think▷"), 7);
         assert_eq!(overlap("no match", "◁think▷"), 0);
     }
 
     fn kimi_k2_parser() -> BasicReasoningParser {
+        // 对应 reasoning/mod.rs 中的 `kimi_k25` 注册。
         BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true)
             .with_tool_start_token(crate::reasoning::KIMI_K2_TOOL_SECTION_BEGIN)
     }
@@ -1063,6 +1177,7 @@ mod tests {
         assert_eq!(r1.reasoning_text, "thinking ");
         assert_eq!(r1.normal_text, "");
 
+        // 第二个 chunk 以工具标记的前缀结尾 — 该后缀必须被缓冲。
         let r2 = parser.parse_reasoning_streaming_incremental("text <|tool_cal", &[]);
         assert_eq!(r2.reasoning_text, "text ");
         assert_eq!(r2.normal_text, "");
@@ -1074,6 +1189,9 @@ mod tests {
 
     #[test] // REASONING.stream.3, helper
     fn test_force_exit_partial_marker_resolves_as_non_marker() {
+        // 首个 chunk 以 "<|tool_ca" 结尾（标记前缀）——必须被缓冲。
+        // 第二个 chunk "xxx" 使合并后的 "<|tool_caxxx" 不是标记。
+        // 由于 force_reasoning=true，内容随后以推理形式刷新。
         let mut parser = kimi_k2_parser();
 
         let r1 = parser.parse_reasoning_streaming_incremental("abc <|tool_ca", &[]);
@@ -1087,6 +1205,8 @@ mod tests {
 
     #[test] // REASONING.batch.1
     fn test_no_tool_start_token_behaves_as_before() {
+        // 未设置 tool_start_token 时，BasicReasoningParser 行为与补丁前逐字节一致——
+        // 标记只是推理内容。
         let mut parser =
             BasicReasoningParser::new("<think>".to_string(), "</think>".to_string(), true, true);
         let r =

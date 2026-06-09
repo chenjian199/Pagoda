@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::xml::parser
@@ -205,11 +205,11 @@ fn parse_tool_call_block(
         let function_name = strip_quotes(function_name_raw);
         let function_body = func_cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
-        // 取该函数的参数 schema
         if function_name.is_empty() {
             continue;
         }
 
+        // 取该函数的参数 schema
         let param_config = get_arguments_config(function_name, tools);
 
         // 从函数体解析参数
@@ -446,7 +446,7 @@ fn try_literal_eval(s: &str) -> Result<Value, ()> {
 }
 
 /// 安全解析值——先 JSON，再退化为字符串。语义上模仿 SGLang 的 `_safe_val`。
-/// NOTE: This function is deprecated and kept for reference. Use convert_param_value instead.
+/// 注：此函数已弃用，仅保留作参考。请用 convert_param_value 替代。
 #[allow(dead_code)]
 fn safe_parse_value(raw: &str) -> serde_json::Value {
     let unescaped = html_unescape(raw.trim());
@@ -500,8 +500,8 @@ mod tests {
         let config = XmlParserConfig::default();
         assert!(detect_tool_call_start_xml("<tool_call>", &config));
         assert!(detect_tool_call_start_xml("text <tool_call>", &config));
-        assert!(detect_tool_call_start_xml("<tool_c", &config)); // Partial match
-        assert!(detect_tool_call_start_xml("<", &config)); // Partial match
+        assert!(detect_tool_call_start_xml("<tool_c", &config)); // 部分匹配
+        assert!(detect_tool_call_start_xml("<", &config)); // 部分匹配
         assert!(!detect_tool_call_start_xml("no tool call here", &config));
         assert!(!detect_tool_call_start_xml("toolcall", &config));
     }
@@ -511,7 +511,7 @@ mod tests {
         let config = XmlParserConfig::default();
         let text = "<tool_call><function=test></function></tool_call>more text";
         let pos = find_tool_call_end_position_xml(text, &config);
-        assert_eq!(pos, 49); // Position after </tool_call>
+        assert_eq!(pos, 49); // </tool_call> 之后的位置
         assert_eq!(&text[pos..], "more text");
 
         let text_no_end = "<tool_call><function=test>";
@@ -519,14 +519,19 @@ mod tests {
         assert_eq!(pos, text_no_end.len());
     }
 
+    /// 针对 issue #6822 的回归测试：单个 chunk 中的并行工具调用必须全部被
+    /// `find_tool_call_end_position_xml` 捕获，使 jail 将整组传入 `extract_tool_calls`
+    /// 而非将第二个（及后续）调用当作原始尾部文本发出。
     #[test] // PARSER.batch.2, helper
     fn test_find_tool_call_end_position_parallel_calls() {
         let config = XmlParserConfig::default();
 
+        // 两个并行调用，之间无空白。
         let two_calls = "<tool_call><function=foo><parameter=x>1</parameter></function></tool_call>\
                          <tool_call><function=bar><parameter=y>2</parameter></function></tool_call>\
                          trailing";
         let pos = find_tool_call_end_position_xml(two_calls, &config);
+        // "trailing" 之前（不含 "trailing"）的所有内容均应被捕获。
         assert!(
             &two_calls[..pos].ends_with("</tool_call>"),
             "should end at last </tool_call>, got: {:?}",
@@ -534,6 +539,7 @@ mod tests {
         );
         assert_eq!(&two_calls[pos..], "trailing");
 
+        // 三个并行调用，以空白/换行分隔。
         let three_calls = "<tool_call><function=a></function></tool_call>\n\
                            <tool_call><function=b></function></tool_call>\n\
                            <tool_call><function=c></function></tool_call> done";
@@ -545,9 +551,11 @@ mod tests {
         );
         assert_eq!(three_calls[pos3..].trim(), "done");
 
+        // 第二个调用不完整——应在第一个完整调用后停止。
         let incomplete = "<tool_call><function=a></function></tool_call>\
                           <tool_call><function=b>"; // no </tool_call>
         let pos_inc = find_tool_call_end_position_xml(incomplete, &config);
+        // 第一个完整调用在首个块的长度位置处结束。
         let first_end = "<tool_call><function=a></function></tool_call>".len();
         assert_eq!(
             pos_inc, first_end,
@@ -674,6 +682,7 @@ Orlando
 
     #[test] // PARSER.batch.7
     fn test_parse_json_parameter_value() {
+        // 使用 schema 感知解析，需提供 schema 来解析 JSON 对象
         let tools = vec![ToolDefinition {
             name: "process_data".to_string(),
             parameters: Some(serde_json::json!({
@@ -719,6 +728,7 @@ Orlando
 value
 </tool_call>"#;
 
+        // 应优雅处理——可能解析或返回空
         let result = try_tool_call_parse_xml(input, &XmlParserConfig::default(), None);
         assert!(result.is_ok());
     }
@@ -770,6 +780,7 @@ SELECT * FROM users
         assert_eq!(calls[0].function.name, "run_query");
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        // 与原始 SGLang Python 实现一致。
         assert_eq!(args["sql"], "SELECT * FROM users\n</tool_call>");
     }
 
@@ -789,9 +800,14 @@ rust programming
         assert_eq!(calls[0].function.name, "search");
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        // 与原始 SGLang Python 实现一致。
         assert_eq!(args["query"], "rust programming\n<parameter=limit>\n10");
     }
 
+    // 针对缺失外层 </tool_call>（max_tokens / EOS 截断）的恢复：
+    // 当内部函数块格式正确时，将 EOF 视为结束 token 并提取调用。
+    // 恢复由尾部切片中的函数起始标记控制入口，使恰好以 `<tool_call>` 开头的
+    // 纯文本仍被原样保留。
     #[test] // PARSER.batch.5 — qwen3_coder
     fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
@@ -812,6 +828,8 @@ NYC
         assert_eq!(args["city"], "NYC");
     }
 
+    // Qwen3-Coder 风格 XML 将首个已解析工具调用之后的文本视为
+    // 非内容，含 EOF 恢复后也是如此。
     #[test]
     fn test_parse_qwen3_no_outer_close_drops_suffix() {
         let input = "<tool_call>\n<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>\nTRAILING NOTE";
@@ -847,6 +865,8 @@ NYC
 
     #[test] // helper
     fn test_schema_aware_type_conversion() {
+        // 本测试对应 Python test_parse_streaming_increment_multiple_parameters，
+        // 来自 diff，展示了模式感知的类型转换。
         let tools = vec![ToolDefinition {
             name: "multi_param_func".to_string(),
             parameters: Some(serde_json::json!({
@@ -885,20 +905,28 @@ NYC
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
 
+        // param1 类型为 string，"42" 保持为字符串
         assert_eq!(args["param1"], "42");
 
+        // param2 类型为 float，41.9 解析为浮点数
         assert_eq!(args["param2"], 41.9);
 
+        // param3 类型为 integer，42 解析为整数
         assert_eq!(args["param3"], 42);
 
+        // param4 类型为 boolean，"true" 解析为布尔
         assert_eq!(args["param4"], true);
 
+        // param5 类型为 object，JSON 被解析
         assert_eq!(args["param5"], serde_json::json!({"key": "value"}));
 
+        // param6 类型为 array，JSON 数组被解析
         assert_eq!(args["param6"], serde_json::json!([1, 2, 3]));
 
+        // param7 类型为 null，"null" 解析为 null
         assert_eq!(args["param7"], serde_json::Value::Null);
 
+        // param8 为 other_type，用 literal_eval 转换 Python 风格 dict
         assert_eq!(
             args["param8"],
             serde_json::json!({"arg1": 3, "arg2": [1, 2]})
@@ -907,6 +935,7 @@ NYC
 
     #[test] // helper
     fn test_schema_aware_type_conversion_fallback() {
+        // 测试无效值带警告回退为字符串
         let tools = vec![ToolDefinition {
             name: "test_func".to_string(),
             parameters: Some(serde_json::json!({
@@ -933,13 +962,18 @@ NYC
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
 
+        // 全部应回退为字符串
         assert_eq!(args["int_param"], "not_an_int");
         assert_eq!(args["float_param"], "not_a_float");
+        // 无效值的 bool_param 默认为 false
         assert_eq!(args["bool_param"], false);
     }
 
     #[test] // helper
     fn test_anyof_param_parsed_as_object_not_string() {
+        // 当工具参数使用 "anyOf" 而非直接 "type" 时，值
+        // 应被 JSON 解析（视为对象），而非双重编码为字符串。
+        // 回归测试，针对：https://github.com/vllm-project/vllm/pull/36032
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             parameters: Some(serde_json::json!({
@@ -980,6 +1014,7 @@ NYC
         assert_eq!(calls.len(), 1);
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        // 必须是正确的对象，而非双重编码的字符串如 "{\"city\": \"Paris\"}"
         assert!(
             args["location"].is_object(),
             "Expected location to be an object, got: {}",
@@ -990,6 +1025,7 @@ NYC
 
     #[test] // helper
     fn test_no_schema_fallback_behavior() {
+        // 无 schema 时应与旧的 safe_parse_value 逻辑行为一致
         let input = r#"<tool_call>
 <function=unknown_func>
 <parameter=param1>42</parameter>
@@ -1003,11 +1039,16 @@ NYC
 
         let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
 
+        // 无 schema 时，所有值均作为字符串返回（无类型推断）
         assert_eq!(args["param1"], "42");
         assert_eq!(args["param2"], "true");
         assert_eq!(args["param3"], "hello");
     }
 
+    /// 以下新增边界情况测试（PARSER.batch.6 / PIPELINE.finish_reason / PARSER.batch.9
+    /// / PARSER.batch.10）的辅助函数——`allow_eof_recovery: false`，因为这些测试均
+    /// 不依赖 EOF 恢复。`test_parse_minimax_m2_no_outer_close_recovers` 中的内联配置
+    /// 保持该标志为 `true`，因为该测试专门练习恢复路径。
     fn minimax_m2_config() -> XmlParserConfig {
         XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -1020,6 +1061,8 @@ NYC
         }
     }
 
+    /// PARSER.batch.6 — 空参数。无参调用（无 `<parameter=...>` 块）
+    /// 仍应暴露函数名（带空参数）。
     #[test] // PARSER.batch.6 — qwen3_coder
     fn test_parse_qwen3_empty_args() {
         let input = r#"<tool_call>
@@ -1033,6 +1076,7 @@ NYC
         assert_eq!(args, serde_json::json!({}));
     }
 
+    /// PARSER.batch.6 — empty args, minimax_m2 format.
     #[test] // PARSER.batch.6 — minimax_m2
     fn test_parse_minimax_m2_empty_args() {
         let config = minimax_m2_config();
@@ -1045,6 +1089,10 @@ NYC
         assert_eq!(args, serde_json::json!({}));
     }
 
+    /// 解析器级不变量：xml 解析器是字节稳定的——不看 `finish_reason`，
+    /// 无论上游流结束原因如何输出均相同。实际的 PIPELINE.finish_reason 覆盖
+    /// （stop / tool_calls / length 映射）在 `lib/llm/tests/test_streaming_tool_parsers.rs`
+    /// 且属于跨解析器 finish_reason 映射工作项（单独跟踪）。
     #[test]
     fn test_xml_qwen3_parser_output_independent_of_upstream_finish() {
         let input = r#"<tool_call>
@@ -1058,6 +1106,7 @@ NYC
         assert_eq!(calls.len(), 1);
     }
 
+    /// 解析器级不变量——minimax_m2 变体。原理参见 qwen3 对应项。
     #[test]
     fn test_xml_minimax_m2_parser_output_independent_of_upstream_finish() {
         let config = minimax_m2_config();
@@ -1066,6 +1115,9 @@ NYC
         assert_eq!(calls.len(), 1);
     }
 
+    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
+    /// 空白输入不得产生工具调用；normal_text 折叠为空字符串。在 qwen3_coder 和
+    /// minimax_m2 两种配置下均验证。
     #[test] // PARSER.batch.9 — qwen3_coder
     fn test_parse_qwen3_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -1104,6 +1156,8 @@ NYC
         }
     }
 
+    /// PARSER.batch.10 — 重复调用（同一函数名两次）。qwen3_coder 格式；
+    /// 锁定解析器级行为——两次调用均返回且 ID 不同。
     #[test] // PARSER.batch.10 — qwen3_coder
     fn test_parse_qwen3_duplicate_calls_same_name() {
         let input = r#"<tool_call>
@@ -1132,6 +1186,8 @@ LA
         assert_eq!(args1["city"], "LA");
     }
 
+    /// PARSER.batch.10 — 重复调用（同一函数名两次）。minimax_m2 格式；
+    /// 锁定解析器级行为——两次调用均返回且 ID 不同。
     #[test] // PARSER.batch.10 — minimax_m2
     fn test_parse_minimax_m2_duplicate_calls_same_name() {
         let config = minimax_m2_config();

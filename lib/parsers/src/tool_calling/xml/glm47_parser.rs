@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::xml::glm47_parser
@@ -306,14 +306,17 @@ mod tests {
     fn test_detect_tool_call_start() {
         let config = get_test_config();
 
+        // 完整起始 token
         assert!(detect_tool_call_start_glm47(
             "<tool_call>get_weather",
             &config
         ));
 
+        // 部分起始 token（流式）
         assert!(detect_tool_call_start_glm47("Some text <tool", &config));
         assert!(detect_tool_call_start_glm47("Some text <tool_c", &config));
 
+        // 无工具调用
         assert!(!detect_tool_call_start_glm47("Just normal text", &config));
     }
 
@@ -449,24 +452,25 @@ mod tests {
     fn test_malformed_tool_call() {
         let config = get_test_config();
 
+        // 缺少结束标签
         let message = "<tool_call>get_weather";
         let result = try_tool_call_parse_glm47(message, &config, None);
-        assert!(result.is_ok()); // Should handle gracefully, no calls extracted
+        assert!(result.is_ok()); // 应优雅处理，不提取任何调用
 
         let (calls, _) = result.unwrap();
         assert_eq!(calls.len(), 0);
     }
 
-    // 针对缺失外层 `</tool_call>` 的恢复逻辑，也就是因 max_tokens 或 EOS 导致的截断：
-    // 当内部参数键值对本身格式完整时，将 EOF 视为结束 token，
-    // 并提取该工具调用。这里用 arg_key 的起始标记作为恢复门槛，
-    // 这样即使普通文本碰巧以 `<tool_call>` 开头，也仍会被原样保留。
+    // 针对缺失外层 </tool_call>（max_tokens / EOS 截断）的恢复：
+    // 当内部参数对格式正确时，将 EOF 视为结束 token 并提取调用。
+    // arg_key 起始标记控制恢复入口，使恰好以 `<tool_call>` 开头的纯文本仍被原样保留。
     #[test] // PARSER.batch.5
     fn test_parse_no_end_tag_complete_args_recovers() {
         let config = Glm47ParserConfig {
             allow_eof_recovery: true,
             ..get_test_config()
         };
+        // 参数完整，仅缺失外层 </tool_call>。
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>";
 
         let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
@@ -482,6 +486,7 @@ mod tests {
             allow_eof_recovery: true,
             ..get_test_config()
         };
+        // 两个完整内部调用，仅第二个缺失尾部的 </tool_call>。
         let message = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>tz</arg_key><arg_value>EST</arg_value>";
 
         let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
@@ -498,11 +503,13 @@ mod tests {
             parameters: None,
         }];
 
+        // 工具调用块引用了 tools 列表中不存在的函数
         let message = "Here is the result: <tool_call>unknown_func<arg_key>x</arg_key><arg_value>1</arg_value></tool_call> done";
         let (calls, normal_text) =
             try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
 
         assert_eq!(calls.len(), 0);
+        // 无法解析的块应保留在 normal_text 中，而非被丢弃
         let text = normal_text.unwrap();
         assert!(
             text.contains("unknown_func"),
@@ -550,9 +557,13 @@ mod tests {
         let args: HashMap<String, Value> =
             serde_json::from_str(&calls[0].function.arguments).unwrap();
 
+        // number 类型强制
         assert_eq!(args.get("degrees").unwrap().as_f64().unwrap(), 72.5);
+        // boolean 类型强制
         assert!(args.get("enabled").unwrap().as_bool().unwrap());
+        // integer 类型强制
         assert_eq!(args.get("count").unwrap().as_i64().unwrap(), 3);
+        // string 保持字符串
         assert_eq!(args.get("label").unwrap().as_str().unwrap(), "warm");
     }
 
@@ -569,6 +580,7 @@ mod tests {
             })),
         }];
 
+        // 模型发出逗号分隔的值，不含 JSON 括号
         let message = "<tool_call>tag_item<arg_key>tags</arg_key><arg_value>rust, python, go</arg_value></tool_call>";
         let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
 
@@ -594,6 +606,7 @@ mod tests {
             })),
         }];
 
+        // 模型发出正确的 JSON 数组
         let message = r#"<tool_call>tag_item<arg_key>ids</arg_key><arg_value>[1, 2, 3]</arg_value></tool_call>"#;
         let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
 
@@ -617,6 +630,7 @@ mod tests {
             })),
         }];
 
+        // "not_a_number" 无法解析为整数——应回退为字符串
         let message = "<tool_call>test_func<arg_key>count</arg_key><arg_value>not_a_number</arg_value></tool_call>";
         let (calls, _) = try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
 
@@ -628,13 +642,10 @@ mod tests {
         );
     }
 
-    /// Parser 级别的不变式：glm47 parser 是字节稳定的。
-    /// 它不会感知 `finish_reason`，并且无论上游流结束原因是什么，
-    /// 都会产生相同的输出。
-    ///
-    /// 真正的 PIPELINE.finish_reason 覆盖，也就是 stop / tool_calls / length
-    /// 的映射测试，位于 `lib/llm/tests/test_streaming_tool_parsers.rs`，
-    /// 并且属于跨 parser 的 finish_reason 映射工作项，已单独跟踪。
+    /// 解析器级不变量：glm47 解析器是字节稳定的——不看 `finish_reason`，
+    /// 无论上游流结束原因如何输出均相同。实际的 PIPELINE.finish_reason 覆盖
+    /// （stop / tool_calls / length 映射）在 `lib/llm/tests/test_streaming_tool_parsers.rs`
+    /// 且属于跨解析器 finish_reason 映射工作项（单独跟踪）。
     #[test]
     fn test_glm47_parser_output_independent_of_upstream_finish() {
         let config = get_test_config();
@@ -643,6 +654,8 @@ mod tests {
         assert_eq!(calls.len(), 1);
     }
 
+    /// PARSER.batch.9 — 空/null 内容变体。真正空（零字节）和纯空白输入
+    /// 不得产生工具调用；normal_text 折叠为空字符串。
     #[test] // PARSER.batch.9
     fn test_parse_glm47_empty_and_whitespace_inputs() {
         let config = get_test_config();
@@ -662,6 +675,8 @@ mod tests {
         }
     }
 
+    /// PARSER.batch.10 — 重复调用（同一函数名在一个区段内出现两次）。
+    /// 测试分类法中的通用缺口；锁定解析器级行为——两次调用均返回且 ID 不同。
     #[test] // PARSER.batch.10
     fn test_parse_glm47_duplicate_calls_same_name() {
         let config = get_test_config();

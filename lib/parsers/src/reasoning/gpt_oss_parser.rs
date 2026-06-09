@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # reasoning::gpt_oss_parser
@@ -244,6 +244,7 @@ impl ReasoningParser for GptOssReasoningParser {
                     let final_text = if current_content.is_empty() {
                         let tokens = parser.tokens();
 
+                        // " <|channel|>" 的 token id
                         let channel_token_id = enc
                             .tokenizer()
                             .encode_with_special_tokens("<|channel|>")
@@ -365,6 +366,7 @@ mod tests {
             .expect("Failed to get encoding");
         let token_ids = enc.tokenizer().encode_with_special_tokens(text);
 
+        // 逐个发送 token
         {
             let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
             let mut reasoning_text_incr = String::new();
@@ -378,12 +380,14 @@ mod tests {
                 reasoning_text_incr,
                 "User asks: \"Hey, quick check: is everything up and running?\" We should check system health using the provided function get_system_health. Use function."
             );
+            // [gluo TODO] 原始消息中缺失 "<|start|>assistant" 和 "{}"
             assert_eq!(
                 normal_text_incr,
                 "<|channel|>commentary to=functions.get_system_health <|constrain|>json<|message|>"
             );
         }
 
+        // 按 chunk 发送 token（分块方式来自实际模型输出）
         {
             let mut parser = GptOssReasoningParser::new().expect("Failed to create parser");
             let mut reasoning_text_incr = String::new();
@@ -401,6 +405,7 @@ mod tests {
                 ],
                 vec![12083],
             ];
+            // 拼接各 chunk token 并验证与原始 token_ids 一致
             let concatenated: Vec<u32> = chunk_tokens.iter().flatten().copied().collect();
             assert_eq!(concatenated, token_ids);
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::harmony::harmony_parser
@@ -107,25 +107,22 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 
 // === SECTION: 完整文本解析 ===
 
-/// 使用直接 token 解析，从完整的 Harmony Format 文本片段中解析工具调用。
+/// 使用直接 token 解析从完整 Harmony 格式文本 chunk 中提取工具调用。
 ///
-/// 该函数针对“内容已经一次性完整可用”的文本片段进行优化。
-/// 它使用 `parse_messages_from_completion_tokens` 将所有 token 直接解析为
-/// Harmony Format 消息，然后从 channel 为 `"commentary"` 且 recipient 为
-/// `"functions.*"` 的消息中提取工具调用。
+/// 本函数针对一次性传入全部内容的完整文本 chunk 做优化。它通过
+/// `parse_messages_from_completion_tokens` 直接将全部 token 解析为 Harmony 格式消息，
+/// 然后从带有 `"commentary"` channel 与 `"functions.*"` 接收者的消息中提取工具调用。
 ///
-/// 该函数不会执行起始 token 检测，也不会进行逐 token 的流式解析，
-/// 因此在处理完整文本片段时效率更高。
+/// 本函数不执行起始 token 检测，也不逐 token 流式处理，因此对完整 chunk 效率更高。
 ///
 /// # 参数
-/// * `text` - 要解析的完整 Harmony-format 字符串，不包含末尾的 stop token。
+/// * `text` - 待解析的完整 Harmony 格式字符串（不含尾部 stop token）。
 ///   示例：
 ///   `<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}`
-/// * `_config` - 解析器配置。目前未使用，但为了保持 API 一致性而保留。
-///
-/// # 返回
-/// * `Ok((tool_calls, normal_text))` - 包含已提取工具调用和普通文本的元组。
-/// * `Err(e)` - 如果由于编码或 tokenization 错误导致解析失败。
+/// * `_config` - 解析器配置（当前未使用，仅为 API 一致性保留）
+/// # Returns
+/// * `Ok((tool_calls, normal_text))` - Tuple containing extracted tool calls and any normal text
+/// * `Err(e)` - If parsing fails due to encoding or tokenization errors
 pub async fn parse_tool_calls_harmony_complete(
     text: &str,
     config: &JsonParserConfig,
@@ -209,6 +206,7 @@ pub async fn parse_tool_calls_harmony_complete(
                     tp: ToolCallType::Function,
                     function: CalledFunction {
                         name: fname.to_string(),
+                        // 安全：`Value::Object` 总是合法 JSON，序列化不可能失败
                         arguments: serde_json::to_string(&args).unwrap(),
                     },
                 });
@@ -348,6 +346,16 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
+    // Harmony 的 `<|call|>` 扮演外层结束 token 的角色。当 max_tokens 在其到达前触发时，
+    // 已有的 `analysis ... <|end|>` 信封仍给解析器足够上下文来恢复调用——
+    // 本测试锁定该恢复行为。裸信封变体（无前置 analysis 块）当前不恢复，
+    // 为其添加测试属于解析器变更讨论。
+    //
+    // 锁定两个连续 commentary 块的当前行为。harmony 解析器当前不提取两个调用——
+    // 第二个 `<|start|>assistant<|channel|>commentary` 块留在 normal_text 中。
+    // 与 PARSER.batch.5 同类故障：解析器丢弃进行中的工作，
+    // 用户看到 HTTP 200 但 tool_calls 少于模型实际发出。
+    // 将此提升为恢复能力属于解析器变更。
     #[tokio::test] // PARSER.batch.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
@@ -370,6 +378,8 @@ mod tests {
         assert_eq!(a1["y"], 2);
     }
 
+    // 锁定截断 JSON 参数的当前行为。harmony 当前直接丢弃调用，
+    // 而非回退为字符串参数或抛显式错误。
     #[tokio::test] // PARSER.batch.4 — gpt-oss
     async fn test_parse_harmony_truncated_json_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
@@ -389,6 +399,9 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
+    // 裸信封 PARSER.batch.5：无前置 `analysis` 块，无 `<|call|>`
+    // 在末尾。harmony 的 tokenizer 拒绝此输入；regex 回退路径
+    // accepts EOS as a synthetic close.
     #[tokio::test] // PARSER.batch.5 — gpt-oss
     async fn test_parse_harmony_bare_envelope_no_call_token_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
@@ -408,6 +421,8 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
+    // regex 回退路径必须将非工具区间（调用之前的散文、`<|call|>` 之后的后缀）
+    // 保留为 `normal_text`，而非置零。
     #[tokio::test]
     async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
         let text = r#"PREFIX <|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
@@ -448,6 +463,11 @@ mod tests {
         assert_eq!(args["unit"], "celsius");
     }
 
+    /// 解析器级不变量：harmony 解析器是字节稳定的——不看 `finish_reason`，
+    /// 无论上游流结束原因如何，输出均相同。实际的 PIPELINE.finish_reason 覆盖
+    /// （stop / tool_calls / length 映射）在
+    /// `lib/llm/tests/test_streaming_tool_parsers.rs` 且属于
+    /// 跨解析器 finish_reason 映射工作项（单独跟踪）。
     #[tokio::test]
     async fn test_harmony_parser_output_independent_of_upstream_finish() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
@@ -457,6 +477,7 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
     }
 
+    /// PARSER.batch.6 — 空参数。无参 harmony 调用（`{}`）仍应暴露函数名。
     #[tokio::test] // PARSER.batch.6 — gpt-oss
     async fn test_parse_harmony_empty_args() {
         let text =
@@ -470,6 +491,9 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
+    /// PARSER.batch.9 — 空/null 内容变体。真正空（零字节）和纯空白
+    /// 输入不得产生工具调用。与 XML/JSON 解析器（将空白 trim 为 `Some("")`）不同，
+    /// harmony 解析器将输入原样透传至 normal_text——此处锁定该区别。
     #[tokio::test] // PARSER.batch.9 — gpt-oss
     async fn test_parse_harmony_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -491,6 +515,8 @@ mod tests {
         }
     }
 
+    /// PARSER.batch.10 — 重复调用（同一函数名两次）。两次调用均返回，
+    /// 同一函数的连续 commentary 块。锁定解析器级行为——两次调用均返回且 ID 不同。
     #[tokio::test] // PARSER.batch.10 — gpt-oss
     async fn test_parse_harmony_duplicate_calls_same_name() {
         let text = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"NYC"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"LA"}<|call|>"#;
@@ -528,6 +554,8 @@ mod tests {
 
     #[test] // helper
     fn test_detect_tool_call_start_harmony_chunk_without_tool_call_start_token() {
+        // 这是当前的工作绕过方案。目前所有内容均被视为工具调用起始 token。
+        // 未来需改进。
         let text = r#"<|channel|>commentary to=functions.get_current_weather"#;
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
@@ -540,12 +568,14 @@ mod tests {
 
     #[test] // helper, PARSER.stream.3
     fn test_detect_tool_call_start_harmony_partial_tokens() {
+        // 验证流式场景中的部分 token 检测
         let config = JsonParserConfig {
             tool_call_start_tokens: vec!["<|start|>assistant<|channel|>commentary".to_string()],
             tool_call_end_tokens: vec!["<|call|>".to_string()],
             ..Default::default()
         };
 
+        // 验证 strict 模式下的各种部分前缀
         assert!(
             detect_tool_call_start_harmony("<", &config, true),
             "'<' should be detected as potential start"
@@ -563,6 +593,7 @@ mod tests {
             "'<|start|>assistant' should be detected as potential start"
         );
 
+        // 验证严格模式下无关文本不被检测
         assert!(
             !detect_tool_call_start_harmony("hello world", &config, true),
             "'hello world' should not be detected in strict mode"

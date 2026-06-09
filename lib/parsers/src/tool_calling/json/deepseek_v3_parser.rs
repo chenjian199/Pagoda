@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::json::deepseek_v3_parser
@@ -336,7 +336,6 @@ mod tests {
 
     #[test] // PARSER.batch.4 — recovery from missing start
     fn test_parse_tool_calls_deepseek_v3_without_tool_call_start_token() {
-        // 非法 JSON 时整体作为普通文本
         let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
 ```json
 }
@@ -349,7 +348,6 @@ mod tests {
 
     #[test] // PARSER.batch.2, PARSER.batch.7
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_multiple_args() {
-        // 非法 JSON 时整体作为普通文本
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
 ```json
 {"location": "Shanghai", "units": "metric"}
@@ -381,6 +379,7 @@ mod tests {
 
     #[test] // PARSER.batch.4
     fn test_parse_tool_calls_deepseek_v3_with_invalid_json() {
+        // 非法 JSON 时整体作为普通文本
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather}{location": "HongKong"}
 ```json
 }
@@ -393,6 +392,7 @@ mod tests {
 
     #[test] // PARSER.batch.2, PARSER.batch.8
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_normal_text() {
+        // 非法 JSON 时整体作为普通文本
         let text = r#"The following tool calls retrieve weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
 ```json
 }

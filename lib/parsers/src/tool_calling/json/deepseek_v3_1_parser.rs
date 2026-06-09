@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::json::deepseek_v3_1_parser
@@ -25,7 +25,6 @@ use uuid::Uuid;
 use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-
 
 // === SECTION: 调用块抽取 ===
 
@@ -136,6 +135,8 @@ pub fn parse_tool_calls_deepseek_v3_1(
     config: &JsonParserConfig,
     _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    // Format Structure:
+    // <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>{function_name}<｜tool▁sep｜>{json_arguments}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     let trimmed = message.trim();
 
     // 空输入直接返回

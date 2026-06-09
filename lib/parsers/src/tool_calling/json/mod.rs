@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::json
@@ -34,8 +34,10 @@ pub use deepseek_v3_parser::{detect_tool_call_start_deepseek_v3, parse_tool_call
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub enum JsonParserType {
+    // Basic 是通用 JSON 解析器，能处理大多数情况
     #[default]
     Basic,
+    // 模型专用 JSON 解析器
     DeepseekV3,
     DeepseekV31,
 }
@@ -61,7 +63,6 @@ pub fn detect_tool_call_start_json(chunk: &str, config: &JsonParserConfig) -> bo
         JsonParserType::DeepseekV31 => detect_tool_call_start_deepseek_v3_1(chunk, config),
     }
 }
-
 
 // === SECTION: 结束位置定位 ===
 
@@ -123,6 +124,7 @@ pub fn find_tool_call_end_position_json(
     }
 }
 
+// === SECTION: tests ===
 
 #[cfg(test)]
 mod tests {

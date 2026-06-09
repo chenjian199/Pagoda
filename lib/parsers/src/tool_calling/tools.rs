@@ -1,14 +1,21 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # tool_calling::tools
+//! # 工具调用公共入口
 //!
 //! ## 设计意图
+//! 为聚合（aggregate）与流式（stream）两类调用路径提供门面函数，把内部解析得到的
+//! [`ToolCallResponse`] 适配为 `pagoda_protocols` 中对应的对外协议类型。
 //!
 //! ## 外部契约
+//! - `try_tool_call_parse_aggregate`：非恢复模式，供流式 jail 早退判定使用，返回
+//!   `ChatCompletionMessageToolCall` 列表与剩余文本。
+//! - `try_tool_call_parse_aggregate_finalize`：启用 EOF 恢复，供流结束 / 非流式聚合路径使用。
+//! - `try_tool_call_parse_stream`：返回 `ChatCompletionMessageToolCallChunk` 列表（带 index）。
 //!
 //! ## 实现要点
 //! - 三个入口的「解析 → 转换 → 打包」流程高度同构，故抽出私有助手集中表达类型转换，
+//!   各入口只负责选择解析策略（是否恢复、是否带流式 index）。
 
 use pagoda_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,

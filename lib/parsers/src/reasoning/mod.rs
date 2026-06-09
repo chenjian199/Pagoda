@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! ## 设计意图
@@ -21,12 +21,16 @@ mod gpt_oss_parser;
 mod granite_parser;
 mod minimax_append_think_parser;
 
+// 为方便起见重导出主要类型与函数
 pub use base_parser::BasicReasoningParser;
 pub use gemma4_parser::Gemma4ReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
 pub use granite_parser::GraniteReasoningParser;
 pub use minimax_append_think_parser::MiniMaxAppendThinkParser;
 
+/// Kimi-K2/K2.5 工具调用区段标记。由 `kimi_k25` 推理解析器注册项与其测试 fixture
+/// 共享，保证两者同步。与 `crate::tool_calling::config` 中
+/// `KimiK2ParserConfig::default().section_start` 一致。
 pub(crate) const KIMI_K2_TOOL_SECTION_BEGIN: &str = "<|tool_calls_section_begin|>";
 
 static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
@@ -38,12 +42,12 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
     // `BasicReasoningParser` 配置。仍通过专用 `DeepSeekV4` 变体路由而非硬别名到 `Qwen`，
     // 使未来分歧（不同特殊 token、max-thinking 模式等）有落点而不波及 Qwen 自身配置。
     //
-    // 三个名称别名的存在是因为调用方通过 `--dyn-reasoning-parser` / `--reasoning-parser`
+    // 三个名称别名的存在是因为调用方通过 `--reasoning-parser` / `--reasoning-parser`
     // 传入 HF 模型 / vLLM 配方 / chat-template 作者所选的任意字符串。我们接受全部三种分隔
     // 约定（snake / kebab / concat），而非强制用户使用单一规范形式。
     //
     // Gemma 4 thinking 模型：推理被 `<|channel>...<channel|>` 包裹，带 `thought\n` 角色标签
-    // 由解析器剥除。与 `--dyn-tool-call-parser gemma4` 搭配以实现端到端 Gemma 4 支持。
+    // 由解析器剥除。与 `--tool-call-parser gemma4` 搭配以实现端到端 Gemma 4 支持。
     REASONING_PARSER_MAP.get_or_init(|| {
         use ReasoningParserType::*;
         [
@@ -60,10 +64,10 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
             ("step3", Step3),
             ("mistral", Mistral),
             ("granite", Granite),
-            ("nemotron_nano", DeepseekR1), // nemotron nano is ...</think>
+            ("nemotron_nano", DeepseekR1), // nemotron nano 使用 </think> 结束标记
             ("nemotron3", DeepseekR1),
             ("nemotron_v3", DeepseekR1),
-            ("glm45", NemotronDeci), // GLM-4.5/5 is <think>...</think>, no force_reasoning
+            ("glm45", NemotronDeci), // GLM-4.5/5 使用 <think>...</think>，不启用 force_reasoning
             ("minimax_append_think", MiniMaxAppendThink),
             ("gemma4", Gemma4),
             ("gemma-4", Gemma4),
@@ -73,13 +77,17 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
     })
 }
 
+/// 获取全部可用的推理解析器名称
 pub fn get_available_reasoning_parsers() -> Vec<&'static str> {
     get_reasoning_parser_map().keys().copied().collect()
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ParserResult {
+    /// 推理块之外的普通文本。
     pub normal_text: String,
+
+    /// 从推理块内部提取的已解析推理文本。
     pub reasoning_text: String,
 }
 
@@ -94,14 +102,24 @@ impl ParserResult {
 }
 
 pub trait ReasoningParser: Send + std::fmt::Debug {
+    /// 解析一个独立的非流式输入块。实现可以重置或忽略内部流式状态，
+    /// 并应返回本次完整输入的普通文本与推理文本的切分结果。
+    /// 标记 token 不得出现在任一输出中。
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult;
 
+    /// 解析一个流式 chunk 并更新内部状态。返回值应为增量 delta：
+    /// 仅包含本 chunk 新发现的普通文本与推理文本（而非累计总和）。
+    /// 标记 token 不得出现在任一输出中。
     fn parse_reasoning_streaming_incremental(
         &mut self,
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult;
 
+    /// 覆盖解析器的初始推理状态。当以 `true` 调用时，解析器在推理模式下启动，
+    /// 无需等待补全流中的起始 token。
+    /// 当 chat template 已将起始 token（如 `<think>`）注入 prompt、
+    /// 因而它不会出现在模型输出中时使用。
     fn set_in_reasoning(&mut self, _in_reasoning: bool) {
         // 默认空操作：用于不支持按请求覆盖的解析器。
     }
@@ -157,6 +175,7 @@ impl ReasoningParser for ReasoningParserWrapper {
 
 impl ReasoningParserType {
     pub fn get_reasoning_parser(self) -> ReasoningParserWrapper {
+        // 把任意 `ReasoningParser` 装箱为统一包装器。
         fn wrap(parser: impl ReasoningParser + 'static) -> ReasoningParserWrapper {
             ReasoningParserWrapper {
                 parser: Box::new(parser),
@@ -245,6 +264,7 @@ mod tests {
     fn test_get_available_reasoning_parsers() {
         let parsers = get_available_reasoning_parsers();
         assert!(!parsers.is_empty());
+        // 新增解析器时务必同步更新此列表
         let available_parsers = [
             "deepseek_r1",
             "basic",
@@ -310,6 +330,7 @@ mod tests {
 
     #[test] // REASONING.batch.1
     fn test_kimi_k25_detect_and_parse() {
+        // (description, input, expected_reasoning, expected_normal)
         let cases = [
             (
                 "force reasoning: no think tags",
@@ -350,16 +371,20 @@ mod tests {
 
     #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_kimi_k25_streaming_force_reasoning() {
+        // 流式：force_reasoning 意味着 <think> 之前的 token 也视为推理
         let mut parser = ReasoningParserType::KimiK25.get_reasoning_parser();
 
+        // 首个 chunk：部分 think 标签——因是 "<think>" 的前缀而被缓冲
         let r1 = parser.parse_reasoning_streaming_incremental("<thi", &[]);
         assert_eq!(r1.reasoning_text, "");
         assert_eq!(r1.normal_text, "");
 
+        // 第二个 chunk：补全 think 标签 + 推理内容
         let r2 = parser.parse_reasoning_streaming_incremental("nk>reasoning here", &[]);
         assert_eq!(r2.reasoning_text, "reasoning here");
         assert_eq!(r2.normal_text, "");
 
+        // 第三个 chunk：闭合标签 + 普通内容
         let r3 = parser.parse_reasoning_streaming_incremental("</think>Hello!", &[]);
         assert_eq!(r3.reasoning_text, "");
         assert_eq!(r3.normal_text, "Hello!");
@@ -367,6 +392,7 @@ mod tests {
 
     #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_kimi_k25_streaming() {
+        // (描述, token列表, 预期推理文本, 预期普通文本)
         let cases: Vec<(&str, &[&str], &str, &str)> = vec![
             (
                 "complete response",
@@ -409,6 +435,7 @@ mod tests {
 
     #[test] // registry lookup
     fn test_kimi_k25_parser_lookup_by_name() {
+        // 验证可通过名称查找到解析器
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("kimi_k25");
         let result = parser.detect_and_parse_reasoning("<think>thinking</think>answer", &[]);
         assert_eq!(result.reasoning_text, "thinking");
@@ -417,22 +444,29 @@ mod tests {
 
     #[test] // PARSER.fmt.3 — token-spelling differences across model variants
     fn test_kimi_vs_kimi_k25_different_tags() {
+        // Kimi（原始）使用 ◁think▷/◁/think▷，KimiK25 使用 <think>/</think>
         let mut kimi = ReasoningParserType::Kimi.get_reasoning_parser();
         let mut kimi_k25 = ReasoningParserType::KimiK25.get_reasoning_parser();
 
+        // Kimi 原始版不解析 <think> 标签
         let r_kimi = kimi.detect_and_parse_reasoning("<think>reasoning</think>answer", &[]);
         assert_eq!(r_kimi.normal_text, "<think>reasoning</think>answer");
         assert_eq!(r_kimi.reasoning_text, "");
 
+        // KimiK25 解析 <think> 标签
         let r_k25 = kimi_k25.detect_and_parse_reasoning("<think>reasoning</think>answer", &[]);
         assert_eq!(r_k25.reasoning_text, "reasoning");
         assert_eq!(r_k25.normal_text, "answer");
     }
 
+    // 场景 1：force_reasoning + set_in_reasoning 的正常流式流程。
+    // 模拟 OpenAI 路径：预处理器检测到 prompt 中已注入推理标记
+    // 并调用 set_in_reasoning(true)。解析器应正确
+    // 将首个块识别为推理内容，并在 </think> 到达时从推理过渡到普通文本。
     #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_nemotron_streaming_with_set_in_reasoning() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
-        parser.set_in_reasoning(true); // OpenAI path calls this
+        parser.set_in_reasoning(true); // OpenAI 路径调用此方法
 
         let tokens = &["Think", "ing about", " this", ".\n\n", "</think>", "Four"];
 
@@ -447,8 +481,13 @@ mod tests {
         assert_eq!(all_content, "Four");
     }
 
+    // 场景 2：force_reasoning 但无 set_in_reasoning 的流式流程。
+    // 模拟 Anthropic 路径 bug：thinking_enabled=false 且 set_in_reasoning 从未被调用。
+    // 解析器仍以推理模式启动（force_reasoning=true），但 stripped_think_start=false。
+    // </think> 边界仍需被正确检测。
     #[test] // REASONING.stream.3, REASONING.batch.1
     fn test_nemotron_streaming_force_reasoning_without_set_in_reasoning() {
+        // DeepseekR1 有 force_reasoning=true 但我们不调用 set_in_reasoning
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
 
         let tokens = &["Think", "ing about", " this", ".\n\n", "</think>", "Four"];
@@ -464,11 +503,16 @@ mod tests {
         assert_eq!(all_content, "Four");
     }
 
+    // 场景 3：</think> 逐 token 跨块切分。
+    // '</think>' 中的 '<' 是 '<think>' 的前缀。当 stripped_think_start
+    // 为 false 时，解析器的前缀检查可能缓冲 '<' 并干扰
+    // </think> 检测。本测试验证即使 </think> 以单个字符到达，边界也能被正确检测。
     #[test] // REASONING.stream.3, helper
     fn test_nemotron_streaming_split_end_think_tokens() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true);
 
+        // 模拟逐 token 到达，含 </think> 跨 chunk 切分
         let tokens = &[
             "reason", "ing", " done", ".", "</", "think", ">", "Hello", " world",
         ];
@@ -484,6 +528,10 @@ mod tests {
         assert_eq!(all_content, "Hello world");
     }
 
+    // 场景：vLLM 的 Nemotron v3 解析器为 force-reasoning。模型可能
+    // 直接以推理文本开始，仅发出闭合的 </think> 边界，
+    // 也可能发出完整的 <think>...</think> 块。两种形式
+    // 都应切分为 </think> 之前的 reasoning_content 和之后到达的 normal_text。
     #[test] // CASE.10 — vLLM nemotron_v3 parity
     fn test_nemotron_v3_detect_and_parse_vllm_cases() {
         let cases = [
@@ -515,6 +563,10 @@ mod tests {
         }
     }
 
+    // 场景：与非流式测试相同的 vLLM Nemotron v3 契约，但
+    // 以流式 delta 方式执行。验证解析器在多次调用间保持状态，
+    // 处理跨块边界的 prompt-injected reasoning（输出中无起始 <think>）
+    // 和显式 <think> 输出两种情况。
     #[test] // CASE.8, CASE.10 — vLLM nemotron_v3 parity
     fn test_nemotron_v3_streaming_vllm_cases() {
         let cases: Vec<(&str, &[&str], &str, &str)> = vec![
@@ -558,11 +610,16 @@ mod tests {
         }
     }
 
+    // P2-1：V4 生产场景——prompt 以 <think> 结尾，因此流在推理块内部开始
+    // （无起始 <think> 标记）。调用方通过 set_in_reasoning(true) 初始化解析器；
+    // </think> 之前的所有字节路由到 reasoning_content，之后的所有字节路由到 normal_text。
     #[test]
     fn test_deepseek_v4_streaming_with_set_in_reasoning() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
         parser.set_in_reasoning(true);
 
+        // 逐 token 流式，以原始推理起始（无 <think> 前缀），
+        // </think> 在中间，然后是 normal_text。
         let tokens = &[
             "Wei", "gh", "ing ", "options", ".", "</think>", "Bei", "jing", " is", " sunny.",
         ];

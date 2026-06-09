@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # tool_calling::json::base_json_parser
@@ -31,12 +31,14 @@ use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
 // === SECTION: 公共 serde 载荷结构 ===
 
+// 与 CalledFunction 同形，使用 parameters 字段名
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CalledFunctionParameters {
     pub name: String,
     pub parameters: HashMap<String, Value>,
 }
 
+// 与 CalledFunction 同形，使用 arguments 字段名
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CalledFunctionArguments {
     pub name: String,
@@ -71,16 +73,17 @@ fn extract_tool_call_content(input: &str, start_token: &str, end_token: &str) ->
     }
 }
 
-/// 将 EOF 视为结束 token 的恢复逻辑——仅用于最终收尾路径。
-/// 当外层 end-token 一直没有出现时，返回 `start_token` 之后看起来像 JSON 的尾部内容。
-/// 该逻辑受 `JsonParserConfig::allow_eof_recovery` 控制，避免流式解析在真正的
-/// end-token 出现之前，于流中间过早触发提前结束。
+/// EOF 作结束 token 恢复——仅限收尾路径使用。在外部结束 token 从未到达时，
+/// 返回 `start_token` 之后的 JSON 形态尾部。受 `JsonParserConfig::allow_eof_recovery` 控制，
+/// 使流式早退不会在结束 token 出现前中途触发。
 fn extract_tool_call_content_eof_recovery(input: &str, start_token: &str) -> Option<String> {
     let start_pos = input.find(start_token)?;
     let tail = input[start_pos + start_token.len()..].trim();
     (tail.starts_with('{') || tail.starts_with('[')).then(|| tail.to_string())
 }
 
+// 特例：`<|python_tag|>`。正则模式对此标记效果不佳（它无结束 token）。
+// 处理 `<|python_tag|>` 这类单一起始 token 的单次与多次工具调用。
 fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<String> {
     // 不含起始 token 直接放弃
     if !input.contains(start_token) {
@@ -125,11 +128,9 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
     Some(format!("[{}]", items.join(",")))
 }
 
-/// 尝试修复因 max_tokens 限制或 EOS 导致截断的 JSON。
-/// 该函数会遍历输入内容，跟踪字符串状态以及大括号/方括号的嵌套层级；
-/// 到达 EOF 时，会闭合尚未结束的字符串，并补齐所有未闭合的右括号。
-/// 只有在确实需要追加至少一个闭合符时，才返回 `Some(repaired)`，
-/// 这样可以避免对本来已经合法的 JSON 进行不必要的改写。
+/// 尝试修复因 max_tokens / EOS 截断的 JSON。遍历输入并跟踪字符串状态与
+/// 花括号/方括号嵌套层级；在 EOF 处闭合所有打开的字符串并补齐未闭合的配对符号。
+/// 仅在至少需要追加一个闭合符时才返回 `Some(repaired)`（避免对已合法的 JSON 做无意义处理）。
 pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     let mut closers: Vec<char> = Vec::new();
     let mut in_string = false;
@@ -166,8 +167,8 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
     }
 
     let mut repaired = s.to_string();
-    // EOF 出现在转义序列中间：用另一个 `\` 与末尾残留的 `\` 配对，
-    // 这样下一步追加的右引号就不会被这个反斜杠转义掉。
+    // EOF 中遇到转义序列：将尾部的 `\` 与另一个 `\` 配对，
+    // 使后续追加的闭合引号不会被错误转义。
     if escape {
         repaired.push('\\');
     }
@@ -197,6 +198,7 @@ fn make_tool_call(name: String, arguments: HashMap<String, Value>) -> anyhow::Re
         tp: ToolCallType::Function,
         function: CalledFunction {
             name,
+            // 保留内嵌 JSON 字符串原样；不进行双重转义。
             arguments: serde_json::to_string(&arguments)?,
         },
     })
@@ -361,12 +363,12 @@ pub fn detect_tool_call_start_basic_json(chunk: &str, config: &JsonParserConfig)
         return false;
     }
 
+    // 命中任意完整起始 token 直接判定
     let contains_complete_token = config
         .tool_call_start_tokens
         .iter()
         .any(|token| !token.is_empty() && trimmed.contains(token));
 
-    // 命中任意完整起始 token 直接判定
     if contains_complete_token {
         return true;
     }
@@ -487,6 +489,7 @@ mod tests {
             ),
             // 流式误报可接受
             (r#"Here it is { Whats up"#, "<tool_call>", "</tool_call>", true),
+            // phi4 部分 token：fun / func / f / 结尾 fun
             (r#"fun"#, "functools", "", true),
             (r#"func"#, "functools", "", true),
             (r#"f"#, "functools", "", true),
