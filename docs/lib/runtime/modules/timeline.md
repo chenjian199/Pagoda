@@ -1,24 +1,131 @@
 # `timeline` 模块设计文档
 
-**源码位置**：`lib/runtime/src/timeline.rs`（当前实现规模约 200 行）
+**源码位置**：`lib/runtime/src/timeline/`（多文件模块）
 
 ---
 
 ## 一、设计背景
 
-LLM 推理链路中，性能分析工具（如 NVIDIA Nsight Systems）需要在时间线上标出有意义的区间（range），让性能工程师直观看到 `tokenize`、`prefill`、`decode` 等阶段的耗时分布，而不是面对一片无业务语义的 CUDA 内核调用。
+LLM 推理链路中，性能分析工具（如 NVIDIA Nsight Systems、华为 Ascend Insight 等）需要在时间线上标出有意义的区间（range），让性能工程师直观看到 `tokenize`、`prefill`、`decode` 等阶段的耗时分布，而不是面对一片无业务语义的底层内核调用。
 
-`timeline` 模块的职责就是提供这一层**时间线标注能力**。在 Pagoda 的目标设计里，对外暴露的是统一的 timeline 抽象；底层仍可继续委托 NVTX 后端（例如 `cudarc::nvtx`）向 Nsight Systems 发出标注。这样做的好处是：上层代码只依赖“时间线事件”语义，不直接耦合具体分析后端名称。
+`timeline` 模块的职责就是提供这一层**统一的时间线标注能力**。对外暴露的是不变的 timeline 语义（push/pop/range/name_thread）；底层则可以挂载不同的分析器后端（NVTX、华为 Ascend、以及其它厂商），做到**上层代码零改动切换分析后端**。
 
-但时间线标注在生产部署中通常不需要，且底层 NVTX C API 调用存在固定开销。因此 Pagoda 采用**两级门控**：编译期开关 + 运行时开关。未启用时，标注能力要么在编译期被完全消除，要么只保留一次极轻量的原子读判断。
+时间线标注在生产部署中通常不需要，且底层 C API 调用存在固定开销。因此 Pagoda 采用**两级门控**：编译期开关 + 运行时开关。未启用时，标注能力要么在编译期被完全消除，要么只保留一次极轻量的原子读判断。
 
 ---
 
-## 二、两级门控机制
+## 二、文件结构（一个分析器一个文件）
+
+```
+lib/runtime/src/timeline/
+├── mod.rs              # 模块入口：trait 定义、门控逻辑、公开宏
+├── guard.rs            # TimelineRangeGuard — RAII 区间守护
+├── backends/
+│   ├── mod.rs          # 后端注册与 dispatch
+│   ├── nvtx.rs         # NVIDIA NVTX 后端 (Nsight Systems)
+│   ├── ascend.rs       # 华为 Ascend 后端 (Ascend Insight / msprof)
+│   └── noop.rs         # 空后端：编译占位，所有调用均为空操作
+└── README.md           # （可选）模块使用说明
+```
+
+**设计原则**：
+- `mod.rs` 只包含 trait 定义、`AtomicBool` 门控、`init()`、以及四个公开宏——**不包含任何后端特定代码**。
+- 每个后端独立一个文件，实现同一个 `TimelineBackend` trait。
+- 新增后端只需添加一个新文件 + 在 `backends/mod.rs` 中注册一个 `#[cfg(feature = "...")]` 编译条件分支。
+- 公开宏的签名和行为**永不改变**，业务代码零感知。
+
+---
+
+## 三、`TimelineBackend` trait — 统一后端契约
+
+所有分析器后端实现同一个 trait，位于 `mod.rs`：
+
+```rust
+/// 时间线分析后端的统一抽象。
+///
+/// 每个后端实现者只需提供三个函数：
+/// - `range_push` / `range_pop`：在线程局部栈上压入/弹出命名区间；
+/// - `name_os_thread`：给 OS 线程赋予可读名称。
+///
+/// 这些函数假设调用方已经完成了"是否启用"的门控判断，
+/// 因此后端实现不需要再检查 `TIMELINE_ENABLED`。
+pub trait TimelineBackend: Send + Sync + 'static {
+    /// 压入一个命名区间，返回一个不透明 id（后端用于匹配 push/pop）。
+    fn range_push(name: &str) -> u64;
+
+    /// 弹出最内层区间。
+    fn range_pop();
+
+    /// 给指定 OS 线程赋予可读名称。
+    fn name_os_thread(tid: u32, name: &str);
+}
+```
+
+**设计考量**：
+- trait 方法均为关联函数（无 `&self`），因为底层 profiler API（NVTX、msprof 等）都是基于线程局部状态的 C 调用，不需要实例状态。
+- `range_push` 返回 `u64` 作为 opaque id：某些后端（如 NVTX）确实返回 id 用于校验；不需要此 id 的后端直接返回 0 即可。
+- trait 绑定 `Send + Sync + 'static`，确保可以在多线程运行时环境下安全持有后端句柄（尽管当前设计不需要持有实例）。
+
+---
+
+## 四、后端选择：编译期 feature gate
+
+后端通过 Cargo feature 在编译期选定，不同 feature 之间**互斥**：
+
+```toml
+# Cargo.toml (runtime)
+[features]
+timeline = []              # 总开关：启用 timeline 模块（不含具体后端，默认选中 noop）
+timeline-nvtx = ["timeline", "dep:cudarc"]
+timeline-ascend = ["timeline"]
+```
+
+`backends/mod.rs` 中通过条件编译选择后端：
+
+```rust
+#[cfg(feature = "timeline-nvtx")]
+mod nvtx;
+#[cfg(feature = "timeline-nvtx")]
+pub(crate) use nvtx::NvtxBackend as ActiveBackend;
+
+#[cfg(feature = "timeline-ascend")]
+mod ascend;
+#[cfg(feature = "timeline-ascend")]
+pub(crate) use ascend::AscendBackend as ActiveBackend;
+
+// 默认：无具体后端选中时使用空后端
+#[cfg(not(any(feature = "timeline-nvtx", feature = "timeline-ascend")))]
+mod noop;
+#[cfg(not(any(feature = "timeline-nvtx", feature = "timeline-ascend")))]
+pub(crate) use noop::NoopBackend as ActiveBackend;
+```
+
+`mod.rs` 中的 `push_impl` / `pop_impl` / `name_current_thread_impl` 统一委托给 `ActiveBackend`：
+
+```rust
+#[cfg(feature = "timeline")]
+mod backends;
+
+#[inline(always)]
+pub fn push_impl(name: &str) {
+    #[cfg(feature = "timeline")]
+    {
+        if TIMELINE_ENABLED.load(Ordering::Relaxed) {
+            backends::ActiveBackend::range_push(name);
+        }
+    }
+}
+```
+
+这样每个后端的代码完全隔离在自己的文件中，新增后端不影响已有后端，也不会改动 `mod.rs` 的核心流程。
+
+---
+
+## 五、两级门控机制（不变）
 
 ### 第一级：Cargo feature gate
 
-当 `timeline` Cargo feature 未启用时，`AtomicBool`、`cudarc` 依赖以及所有 `#[cfg(feature = "timeline")]` 代码块都在编译期被消除。四个公开宏全部展开为空 `{}`，优化后不生成任何实际指令，因此普通生产构建（不带 `--features timeline`）对推理吞吐量没有影响。
+`timeline` feature 未启用时，所有 `#[cfg(feature = "timeline")]` 代码块在编译期消除。四个公开宏展开为 `{}`，不生成任何指令。
 
 ### 第二级：运行时环境变量
 
@@ -36,27 +143,27 @@ pub fn init() {
 }
 ```
 
-当 `timeline` feature 已编译进二进制但未设置环境变量时，`TIMELINE_ENABLED` 保持 `false`。每次标注调用只需一次 `Ordering::Relaxed` 原子读取，代价接近一次普通内存读。只有当 `PGD_ENABLE_RUST_TIMELINE=1`（或 `true` / `yes` / `on`）时，底层后端才真正发出时间线标注。
-
-这种两级设计允许同一个带 `timeline` feature 的二进制在“日常运行”和“临时性能分析”之间切换，而无需重新编译，适合线上节点临时打开分析窗口的场景。
-
-**为什么使用 `Relaxed` ordering**：这个开关在进程启动时写入一次，后续只有读取，不承担跨线程同步其他状态的职责，因此不需要 acquire/release 语义。
+`Ordering::Relaxed` 原因：开关在进程启动时写入一次，后续只有读取，不承担跨线程同步职责。
 
 ---
 
-## 三、公开 API
+## 六、公开 API（对外契约，保持不变）
 
-### `init()` — 在运行时启动阶段初始化
+### `init()`
 
-`init()` 从环境变量读取开关并设置 `TIMELINE_ENABLED`。`Runtime::new()` 在构造时自动调用 `timeline::init()`，因此大多数调用方不需要手工初始化。非 `timeline` feature 场景下，`init()` 是空函数。
+`Runtime::new()` 自动调用，一般不需要手工初始化。
 
-### `push_impl` / `pop_impl` — 线程局部区间栈
+### `push_impl` / `pop_impl`
 
-时间线后端在每个 OS 线程上维护一个 range 栈。`push_impl(name)` 将命名区间压入当前线程，`pop_impl()` 弹出最内层区间。性能分析器据此构建可视化的嵌套时间线。
+```rust
+#[inline(always)]
+pub fn push_impl(name: &str) { /* -> ActiveBackend::range_push */ }
 
-两者都应标注 `#[inline(always)]`，这样在 feature 关闭时可以被完全内联并消除，避免残留函数调用成本。
+#[inline(always)]
+pub fn pop_impl() { /* -> ActiveBackend::range_pop */ }
+```
 
-### `name_current_thread_impl` — 当前线程命名
+### `name_current_thread_impl`
 
 ```rust
 pub fn name_current_thread_impl(name: &str) {
@@ -65,23 +172,15 @@ pub fn name_current_thread_impl(name: &str) {
         if TIMELINE_ENABLED.load(Ordering::Relaxed) {
             #[cfg(target_os = "linux")]
             let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
-            timeline_backend::name_os_thread(tid, name);
+            backends::ActiveBackend::name_os_thread(tid, name);
         }
     }
 }
 ```
 
-性能分析器默认只显示线程 ID，不利于识别 Tokio worker、IO 线程、控制线程等角色。通过 `name_current_thread_impl` 给线程打上稳定名称后，时间线就能直接体现线程职责。
+### `TimelineRangeGuard`（`guard.rs`）
 
-在 Linux 下应使用 `SYS_gettid` 取得内核级线程 ID；因为底层后端命名接口面向 OS 线程而不是 pthread 抽象。
-
----
-
-## 四、`TimelineRangeGuard` — RAII 防止 push/pop 不匹配
-
-手工调用 `push_impl` / `pop_impl` 的最大风险在于：如果中间路径发生早退、`return`、`?` 传播错误，`pop_impl()` 可能不会执行，导致线程局部 range 栈失衡，进而让时间线显示错乱。
-
-因此模块提供 `TimelineRangeGuard`：
+RAII 守护，构造时 push，`Drop` 时 pop。`timeline` feature 关闭时为零大小类型。
 
 ```rust
 #[cfg(feature = "timeline")]
@@ -91,15 +190,7 @@ pub struct TimelineRangeGuard { active: bool }
 pub struct TimelineRangeGuard;
 ```
 
-构造时若开关已启用则压栈，并把 `active` 记录下来；`Drop` 时仅在 `active = true` 的情况下弹栈。这样既能防止忘记 `pop`，又能避免在 `init()` 之前误创建 guard 时产生额外的弹栈操作。
-
-当 `timeline` feature 关闭时，`TimelineRangeGuard` 是零大小类型，编译器会把它和相关逻辑全部优化掉。
-
----
-
-## 五、宏接口
-
-四个宏是该模块面向业务代码的主要入口：
+### 宏接口（不变）
 
 ```rust
 let _r = pagoda_timeline_range!("preprocess.tokenize");
@@ -111,27 +202,138 @@ pagoda_timeline_pop!();
 pagoda_timeline_name_thread!("decode-worker-0");
 ```
 
-- `pagoda_timeline_range!`：推荐默认使用，依赖 RAII 自动闭合区间；
-- `pagoda_timeline_push!` / `pagoda_timeline_pop!`：用于跨函数边界、无法自然包裹作用域的场景；
-- `pagoda_timeline_name_thread!`：给当前线程写入可读名称。
+---
 
-选择宏而不是普通函数的原因是：当 `timeline` feature 关闭时，宏可以直接展开为空，不仅函数调用被消除，连参数求值也不会发生，从而实现真正的零开销。
+## 七、各后端实现概要
+
+### 7.1 NVTX 后端 (`backends/nvtx.rs`)
+
+- **目标分析器**：NVIDIA Nsight Systems
+- **底层依赖**：`cudarc::nvtx::result::range_push` / `range_pop` / `name_os_thread`
+- **运行时依赖**：`libnvToolsExt.so`（来自 CUDA Toolkit 或 NVHPC）
+- **编译**：`cargo build --features timeline-nvtx`
+- **实现要点**：直接委托 `cudarc::nvtx`，无额外逻辑。
+
+```rust
+// backends/nvtx.rs (示意)
+use cudarc::nvtx::result::{range_push, range_pop, name_os_thread};
+
+pub struct NvtxBackend;
+
+impl TimelineBackend for NvtxBackend {
+    fn range_push(name: &str) -> u64 {
+        range_push(name)
+    }
+    fn range_pop() {
+        range_pop();
+    }
+    fn name_os_thread(tid: u32, name: &str) {
+        name_os_thread(tid, name);
+    }
+}
+```
+
+### 7.2 华为 Ascend 后端 (`backends/ascend.rs`)
+
+- **目标分析器**：Ascend Insight / msprof（华为昇腾性能分析工具链）
+- **底层依赖**：`libmsprof.so` 的 C API，通过 FFI 绑定调用
+- **运行时依赖**：`libmsprof.so`（来自 Ascend Toolkit）
+- **编译**：`cargo build --features timeline-ascend`
+- **实现要点**：
+  - 通过 Rust FFI 声明 `extern "C"` 函数链接 `libmsprof.so` 中的标注接口；
+  - 使用 `libloading` 延迟加载，避免在没有 Ascend 环境的节点上启动失败；
+  - 若动态库加载失败，静默降级为空操作。
+
+```rust
+// backends/ascend.rs (示意)
+use std::sync::OnceLock;
+use std::ffi::c_char;
+
+static MSPROF_FNS: OnceLock<Option<MsprofFnTable>> = OnceLock::new();
+
+struct MsprofFnTable {
+    range_push: unsafe extern "C" fn(*const c_char) -> u64,
+    range_pop:  unsafe extern "C" fn(),
+    name_thread: unsafe extern "C" fn(u32, *const c_char),
+}
+
+fn get_fns() -> Option<&'static MsprofFnTable> {
+    MSPROF_FNS.get_or_init(|| {
+        // libloading 加载 libmsprof.so，查找符号；失败返回 None
+        None
+    }).as_ref()
+}
+
+pub struct AscendBackend;
+
+impl TimelineBackend for AscendBackend {
+    fn range_push(name: &str) -> u64 {
+        if let Some(fns) = get_fns() {
+            let c_name = std::ffi::CString::new(name).unwrap();
+            unsafe { (fns.range_push)(c_name.as_ptr()) }
+        } else {
+            0
+        }
+    }
+    fn range_pop() {
+        if let Some(fns) = get_fns() {
+            unsafe { (fns.range_pop)() }
+        }
+    }
+    fn name_os_thread(tid: u32, name: &str) {
+        if let Some(fns) = get_fns() {
+            let c_name = std::ffi::CString::new(name).unwrap();
+            unsafe { (fns.name_thread)(tid, c_name.as_ptr()) }
+        }
+    }
+}
+```
+
+### 7.3 空后端 (`backends/noop.rs`)
+
+- **用途**：编译占位。当只启用了 `timeline` feature 但未选择任何具体后端时使用。
+- **实现**：所有方法为空操作，`range_push` 返回 0。
+
+```rust
+// backends/noop.rs (示意)
+pub struct NoopBackend;
+
+impl TimelineBackend for NoopBackend {
+    fn range_push(_name: &str) -> u64 { 0 }
+    fn range_pop() {}
+    fn name_os_thread(_tid: u32, _name: &str) {}
+}
+```
+
+### 7.4 新增后端的步骤
+
+1. 在 `lib/runtime/src/timeline/backends/` 下新建 `xxx.rs`；
+2. 实现 `TimelineBackend` trait；
+3. 在 `Cargo.toml` 中添加对应的 `timeline-xxx` feature（可选依赖）；
+4. 在 `backends/mod.rs` 中添加 `#[cfg(feature = "timeline-xxx")]` 条件编译分支；
+5. 更新本设计文档的后端列表。
+
+整个过程不需要修改 `mod.rs` 中的宏、门控逻辑及任何公开 API。
 
 ---
 
-## 六、与 NVTX 后端的关系
+## 八、构建命令速查
 
-Pagoda 对外暴露的是 `timeline` 语义，但在 NVIDIA GPU 性能分析场景下，底层仍然可以委托给 NVTX 后端实现，例如 `cudarc::nvtx::result::range_push`、`range_pop` 和 `name_os_thread`。
+| 场景 | 命令 |
+|------|------|
+| 生产构建（无 timeline） | `cargo build --release` |
+| 分析构建 + NVTX | `cargo build --profile profiling --features timeline-nvtx` |
+| 分析构建 + Ascend | `cargo build --profile profiling --features timeline-ascend` |
+| 仅编译 timeline 框架（空后端） | `cargo build --features timeline` |
 
-这种分层有两个意义：
+---
 
-1. **上层命名稳定**：业务代码统一依赖 `timeline`，不把后端技术名暴露到公共接口里；
-2. **后端可替换**：未来若需要接入其它 profiling 标注机制，模块边界和宏接口不需要整体重命名。
+## 九、设计决策记录
 
-启用分析构建时可使用：
+1. **trait 使用关联函数而非实例方法**：底层 profiler C API 都是线程局部状态，不需要实例。若未来某后端需要实例状态（如连接远程 profiler daemon），可在后端文件内部使用 `OnceLock` 管理单例，trait 签名不受影响。
 
-```bash
-cargo build --profile profiling --features timeline
-```
+2. **后端 feature 互斥**：同一二进制只需要一种 profiler 后端。互斥设计避免了运行时后端切换的复杂度。若未来出现同时需要多种后端的场景（如混合 GPU 集群），可将 `ActiveBackend` 改为后端链表遍历，但当前不需要。
 
-若底层仍采用 NVTX 后端，运行时仍需要 `libnvToolsExt.so`（来自 CUDA Toolkit 或 NVHPC）。
+3. **升腾后端延迟加载**：因为 Ascend 节点的部署比例可能远低于 NVIDIA 节点，采用 `libloading` 动态加载而非链接时依赖，避免在没有 Ascend 工具链的节点上因缺少 `.so` 而无法启动。
+
+4. **公开宏保持不变**：`pagoda_timeline_range!` 等四个宏的签名是永久性公开契约，无论底层后端如何扩展，业务代码不需要任何修改。

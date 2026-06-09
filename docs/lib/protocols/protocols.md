@@ -2,13 +2,13 @@
 
 ## 1. 目的
 
-`dynamo-protocols` 为 Dynamo 的 HTTP 推理层提供**兼容 OpenAI 的请求/响应类型定义**。它是一个纯声明式的类型 crate：只包含类型、serde 派生、builder 以及 `From` 转换，不包含任何业务逻辑或 HTTP 传输代码。
+`pagoda-protocols` 为 Pagoda 的 HTTP 推理层提供**兼容 OpenAI 的请求/响应类型定义**。它是一个纯声明式的类型 crate：只包含类型、serde 派生、builder 以及 `From` 转换，不包含任何业务逻辑或 HTTP 传输代码。
 
 支持的协议：
 
 | 协议 | 来源策略 |
 |------|----------|
-| OpenAI Chat Completions & Completions | 上游 `async-openai` 重新导出 + Dynamo 扩展 |
+| OpenAI Chat Completions & Completions | 上游 `async-openai` 重新导出 + Pagoda 扩展 |
 | OpenAI Responses API（Codex、Agents SDK） | 输入链自有，输出链走上游 |
 | Anthropic Messages API | 完全自有（上游无对应类型） |
 | Embeddings / Images | 完全从上游重新导出 |
@@ -18,7 +18,7 @@
 整个 crate 围绕一个问题展开：**某个类型是从上游重新导出，还是自己拥有？**
 
 - `async-openai` 维护良好但体量巨大、更新频繁，无法整体 fork。
-- 上游在「放宽输入校验」类改动上推进缓慢，而 Dynamo 不能被上游合并节奏阻塞。
+- 上游在「放宽输入校验」类改动上推进缓慢，而 Pagoda 不能被上游合并节奏阻塞。
 
 由此确立的规则：**默认重新导出上游；只拥有能修复所需行为的、最小的那棵类型子树。**
 
@@ -27,7 +27,7 @@
 仅当满足以下至少一条时才自有某类型：
 
 1. 上游拒绝了真实客户端会发送的形态（如 `OutputMessage.id` 被强制必填，但客户端常省略）。
-2. 需要用 Dynamo 专属字段扩展 schema（如 `mm_processor_kwargs`、`reasoning_content`）。
+2. 需要用 Pagoda 专属字段扩展 schema（如 `mm_processor_kwargs`、`reasoning_content`）。
 3. 上游类型强制了破坏下游后端的形态（如 `FunctionCall.arguments` 需同时接受 String 与对象）。
 4. 上游存在已知 bug（如 `ToolCall.type` 序列化缺失）。
 
@@ -62,7 +62,7 @@ src/
 
 上游会在请求-输入侧与响应-输出侧复用同一类型（典型如 `OutputMessage`）。若直接 shadow 放宽，会导致输出侧构造点全部崩溃，进而连锁拥有半个 crate。
 
-**规则**：被双侧复用的类型，给 Dynamo 自有的*输入侧*变体起*不同的名字*，输出侧继续用上游名字。
+**规则**：被双侧复用的类型，给 Pagoda 自有的*输入侧*变体起*不同的名字*，输出侧继续用上游名字。
 
 | 输入侧（自有，已放宽） | 输出侧（上游，未改动） |
 |------|------|
@@ -83,7 +83,7 @@ CreateResponse
                 └── Output(InputOutputMessage)   (新名字，已放宽)
 ```
 
-`Item` 是 `#[serde(tag = "type")]` 枚举，无法继承变体，必须逐变体镜像上游——上游新增变体时需同步添加，这是拥有该链的代价。输出链（`Response`、`OutputItem` 等）完全走上游，因为输出时由 Dynamo 铸造合法的 id/status，无需放宽。
+`Item` 是 `#[serde(tag = "type")]` 枚举，无法继承变体，必须逐变体镜像上游——上游新增变体时需同步添加，这是拥有该链的代价。输出链（`Response`、`OutputItem` 等）完全走上游，因为输出时由 Pagoda 铸造合法的 id/status，无需放宽。
 
 ## 5. 边界（明确不属于本 crate）
 

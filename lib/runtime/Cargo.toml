@@ -19,9 +19,15 @@ testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
-# Timeline annotations for Nsight Systems (compile-time off; also gated at runtime by PGD_ENABLE_RUST_TIMELINE).
-# Overhead: feature off = zero; feature on, env off = ~1ns AtomicBool load; feature on, env on = ~50ns/annotation.
-timeline = ["dep:cudarc"]
+# Timeline annotations for Nsight Systems / Ascend (compile-time off; also gated at runtime
+# by PGD_ENABLE_RUST_TIMELINE). Overhead: feature off = zero; feature on, env off =
+# ~1ns AtomicBool load; feature on, env on = ~50ns/annotation.
+# - timeline: framework only (noop backend)
+# - timeline-nvtx: NVIDIA Nsight Systems backend (requires cudarc)
+# - timeline-ascend: Huawei Ascend Insight / msprof backend (requires libloading)
+timeline = []
+timeline-nvtx = ["timeline", "dep:cudarc"]
+timeline-ascend = ["timeline", "dep:libloading"]
 
 [dependencies]
 # Workspace dependencies
@@ -73,6 +79,7 @@ xxhash-rust = { workspace = true }
 
 # Optional workspace dependencies
 cudarc = { workspace = true, optional = true }
+libloading = { version = "0.8", optional = true }
 
 # Runtime internals
 arc-swap = { version = "1" }

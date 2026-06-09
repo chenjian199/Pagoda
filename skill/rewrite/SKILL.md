@@ -1,10 +1,3 @@
----
-# SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-name: rewrite
-description: Pagoda API 兼容重实现 Skill。用于对 lib/<crate>/ 中的 Rust 源码进行基于 public API 与行为契约的重写、测试整理、中文化和零回归验证。
----
-
 # API 兼容重实现约束
 
 ## 0. 目标版权归类
@@ -20,13 +13,8 @@ Implementation rewritten by PAGODA.
 推荐文件头：
 
 ```rust
-// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES.
 // SPDX-License-Identifier: Apache-2.0
-//
-// API-compatible implementation based on the public interfaces and behavioral
-// contracts of NVIDIA Dynamo (https://github.com/ai-dynamo/dynamo).
-// Implementation rewritten by PAGODA.
 ```
 
 如果文件含 `async-openai` 派生协议声明、类型树、字段树、enum variants、serde 表达或测试表达，则必须升级为 Pagoda + NVIDIA + Himanshu Neema，许可证使用 `Apache-2.0 AND MIT`。
@@ -47,7 +35,7 @@ Implementation rewritten by PAGODA.
 
 在契约约束下，内部数据结构、算法路径、模块组织与辅助函数由 Pagoda 重新设计，避免与 Dynamo / lib-copy 的实现表达同形同构。
 
-禁止通过变量改名、语句重排、注释翻译、局部替换等方式把 Dynamo 源码伪装成重写实现。若实际采用了这种方式，该文件应改用 `Derived from NVIDIA Dynamo / Modified by PAGODA` 文件头。
+禁止通过变量改名、语句重排、注释翻译、局部替换等方式把 Dynamo 源码伪装成重写实现。若发现实际采用了这种方式，该文件不得提交为 Pagoda 重写成果，必须重新实现到非派生表达。
 
 ## 3. 代码风格统一中文化
 
@@ -62,7 +50,7 @@ Implementation rewritten by PAGODA.
 - `lib-copy` / Dynamo 原测试可以作为兼容性 oracle 使用，用于确认 Pagoda 重写实现没有偏离原接口行为；这是契约一致性的强校验手段。
 - 提交到 Pagoda 代码中的测试应优先重写为等价行为覆盖：保留被验证的行为点、输入输出关系、边界条件和错误场景，但重新组织测试结构、测试命名、断言表达、测试注释和非必要测试数据。
 - 如果某些原测试覆盖的是难以从 public API 文档重新推导的兼容性边界，可以保留等价场景，但应将测试表达改写为 Pagoda 自有形式，并在必要时补充说明该场景验证的外部契约。
-- 如果确实保留或改写了 Dynamo / lib-copy 测试结构，该文件应改用 `Derived from NVIDIA Dynamo / Modified by PAGODA` 文件头。
+- 不允许保留或改写 Dynamo / lib-copy 的测试结构作为最终提交表达。若测试结构、命名、断言组织或非必要测试数据与原测试同形，应继续重写为 Pagoda 自有测试表达；无法重写的测试不得纳入本重写成果。
 - 测试注释统一格式：`## 测试过程` / `## 意义`。
 
 ## 5. 测试模块组织
@@ -73,11 +61,22 @@ Implementation rewritten by PAGODA.
 
 `discovery` 模块的偏离是有意为之，不在等价性检查范围内。
 
-## 7. 来源判断升级规则
+## 7. 来源判断与禁止派生规则
 
 重写过程中应逐文件判断来源：
 
 - 若只对齐 Dynamo public API 与行为契约，且实现、注释、测试表达均由 Pagoda 重新编写，使用 API 兼容重实现文件头。
-- 若直接复制、翻译、改写、重构 Dynamo 源码、注释、测试结构或代码组织，使用 `Derived from NVIDIA Dynamo / Modified by PAGODA` 文件头。
-- 若包含或改写 `async-openai` 派生协议声明、字段、enum variants、serde 形状或测试表达，使用 Pagoda + NVIDIA + Himanshu Neema 文件头，并将许可证标为 `Apache-2.0 AND MIT`。
-- 边界不清时采用更保守的 attribution。
+- 若直接复制、翻译、改写、重构 Dynamo 源码、注释、测试结构或代码组织，该文件不允许以派生归类提交，必须继续重写到独立表达。
+- 若包含或改写 `async-openai` 派生协议声明、字段、enum variants、serde 形状或测试表达，该文件不符合本规则，应重新设计表达或排除在重写范围之外。
+- 边界不清时不采用派生 attribution 作为解决方案；应继续降低相似性、补充独立实现证据，或暂缓提交。
+
+## 8. 不允许派生的执行标准
+
+最终提交文件必须同时满足：
+
+- 文件头只能使用 API 兼容重实现推荐文件头；
+- 不出现 `Derived from` / `Modified by` 作为版权或来源声明；
+- 不复制、翻译或近似改写 Dynamo / lib-copy 的实现表达、注释表达或测试表达；
+- 不以保留原测试结构的方式证明兼容性，只能用重新设计的测试验证相同行为；
+- 对必须保持一致的公开 API、serde wire contract 和错误行为，仅把它们视为外部契约，而不是源码表达来源；
+- 无法确认独立性的文件不得纳入本重写成果。
