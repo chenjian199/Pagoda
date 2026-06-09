@@ -1,13 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # tool_calling::xml::parser
+//!
 //! ## 设计意图
+//! 解析 Qwen3-Coder 风格的 XML 工具调用：
+//! `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`。
 //! 参考实现：
+//! https://github.com/sgl-project/sglang/blob/44da737770e4bcd9bfa27751f0a0751c9b5c06e1/python/sglang/srt/function_call/qwen3_coder_detector.py
 //!
 //! ## 外部契约
+//! - `detect_tool_call_start_xml(chunk, config)`：完整或部分起始 token 命中即 true。
+//! - `find_tool_call_end_position_xml(chunk, config)`：跨连续并行调用前进至最后一个 `</tool_call>` 之后。
+//! - `try_tool_call_parse_xml(message, config, tools)`：返回 `(calls, normal_text)`。
 //!
 //! ## 实现要点
 //! - 普通文本只取首个解析成功调用之前的内容；调用之后的文本不计入响应内容。
+//! - 借助 tools 的参数 schema 进行类型转换，并兼容 Python 字面量（单引号/True/False/None）。
 
 use std::collections::HashMap;
 
@@ -19,6 +28,7 @@ use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+// === SECTION: 文本辅助 ===
 
 /// 去除字符串首尾成对的引号（单或双）。
 fn strip_quotes(s: &str) -> &str {
@@ -34,7 +44,10 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
+// === SECTION: 流式探测与边界定位 ===
 
+/// 判断 chunk 是否包含（或部分包含，用于流式）XML 风格工具调用的起始。
+/// 格式：`<tool_call><function=name><parameter=foo>...</parameter></function></tool_call>`
 pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool {
     let start_token = config.tool_call_start_token.as_str();
 
@@ -42,23 +55,31 @@ pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool
         || (1..start_token.len()).any(|i| chunk.ends_with(&start_token[..i]))
 }
 
+/// 找出所有连续 XML 工具调用的结束位置。
 ///
+/// 当模型在一个 chunk 内发出多个并行调用
+/// （如 `<tool_call>...</tool_call><tool_call>...</tool_call>`）时，本函数会跨越每一对
+/// 连续的 start→end，从而把整组捕获为单一 jail 区域。返回最后一个 `</tool_call>` 之后的位置；
+/// 无结束 token 时返回 chunk 长度。
 pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) -> usize {
     let start_token = config.tool_call_start_token.as_str();
     let end_token = config.tool_call_end_token.as_str();
 
+    // 首个结束 token：没有则说明调用不完整
     let Some(first_end) = chunk.find(end_token) else {
         return chunk.len();
     };
 
     let mut cursor = first_end + end_token.len();
 
+    // 继续吞掉紧随其后的连续 <tool_call>…</tool_call> 块（允许中间有空白）
     loop {
         let rest = &chunk[cursor..];
         let trimmed = rest.trim_start();
         if !trimmed.starts_with(start_token) {
             break;
         }
+        // 计算 trimmed 在原 chunk 中的起点
         let trim_offset = rest.len() - trimmed.len();
         let search_from = cursor + trim_offset + start_token.len();
         match chunk[search_from..].find(end_token) {
@@ -71,7 +92,10 @@ pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) ->
     cursor
 }
 
+// === SECTION: 顶层解析入口 ===
 
+/// 解析 Qwen3Coder 格式工具调用，返回 `(parsed_tool_calls, normal_text_content)`。
+/// 格式：`<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`
 pub fn try_tool_call_parse_xml(
     message: &str,
     config: &XmlParserConfig,
@@ -105,6 +129,7 @@ fn extract_tool_calls(
         };
         let abs_start = cursor + start_pos;
 
+        // Qwen3-Coder 模板允许调用前出现自然语言，但调用块之后的文本不属于响应内容。
         // 继续扫描后续调用，但只暴露首个被解析调用之前的普通文本。
         if calls.is_empty() {
             normal_parts.push(&text[cursor..abs_start]);
@@ -120,6 +145,9 @@ fn extract_tool_calls(
                 cursor = abs_end;
             }
             None => {
+                // 外层结束 token 缺失（max_tokens / EOS 截断）。
+                // 仅在 allow_eof_recovery 开启、且尾段含 function-start 结构信号时尝试恢复，
+                // 从而保证以 `<tool_call>` 开头的纯文本被原样保留。
                 let block = &text[abs_start..];
                 if config.allow_eof_recovery
                     && block.contains(function_start)
@@ -138,6 +166,7 @@ fn extract_tool_calls(
     }
 
     let joined = normal_parts.join("");
+    // 无调用时整体 trim；有调用时保留调用前文本（含其原始空白边界）
     let normal_text = if calls.is_empty() {
         joined.trim().to_string()
     } else {
@@ -147,11 +176,13 @@ fn extract_tool_calls(
 }
 
 /// 解析单个工具调用块。
+/// 格式：`<tool_call><function=name><parameter=key>value</parameter>...</function></tool_call>`
 fn parse_tool_call_block(
     block: &str,
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
+    // 依据 config 构造正则
     let function_pattern = format!(
         r"(?s){}([^>]+)>(.*?)(?:{}|$)",
         regex::escape(&config.function_start_token),
@@ -168,11 +199,13 @@ fn parse_tool_call_block(
 
     let mut results = Vec::new();
 
+    // 遍历所有 function 块
     for func_cap in function_regex.captures_iter(block) {
         let function_name_raw = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let function_name = strip_quotes(function_name_raw);
         let function_body = func_cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
+        // 取该函数的参数 schema
         if function_name.is_empty() {
             continue;
         }
@@ -206,7 +239,9 @@ fn parse_tool_call_block(
     Ok(results)
 }
 
+// === SECTION: 参数 schema 与类型转换 ===
 
+/// 从工具定义中取出某函数的参数配置，返回 参数名 → schema 定义 的映射。
 fn get_arguments_config(
     func_name: &str,
     tools: Option<&[ToolDefinition]>,
@@ -224,6 +259,7 @@ fn get_arguments_config(
         return HashMap::new();
     };
 
+    // 优先取 "properties"；若无则把整个对象当作配置
     let source = params.get("properties").or(Some(params));
     source
         .and_then(|v| v.as_object())
@@ -231,17 +267,28 @@ fn get_arguments_config(
         .unwrap_or_default()
 }
 
+/// 依据 schema 中的类型把 XML 字符串参数转换为带类型的 JSON Value，
+/// 行为对齐 Python 参考实现。
 ///
 /// 识别的类型别名：
+/// - string: "string"/"str"/"text"/"varchar"/"char"/"enum"
+/// - integer: "int"/"integer"/"int32"/"int64"/"uint"/"long"/"short"/"unsigned"
+/// - number: "number"/"num"/"float"/"float32"/"float64"/"double"
+/// - boolean: "boolean"/"bool"/"binary"
+/// - object: "object"/"dict"/"dictionary"
+/// - array: "array"/"arr"/"list"
 ///
+/// 特殊情形：值为 "null" 直接返回 Null；HTML 实体会被反转义；未在 schema 中声明的参数按字符串返回。
 fn convert_param_value(
     param_value: &str,
     param_name: &str,
     param_config: &HashMap<String, Value>,
     func_name: &str,
 ) -> Value {
+    // HTML 反转义并裁剪空白
     let param_value = html_unescape(param_value.trim());
 
+    // 处理 null
     if param_value.eq_ignore_ascii_case("null") {
         return Value::Null;
     }
@@ -256,6 +303,7 @@ fn convert_param_value(
         return Value::String(param_value);
     };
 
+    // 取类型；anyOf/oneOf 无直接 "type" 时当作 object，使值走 JSON 解析而非二次编码字符串
     let param_type = param_schema
         .get("type")
         .and_then(|t| t.as_str())
@@ -268,7 +316,9 @@ fn convert_param_value(
             }
         });
 
+    // 下面的 match 对每类类型：匹配别名 → 解析 → 失败则告警并退化为字符串
     match param_type.as_str() {
+        // 字符串类：原样返回（上面已做 HTML 反转义）
         "string" | "str" | "text" | "varchar" | "char" | "enum" => Value::String(param_value),
 
         // 整数类：解析为 i64，失败退化为字符串
@@ -292,6 +342,7 @@ fn convert_param_value(
             }
         }
 
+        // 浮点/数值类：解析为 f64；整数值（如 42.0）以整数存储以提升 JSON 兼容性
         t if t.starts_with("num") || t.starts_with("float") => match param_value.parse::<f64>() {
             Ok(float_val) if float_val.fract() == 0.0 && float_val.is_finite() => {
                 Value::Number((float_val as i64).into())
@@ -319,6 +370,7 @@ fn convert_param_value(
             }
         },
 
+        // 布尔类：仅 "true"/"false"（忽略大小写）有效，其余默认 false 并告警
         "boolean" | "bool" | "binary" => {
             let lower_val = param_value.to_lowercase();
             if lower_val != "true" && lower_val != "false" {
@@ -332,6 +384,7 @@ fn convert_param_value(
             Value::Bool(lower_val == "true")
         }
 
+        // 复杂类（对象/数组）：先 JSON 解析，再退回 Python 字面量解析（单引号等）
         t if t == "object"
             || t == "array"
             || t == "arr"
@@ -359,6 +412,7 @@ fn convert_param_value(
             Value::String(param_value)
         }
 
+        // 未知/自定义类型：尽力用 literal_eval 解析结构化数据
         _ => {
             if let Ok(json_val) = try_literal_eval(&param_value) {
                 return json_val;
@@ -374,11 +428,14 @@ fn convert_param_value(
     }
 }
 
+/// 模拟 Python `ast.literal_eval` 的简化版本，处理常见情形。
 fn try_literal_eval(s: &str) -> Result<Value, ()> {
+    // 先试标准 JSON
     if let Ok(val) = serde_json::from_str::<Value>(s) {
         return Ok(val);
     }
 
+    // 再处理 Python 风格字面量（单引号、True/False/None）
     let normalized = s
         .replace('\'', "\"")
         .replace("True", "true")
@@ -388,6 +445,8 @@ fn try_literal_eval(s: &str) -> Result<Value, ()> {
     serde_json::from_str::<Value>(&normalized).map_err(|_| ())
 }
 
+/// 安全解析值——先 JSON，再退化为字符串。语义上模仿 SGLang 的 `_safe_val`。
+/// NOTE: This function is deprecated and kept for reference. Use convert_param_value instead.
 #[allow(dead_code)]
 fn safe_parse_value(raw: &str) -> serde_json::Value {
     let unescaped = html_unescape(raw.trim());
@@ -414,6 +473,7 @@ fn safe_parse_value(raw: &str) -> serde_json::Value {
     serde_json::Value::String(unescaped.trim_matches('\n').to_string())
 }
 
+/// 针对常见实体的简单 HTML 反转义。
 fn html_unescape(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -426,8 +486,12 @@ fn html_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 XML 公开 API（`detect_tool_call_start_xml`、`find_tool_call_end_position_xml`、
+    //! `try_tool_call_parse_xml`）与若干内部辅助（`safe_parse_value`/`html_unescape`）展开，
+    //! 覆盖起始/边界探测、并行调用、参数类型转换、Python 字面量、截断恢复等。
     //!
     //! ## 意义
+    //! 锁定 Qwen3-Coder 风格 XML 调用在多调用、类型强制与截断边界下的可观察行为。
     use super::*;
     use rstest::rstest;
 

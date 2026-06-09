@@ -1,12 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # tool_calling::xml::glm47_parser
+//!
 //! ## 设计意图
+//! 解析 GLM-4.7 的工具调用格式：
+//! `<tool_call>function_name<arg_key>param1</arg_key><arg_value>value1</arg_value></tool_call>`。
+//! 参考：https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
 //!
 //! ## 外部契约
+//! - `detect_tool_call_start_glm47(chunk, config)`：完整或部分起始 token 命中即返回 true。
+//! - `find_tool_call_end_position_glm47(chunk, config)`：返回 `</tool_call>` 之后的位置，缺失则返回长度。
+//! - `try_tool_call_parse_glm47(message, config, tools)`：返回 `(calls, normal_text)`。
 //!
 //! ## 实现要点
 //! - 无法解析的块保留为普通文本，绝不静默丢弃模型输出。
+//! - 支持在 `</tool_call>` 截断（max_tokens / EOS）时的 EOF 恢复（受 allow_eof_recovery 控制）。
+//! - 借助 tools 的参数 schema 进行类型强制转换，并解码 XML 实体。
 
 use regex::Regex;
 use serde_json::Value;
@@ -18,17 +28,22 @@ use super::super::ToolDefinition;
 use super::super::config::Glm47ParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+// === SECTION: 流式探测与定位 ===
 
+/// 判断 chunk 是否包含（或部分包含，用于流式）GLM-4.7 工具调用起始。
 pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> bool {
     let start_token = config.tool_call_start.as_str();
 
+    // 完整起始 token 命中
     if chunk.contains(start_token) {
         return true;
     }
 
+    // 流式场景：chunk 结尾恰好是起始 token 的某个前缀
     (1..start_token.len()).any(|i| chunk.ends_with(&start_token[..i]))
 }
 
+/// 返回 `</tool_call>` 结束 token 之后的位置；若缺失则返回 chunk 长度。
 pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig) -> usize {
     let end_token = config.tool_call_end.as_str();
 
@@ -38,7 +53,9 @@ pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig
     }
 }
 
+// === SECTION: 顶层解析入口 ===
 
+/// 解析消息中的 GLM-4.7 工具调用，返回 `(parsed_tool_calls, normal_text_content)`。
 pub fn try_tool_call_parse_glm47(
     message: &str,
     config: &Glm47ParserConfig,
@@ -46,6 +63,7 @@ pub fn try_tool_call_parse_glm47(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let (normal_text, tool_calls) = extract_tool_calls(message, config, tools)?;
 
+    // 即使为空也回传 Some("")，保持外部契约
     Ok((tool_calls, Some(normal_text)))
 }
 
@@ -64,6 +82,7 @@ fn extract_tool_calls(
     let mut cursor = 0;
 
     while cursor < text.len() {
+        // 定位下一个起始 token；找不到则余下全部为普通文本
         let Some(start_pos) = text[cursor..].find(start_token) else {
             normal_parts.push(&text[cursor..]);
             break;
@@ -73,6 +92,7 @@ fn extract_tool_calls(
 
         match text[abs_start..].find(end_token) {
             Some(end_pos) => {
+                // 完整块：[abs_start, abs_end)
                 let abs_end = abs_start + end_pos + end_token.len();
                 let block = &text[abs_start..abs_end];
 
@@ -87,6 +107,8 @@ fn extract_tool_calls(
                 cursor = abs_end;
             }
             None => {
+                // 外层 </tool_call> 缺失（max_tokens / EOS 截断）。
+                // 仅在 allow_eof_recovery 开启且尾段含 <arg_key> 结构信号时尝试恢复，
                 // 避免流式中途误判。
                 let block = &text[abs_start..];
                 if config.allow_eof_recovery
@@ -109,7 +131,9 @@ fn extract_tool_calls(
     Ok((normal_text, calls))
 }
 
+// === SECTION: 值解码与类型强制 ===
 
+/// 解码 XML 预定义实体：&lt; &gt; &amp; &quot; &apos;。
 fn decode_xml_entities(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -118,15 +142,18 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+/// 根据参数 schema 类型将原始字符串强制为 JSON 值；无 schema 或无法识别时退化为字符串。
 fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
     let trimmed = raw.trim();
 
+    // 看起来已经是 JSON（对象/数组/带引号字符串）则直接解析
     if matches!(trimmed.chars().next(), Some('{') | Some('[') | Some('"'))
         && let Ok(v) = serde_json::from_str(trimmed)
     {
         return v;
     }
 
+    // 利用 schema 类型提示进行转换
     match schema_type {
         Some("integer" | "int") => {
             if let Ok(n) = trimmed.parse::<i64>() {
@@ -146,6 +173,7 @@ fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
             _ => {}
         },
         Some("array") => {
+            // 先试 JSON 解析，不成则按逗号拆分
             if let Ok(v) = serde_json::from_str::<Value>(trimmed)
                 && v.is_array()
             {
@@ -168,6 +196,7 @@ fn coerce_value(raw: &str, schema_type: Option<&str>) -> Value {
     Value::String(raw.to_string())
 }
 
+/// 从某工具的参数 schema 中查找指定参数名的 JSON Schema 类型。
 fn get_param_schema_type<'a>(
     tools: Option<&'a [ToolDefinition]>,
     function_name: &str,
@@ -184,7 +213,10 @@ fn get_param_schema_type<'a>(
         .as_str()
 }
 
+// === SECTION: 单块解析 ===
 
+/// 解析单个 GLM-4.7 工具调用块：
+/// `<tool_call>function_name<arg_key>key1</arg_key><arg_value>value1</arg_value>...</tool_call>`
 fn parse_tool_call_block(
     block: &str,
     config: &Glm47ParserConfig,
@@ -194,11 +226,13 @@ fn parse_tool_call_block(
     let end_token = config.tool_call_end.as_str();
     let arg_key_start = config.arg_key_start.as_str();
 
+    // 剖开外层起始 token；结束 token 可缺失（用于 EOF 恢复）
     let after_start = block
         .strip_prefix(start_token)
         .ok_or_else(|| anyhow::anyhow!("Invalid tool call block format"))?;
     let content = after_start.strip_suffix(end_token).unwrap_or(after_start);
 
+    // 函数名 = 首个 <arg_key> 之前的全部（或整个 content）
     let function_name = match content.find(arg_key_start) {
         Some(pos) => content[..pos].trim(),
         None => content.trim(),
@@ -209,6 +243,8 @@ fn parse_tool_call_block(
         anyhow::bail!("Empty function name in tool call");
     }
 
+    // 构造匹配 <arg_key>key</arg_key><arg_value>value</arg_value> 的正则
+    // (?s) 开启 dotall，使 (.*?) 能跨行匹配（arg 值常含多行内容）
     let pattern = format!(
         r"(?s){}([^<]+){}{}(.*?){}",
         regex::escape(&config.arg_key_start),
@@ -228,11 +264,13 @@ fn parse_tool_call_block(
         }
         let raw_value = cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
+        // 先解码 XML 实体，再按 schema 类型强制转换
         let decoded = decode_xml_entities(raw_value);
         let schema_type = get_param_schema_type(tools, &function_name, key);
         arguments.insert(key.to_string(), coerce_value(&decoded, schema_type));
     }
 
+    // 若提供了 tools，验证函数是否存在
     if let Some(tools_list) = tools
         && !tools_list.iter().any(|t| t.name == function_name)
     {
@@ -252,6 +290,9 @@ fn parse_tool_call_block(
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 GLM-4.7 公开 API（`detect_tool_call_start_glm47`、`find_tool_call_end_position_glm47`、
+    //! `try_tool_call_parse_glm47`）覆盖：起始探测、单/多调用、JSON 参数、无参、多行参数值、
+    //! XML 实体解码、schema 类型强制、EOF 截断恢复、不可解析块保留为普通文本、空白输入、重名调用。
     //!
     //! ## 意义
     //! 锁定该解析器在截断、噪声与类型转换边界下的可观察行为，确保模型输出不被静默丢弃。
@@ -416,6 +457,10 @@ mod tests {
         assert_eq!(calls.len(), 0);
     }
 
+    // 针对缺失外层 `</tool_call>` 的恢复逻辑，也就是因 max_tokens 或 EOS 导致的截断：
+    // 当内部参数键值对本身格式完整时，将 EOF 视为结束 token，
+    // 并提取该工具调用。这里用 arg_key 的起始标记作为恢复门槛，
+    // 这样即使普通文本碰巧以 `<tool_call>` 开头，也仍会被原样保留。
     #[test] // PARSER.batch.5
     fn test_parse_no_end_tag_complete_args_recovers() {
         let config = Glm47ParserConfig {
@@ -583,6 +628,13 @@ mod tests {
         );
     }
 
+    /// Parser 级别的不变式：glm47 parser 是字节稳定的。
+    /// 它不会感知 `finish_reason`，并且无论上游流结束原因是什么，
+    /// 都会产生相同的输出。
+    ///
+    /// 真正的 PIPELINE.finish_reason 覆盖，也就是 stop / tool_calls / length
+    /// 的映射测试，位于 `lib/llm/tests/test_streaming_tool_parsers.rs`，
+    /// 并且属于跨 parser 的 finish_reason 映射工作项，已单独跟踪。
     #[test]
     fn test_glm47_parser_output_independent_of_upstream_finish() {
         let config = get_test_config();

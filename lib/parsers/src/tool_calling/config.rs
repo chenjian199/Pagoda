@@ -1,9 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # tool_calling::config
+//!
 //! ## 设计意图
+//! 集中描述各类模型工具调用格式所需的解析配置：JSON、XML、DSML、GLM-4.7、Kimi-K2、Gemma4。
+//! 每种格式有独立的配置结构与默认值，再由顶层 [`ParserConfig`] 枚举统一承载，
+//! 并由 [`ToolCallConfig`] 提供面向具体模型家族的预设工厂方法。
 //!
 //! ## 外部契约
+//! - 各配置结构的字段名、类型、serde（`default` / `alias` / `tag` / `rename_all`）规则保持不变。
+//! - [`ParserConfig`] 以内部标签 `type`（snake_case）序列化。
+//! - 预设工厂方法（`hermes` / `mistral` / `deepseek_v3` 等）的名称、签名与产出配置保持不变。
 
 use super::json::JsonParserType;
 

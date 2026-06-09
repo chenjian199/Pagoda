@@ -1,14 +1,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # tool_calling::xml::kimi_k2_parser
+//!
 //! ## 设计意图
-//! 解析 Kimi K2 风格的 XML 工具调用区段，保留模型输出中的原生函数编号语义。
+//! 解析 Kimi K2 风格的工具调用区段：
+//! ```text
+//! <|tool_calls_section_begin|>
+//! <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>
+//! <|tool_calls_section_end|>
+//! ```
+//! 参考实现：
+//! - https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/function_call/kimik2_detector.py
+//! - https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/kimi_k2_tool_parser.py
 //!
 //! ## 外部契约
-//! 完整工具调用转换为 `ToolCallResponse`，无法解析的普通文本保持在返回文本中。
+//! - `detect_tool_call_start_kimi_k2(chunk, config)`：完整或部分区段起始 token 命中即 true。
+//! - `find_tool_call_end_position_kimi_k2(chunk, config)`：返回区段结束之后位置；缺失返回 None。
+//! - `try_tool_call_parse_kimi_k2(message, config, tools)`：返回 `(calls, normal_text)`。
 //!
 //! ## 实现要点
-//! 使用区段标记、调用标记与函数编号正则配合提取调用，并对参数做 JSON 或原始字符串退化处理。
+//! - 调用 id 保留模型原生格式（如 `functions.bash:0`），与 vllm/sglang 对齐。
+//! - section_end 缺失时把剩余文本视为区段体，以便从截断输出中恢复完整调用。
 
 use std::sync::OnceLock;
 
@@ -22,10 +35,17 @@ static ID_REGEX: OnceLock<Regex> = OnceLock::new();
 
 static TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 
+// === SECTION: 正则缓存 ===
 
+/// 返回缓存的正则，捕获 `function_id`（如 `functions.get_weather:0`）与 `arguments`（JSON 对象），
+/// 三者夹在 `call_start`、`argument_begin`、`call_end` token 之间。
 ///
+/// `function_id` 模式 `[\w.\-]+:\d+` 匹配 Kimi K2 的 `functions.name:index` 形态，与 sglang
+/// 参考实现一致。包含连字符以支持带横线的函数名（如 MCP 工具 `mcp__portal__search-documents`）。
 fn get_tool_call_regex(config: &KimiK2ParserConfig) -> &'static Regex {
     TOOL_CALL_REGEX.get_or_init(|| {
+        // arguments 故意用宽松的 `.*?` 而非 `\{...\}`，使截断 JSON（如 max_tokens / EOS
+        // 造成的 `{"location":"NYC`）仍可命中。下游 serde_json::from_str 充当校验器：
         // 合法负载被解析，非法/截断负载退化为原始字符串参数路径。
         let pattern = format!(
             r"(?s){}\s*(?P<function_id>[\w.\-]+:\d+)\s*{}\s*(?P<arguments>.*?)\s*{}",
@@ -44,7 +64,9 @@ fn get_id_regex() -> &'static Regex {
     })
 }
 
+// === SECTION: 流式探测 ===
 
+/// 判断 chunk 是否包含（或部分包含，用于流式）Kimi K2 区段起始。
 pub fn detect_tool_call_start_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) -> bool {
     config.section_start_variants.iter().any(|start_token| {
         debug_assert!(
@@ -52,11 +74,14 @@ pub fn detect_tool_call_start_kimi_k2(chunk: &str, config: &KimiK2ParserConfig) 
             "Kimi K2 section tokens must be ASCII for safe byte slicing, got: {start_token:?}"
         );
 
+        // 完整命中，或结尾恰好是起始 token 的某前缀（流式）
         chunk.contains(start_token.as_str())
             || (1..start_token.len()).any(|i| chunk.ends_with(&start_token[..i]))
     })
 }
 
+/// 返回区段结束 token 之后的位置（取最早出现的变体）；缺失返回 `None`，
+/// 用于告知流式 jail 区段尚未正确闭合、应继续累积。
 pub fn find_tool_call_end_position_kimi_k2(
     chunk: &str,
     config: &KimiK2ParserConfig,
@@ -68,6 +93,7 @@ pub fn find_tool_call_end_position_kimi_k2(
         .min()
 }
 
+// === SECTION: 顶层解析入口 ===
 
 pub fn try_tool_call_parse_kimi_k2(
     message: &str,
@@ -78,6 +104,7 @@ pub fn try_tool_call_parse_kimi_k2(
     Ok((tool_calls, Some(normal_text)))
 }
 
+/// 在 `text[cursor..]` 中找首个区段起始变体，返回 `(相对位置, 命中 token 长度)`。
 fn find_section_start(
     text: &str,
     cursor: usize,
@@ -94,6 +121,7 @@ fn find_section_start(
         .min_by_key(|&(pos, _)| pos)
 }
 
+/// 在 `text[from..]` 中找首个区段结束变体，返回 `(相对位置, 命中 token 长度)`。
 fn find_section_end(text: &str, from: usize, config: &KimiK2ParserConfig) -> Option<(usize, usize)> {
     config
         .section_end_variants
@@ -107,6 +135,23 @@ fn find_section_end(text: &str, from: usize, config: &KimiK2ParserConfig) -> Opt
 }
 
 /// 从消息中分离工具调用区段与普通文本。
+///
+/// ## 与 Moonshot 参考实现的差异
+///
+/// 参考实现要求存在 `section_end` 才能抽取任何调用：
+///
+/// ```python
+/// pattern = r"<\|tool_calls_section_begin\|>(.*?)<\|tool_calls_section_end\|>"
+/// tool_calls_sections = re.findall(pattern, tool_call_rsp, re.DOTALL)
+/// ```
+///
+/// 当 `section_end` 缺失（max_tokens / EOS / stop）时，`re.findall` 返回 `[]`，
+/// 完整的单个调用也被静默丢弃。本实现把缺失的 `section_end` 视为「区段延伸至串尾」，
+/// 等价于：
+///
+/// ```python
+/// pattern = r"<\|tool_calls_section_begin\|>(.*?)(?:<\|tool_calls_section_end\|>|$)"
+/// ```
 fn extract_tool_calls(
     text: &str,
     config: &KimiK2ParserConfig,
@@ -125,6 +170,7 @@ fn extract_tool_calls(
         let abs_start = cursor + start_pos;
         normal_parts.push(&text[cursor..abs_start]);
 
+        // section_end 缺失时把剩余文本作为区段体（截断恢复）
         let (block, next_cursor) = match find_section_end(text, abs_start, config) {
             Some((end_pos, end_len)) => {
                 let abs_end = abs_start + end_pos + end_len;
@@ -145,6 +191,8 @@ fn extract_tool_calls(
 
 /// 解析单个区段块，抽取其中各个工具调用。
 ///
+/// 块位于 `<|tool_calls_section_begin|>` 与 `<|tool_calls_section_end|>` 之间，
+/// 每个调用位于 `<|tool_call_begin|>` 与 `<|tool_call_end|>` 之间。
 fn parse_section_block(
     block: &str,
     config: &KimiK2ParserConfig,
@@ -165,6 +213,7 @@ fn parse_section_block(
             .map(|m| m.as_str().trim())
             .unwrap_or("{}");
 
+        // 解析 function id：优先取捕获组 name，否则整体作为函数名
         let function_name = match id_regex.captures(function_id) {
             Some(id_cap) => id_cap
                 .name("name")
@@ -183,12 +232,14 @@ fn parse_section_block(
             continue;
         }
 
+        // 若提供 tools，仅告警而不拦截未知函数
         if let Some(tools) = tools
             && !tools.iter().any(|t| t.name == function_name)
         {
             tracing::warn!("Tool '{}' is not defined in the tools list.", function_name);
         }
 
+        // 校验 JSON 参数；失败时退化为原始字符串
         let arguments_json = match serde_json::from_str::<serde_json::Value>(arguments_raw) {
             Ok(val) => serde_json::to_string(&val)?,
             Err(e) => {
@@ -217,8 +268,12 @@ fn parse_section_block(
 #[cfg(test)]
 mod tests {
     //! ## 测试过程
+    //! 围绕 Kimi K2 公开 API（`detect_tool_call_start_kimi_k2`、
+    //! `find_tool_call_end_position_kimi_k2`、`try_tool_call_parse_kimi_k2`）覆盖：
+    //! 起始/结束探测、单/多调用、区段截断恢复、id 保留、非法 JSON 退化等。
     //!
     //! ## 意义
+    //! 锁定 Kimi K2 区段在截断与多调用场景下的可观察行为，保证与 vllm/sglang 的兼容性。
     use super::*;
     use rstest::rstest;
 

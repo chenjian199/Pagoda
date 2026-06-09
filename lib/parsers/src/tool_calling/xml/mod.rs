@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA.
 // SPDX-License-Identifier: Apache-2.0
 
+//! # tool_calling::xml
+//!
 //! ## 设计意图
+//! 汇集基于 XML 标签的工具调用解析器：通用 XML、GLM-4.7、Kimi-K2 三种方言。
 //!
 //! ## 外部契约
 //! - 对外重新导出三种方言各自的「检测起始 / 定位结束 / 解析」三组函数。
