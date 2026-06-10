@@ -15,7 +15,7 @@
 #[cfg(feature = "integration")]
 mod integration {
 
-    pub const DEFAULT_NAMESPACE: &str = "dynamo";
+    pub const DEFAULT_NAMESPACE: &str = "pagoda";
 
     use pagoda_runtime::{
         DistributedRuntime, Runtime, Worker,

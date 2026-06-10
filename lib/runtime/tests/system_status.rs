@@ -88,12 +88,12 @@ async fn health_endpoint_reports_aggregated_health() -> Result<()> {
             assert!(body_after.contains("\"status\":\"ready\""));
 
             let parsed: Value = serde_json::from_str(&body_after)?;
-            let endpoints = parsed
-                .get("endpoints")
+            let portnames = parsed
+                .get("portnames")
                 .and_then(Value::as_object)
-                .ok_or_else(|| anyhow::anyhow!("health body missing endpoints: {body_after}"))?;
+                .ok_or_else(|| anyhow::anyhow!("health body missing portnames: {body_after}"))?;
             assert_eq!(
-                endpoints.get(ENDPOINT_NAME).and_then(Value::as_str),
+                portnames.get(ENDPOINT_NAME).and_then(Value::as_str),
                 Some("ready")
             );
 
@@ -137,12 +137,12 @@ async fn status_endpoint_includes_registered_endpoints() -> Result<()> {
             assert_eq!(status, 200, "body={body}");
 
             let parsed: Value = serde_json::from_str(&body)?;
-            let endpoints = parsed
-                .get("endpoints")
+            let portnames = parsed
+                .get("portnames")
                 .and_then(Value::as_object)
-                .ok_or_else(|| anyhow::anyhow!("health body missing endpoints: {body}"))?;
+                .ok_or_else(|| anyhow::anyhow!("health body missing portnames: {body}"))?;
             assert_eq!(
-                endpoints.get(ENDPOINT_NAME).and_then(Value::as_str),
+                portnames.get(ENDPOINT_NAME).and_then(Value::as_str),
                 Some("ready"),
                 "registered endpoint should appear in health status JSON"
             );

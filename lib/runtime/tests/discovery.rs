@@ -434,7 +434,7 @@ mod etcd {
             .register(endpoint_discovery_spec(&namespace, "comp-b", "ep-a"))
             .await?;
 
-        let query = DiscoveryQuery::NamespacedEndpoints {
+        let query = DiscoveryQuery::NamespacedPortNames {
             namespace: namespace.clone(),
         };
         assert_eq!(drt.discovery().list(query.clone()).await?.len(), 2);
@@ -486,13 +486,13 @@ mod kube {
     // 目的/场景：Kubernetes discovery 经 `register`/`list` 完成单 pod 元数据往返。
     //
     // 生产逻辑：`KubeDiscoveryClient::register_internal` 写本地 snapshot 并 `apply_cr`
-    // 持久化 `DynamoWorkerMetadata`（`discovery/kube.rs` / `crd.rs`）。
+    // 持久化 `PagodaWorkerMetadata`（`discovery/kube.rs` / `crd.rs`）。
     //
     // 测试计划：`kube_runtime`（含 EndpointSlice fixture）→ `register` → `wait_for_discovery_list`。
     //
     // 关键断言：list 返回 1 条；`instance_id` 与 register 返回值一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_register_list_roundtrip() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, fixture) = kube_runtime().await?;
@@ -523,7 +523,7 @@ mod kube {
     //
     // 关键断言：Added/Removed 事件的 namespace/component/endpoint 与注册一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_watch_sees_register_and_unregister() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, fixture) = kube_runtime().await?;
@@ -581,7 +581,7 @@ mod kube {
     //
     // 关键断言：精确 query 1 条；错 endpoint / 错 namespace 均为空。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_filters_exact_namespace_component_endpoint() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, fixture) = kube_runtime().await?;
@@ -631,7 +631,7 @@ mod kube {
     //
     // 关键断言：B 侧 list 1 条；`instance_id == hash_pod_name(pod_a)`。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_cross_pod_shares_instances() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let pod_namespace =
@@ -669,7 +669,7 @@ mod kube {
     //
     // 关键断言：list 1 条且 `instance_id` 为合法 pod。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_list_ignores_invalid_cr_data() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let pod_namespace =
@@ -722,7 +722,7 @@ mod kube {
     //
     // 关键断言：无 slice 时空；补 slice 后非空且 instance_id 一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_requires_ready_endpoint_and_cr() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let pod_namespace =
@@ -768,7 +768,7 @@ mod kube {
     //
     // 关键断言：list 1 条；`instance_id == hash_pod_name(pod)`。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_container_mode_register_list_roundtrip() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let pod_namespace =
@@ -809,7 +809,7 @@ mod kube {
     //
     // 关键断言：Removed 事件 `instance_id` 与注册一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + DynamoWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
     async fn kube_discovery_pod_delete_removes_from_watch() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, mut fixture) = kube_runtime().await?;

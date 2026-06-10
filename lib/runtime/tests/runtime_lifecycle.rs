@@ -38,7 +38,7 @@ async fn worker_execute_runs_async_workload_to_completion() -> Result<()> {
     .args([
         "test",
         "-p",
-        "dynamo-runtime",
+        "pagoda-runtime",
         "--test",
         "lifecycle",
         "test_lifecycle",

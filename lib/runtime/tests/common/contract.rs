@@ -42,7 +42,7 @@ static CONTRACT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 static INTEGRATION_TEST_ENV: Once = Once::new();
 
-/// Process-wide Tokio + Dynamo runtime. The TCP accept loop (`GLOBAL_TCP_SERVER` in
+/// Process-wide Tokio + Pagoda runtime. The TCP accept loop (`GLOBAL_TCP_SERVER` in
 /// `manager.rs`) is spawned on this runtime so it survives `#[tokio::test]` teardown.
 struct ProcessTestHarness {
     runtime: Runtime,
@@ -925,9 +925,9 @@ pub async fn etcd_kv_manager() -> Result<kv::Manager> {
 }
 
 #[cfg(feature = "integration-kube")]
-const KUBE_DISCOVERY_BACKEND_LABEL: &str = "nvidia.com/dynamo-discovery-backend";
+const KUBE_DISCOVERY_BACKEND_LABEL: &str = "nvidia.com/pagoda-discovery-backend";
 #[cfg(feature = "integration-kube")]
-const KUBE_DISCOVERY_ENABLED_LABEL: &str = "nvidia.com/dynamo-discovery-enabled";
+const KUBE_DISCOVERY_ENABLED_LABEL: &str = "nvidia.com/pagoda-discovery-enabled";
 /// Matches `DEBOUNCE_DURATION` in `discovery/kube/daemon.rs`.
 #[cfg(feature = "integration-kube")]
 const KUBE_DISCOVERY_DAEMON_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -960,16 +960,16 @@ pub async fn require_kube_cluster() -> Result<()> {
     kube::Client::try_default()
         .await
         .context(
-            "Kubernetes API not reachable (set KUBECONFIG, install DynamoWorkerMetadata CRD, or run in-cluster)",
+            "Kubernetes API not reachable (set KUBECONFIG, install PagodaWorkerMetadata CRD, or run in-cluster)",
         )?;
     Ok(())
 }
 
 /// Marks the test pod as ready in an EndpointSlice so the discovery daemon includes CR metadata.
 ///
-/// Production correlates `DynamoWorkerMetadata` CRs with ready EndpointSlice entries
+/// Production correlates `PagodaWorkerMetadata` CRs with ready EndpointSlice entries
 /// (`discovery/kube/daemon.rs`). Out-of-cluster tests must install this fixture explicitly,
-/// including a real Pod so `DynamoWorkerMetadata` ownerReferences are not garbage-collected.
+/// including a real Pod so `PagodaWorkerMetadata` ownerReferences are not garbage-collected.
 #[cfg(feature = "integration-kube")]
 pub struct KubeReadinessFixture {
     client: kube::Client,
@@ -1369,7 +1369,7 @@ async fn teardown_kube_readiness_fixture(
         }
     }
 
-    let gvk = GroupVersionKind::gvk("nvidia.com", "v1alpha1", "DynamoWorkerMetadata");
+    let gvk = GroupVersionKind::gvk("nvidia.com", "v1alpha1", "PagodaWorkerMetadata");
     let ar = ApiResource::from_gvk(&gvk);
     let cr_api: Api<DynamicObject> = Api::namespaced_with(client.clone(), pod_namespace, &ar);
     match cr_api.delete(cr_name, &DeleteParams::default()).await {
@@ -1481,7 +1481,7 @@ pub async fn kube_dual_pod_runtimes(
     Ok((rt, drt_a, drt_b))
 }
 
-/// Apply a `DynamoWorkerMetadata` CR whose `spec.data` cannot deserialize to `DiscoveryMetadata`.
+/// Apply a `PagodaWorkerMetadata` CR whose `spec.data` cannot deserialize to `DiscoveryMetadata`.
 #[cfg(feature = "integration-kube")]
 pub async fn kube_apply_invalid_worker_metadata_cr(
     client: &kube::Client,
@@ -1496,7 +1496,7 @@ pub async fn kube_apply_invalid_worker_metadata_cr(
 
     let cr = serde_json::json!({
         "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoWorkerMetadata",
+        "kind": "PagodaWorkerMetadata",
         "metadata": {
             "name": cr_name,
             "ownerReferences": [{
@@ -1518,13 +1518,13 @@ pub async fn kube_apply_invalid_worker_metadata_cr(
             }
         }
     });
-    let gvk = GroupVersionKind::gvk("nvidia.com", "v1alpha1", "DynamoWorkerMetadata");
+    let gvk = GroupVersionKind::gvk("nvidia.com", "v1alpha1", "PagodaWorkerMetadata");
     let ar = ApiResource::from_gvk(&gvk);
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
-    let params = PatchParams::apply("dynamo-integration-test").force();
+    let params = PatchParams::apply("pagoda-integration-test").force();
     api.patch(cr_name, &params, &Patch::Apply(&cr))
         .await
-        .with_context(|| format!("apply invalid DynamoWorkerMetadata CR {cr_name}"))?;
+        .with_context(|| format!("apply invalid PagodaWorkerMetadata CR {cr_name}"))?;
     Ok(())
 }
 
