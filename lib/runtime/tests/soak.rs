@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // cargo test --test soak integration::main --features integration
@@ -9,15 +9,15 @@
 //!
 //! A reasonable soak test configuration to start off is 1 minute duration with 10000 batch load:
 //! export DYN_QUEUED_UP_PROCESSING=true
-//! export DYN_SOAK_BATCH_LOAD=10000
-//! export DYN_SOAK_RUN_DURATION=60s
+//! export PGD_SOAK_BATCH_LOAD=10000
+//! export PGD_SOAK_RUN_DURATION=60s
 //! cargo test --test soak integration::main --features integration -- --nocapture
 #[cfg(feature = "integration")]
 mod integration {
 
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
-    use dynamo_runtime::{
+    use pagoda_runtime::{
         DistributedRuntime, Runtime, Worker,
         config::environment_names::testing as env_testing,
         logging,
@@ -111,7 +111,7 @@ mod integration {
     async fn backend(runtime: DistributedRuntime) -> Result<Arc<RequestHandler>> {
         // get the queued up processing setting from env (not delayed)
         let queued_up_processing =
-            std::env::var(env_testing::DYN_QUEUED_UP_PROCESSING).unwrap_or("false".to_string());
+            std::env::var(env_testing::PGD_QUEUED_UP_PROCESSING).unwrap_or("false".to_string());
         let queued_up_processing: bool = queued_up_processing.parse().unwrap_or(false);
 
         // attach an ingress to an engine
@@ -120,10 +120,10 @@ mod integration {
 
         // // make the ingress discoverable via a component service
         // // we must first create a service, then we can attach one more more endpoints
-        let component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
+        let component = runtime.namespace(DEFAULT_NAMESPACE)?.servicegroup("backend")?;
         component
-            .endpoint("generate")
-            .endpoint_builder()
+            .portname("generate")
+            .portname_builder()
             .handler(ingress)
             .start()
             .await?;
@@ -134,18 +134,18 @@ mod integration {
     async fn client(runtime: DistributedRuntime) -> Result<()> {
         // get the run duration from env
         let run_duration =
-            std::env::var(env_testing::DYN_SOAK_RUN_DURATION).unwrap_or("3s".to_string());
+            std::env::var(env_testing::PGD_SOAK_RUN_DURATION).unwrap_or("3s".to_string());
         let run_duration =
             humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(3));
 
         let batch_load =
-            std::env::var(env_testing::DYN_SOAK_BATCH_LOAD).unwrap_or("100".to_string());
+            std::env::var(env_testing::PGD_SOAK_BATCH_LOAD).unwrap_or("100".to_string());
         let batch_load: usize = batch_load.parse().unwrap_or(100);
 
         let client = runtime
             .namespace(DEFAULT_NAMESPACE)?
-            .component("backend")?
-            .endpoint("generate")
+            .servicegroup("backend")?
+            .portname("generate")
             .client()
             .await?;
 

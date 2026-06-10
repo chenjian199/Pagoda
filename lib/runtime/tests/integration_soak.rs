@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
@@ -12,8 +12,8 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use dynamo_runtime::{
-    component::{Client, Endpoint},
+use pagoda_runtime::{
+    servicegroup::{Client, PortName},
     engine::{AsyncEngine, AsyncEngineContextProvider},
     metrics::MetricsHierarchy,
     pipeline::{
@@ -60,21 +60,21 @@ fn count_file_discovery_namespace_keys(kv_root: &Path, namespace: &str) -> Resul
 }
 
 async fn assert_discovery_matches_slots(
-    drt: &dynamo_runtime::DistributedRuntime,
+    drt: &pagoda_runtime::DistributedRuntime,
     namespace: &str,
     slots: &[ChurnSlot],
 ) -> Result<()> {
     let registered = slots.iter().filter(|slot| slot.registered).count();
     let mut listed_total = 0usize;
     for slot in slots {
-        let query = discovery_query_endpoint(namespace, &slot.component, &slot.endpoint_name);
+        let query = discovery_query_endpoint(namespace, &slot.servicegroup, &slot.endpoint_name);
         let listed = drt.discovery().list(query).await?;
         if slot.registered {
-            assert_eq!(listed.len(), 1, "expected discovery entry for {}", slot.component);
+            assert_eq!(listed.len(), 1, "expected discovery entry for {}", slot.servicegroup);
             let instances = slot.client.instances();
             assert_eq!(instances.len(), 1);
         } else {
-            assert!(listed.is_empty(), "stale discovery entry for {}", slot.component);
+            assert!(listed.is_empty(), "stale discovery entry for {}", slot.servicegroup);
             assert!(slot.client.instances().is_empty());
         }
         listed_total += listed.len();
@@ -87,9 +87,9 @@ async fn assert_discovery_matches_slots(
 }
 
 struct ChurnSlot {
-    component: String,
+    servicegroup: String,
     endpoint_name: String,
-    endpoint: Endpoint,
+    portname: PortName,
     client: Client,
     registered: bool,
     endpoint_task: tokio::task::JoinHandle<Result<()>>,
@@ -139,7 +139,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<TestResponse>, anyhow::Error>
             }
         });
 
-        Ok(dynamo_runtime::engine::ResponseStream::new(
+        Ok(pagoda_runtime::engine::ResponseStream::new(
             Box::pin(ReceiverStream::new(rx)),
             engine_ctx,
         ))
@@ -173,19 +173,19 @@ async fn run_soak_contract(env_duration: &str, env_batch: &str) -> Result<()> {
     );
     let ingress = Ingress::for_engine(handler)?;
     let namespace = unique_name("soak-smoke");
-    let component = drt.namespace(namespace.clone())?.component("backend")?;
+    let component = drt.namespace(namespace.clone())?.servicegroup("backend")?;
     let endpoint_task = rt.primary().spawn(
         component
-            .endpoint("generate")
-            .endpoint_builder()
+            .portname("generate")
+            .portname_builder()
             .handler(ingress)
             .start(),
     );
 
     let client = drt
         .namespace(namespace)?
-        .component("backend")?
-        .endpoint("generate")
+        .servicegroup("backend")?
+        .portname("generate")
         .client()
         .await?;
     client.wait_for_instances().await?;
@@ -236,7 +236,7 @@ async fn run_soak_contract(env_duration: &str, env_batch: &str) -> Result<()> {
 //
 // 生产逻辑：`PushRouter` + `Ingress::for_engine` + streaming backend（与旧 `soak.rs` 同路径）。
 //
-// 测试计划：`DYN_SOAK_RUN_DURATION=2s`、`DYN_SOAK_BATCH_LOAD=8` → 并发 batch RPC →
+// 测试计划：`PGD_SOAK_RUN_DURATION=2s`、`PGD_SOAK_BATCH_LOAD=8` → 并发 batch RPC →
 // 打印 backend 计数与 metrics series 数。
 //
 // 关键断言：run 期间无 panic；backend 计数 > 0。
@@ -245,8 +245,8 @@ async fn soak_smoke_completes_short_run() -> Result<()> {
     let _guard = acquire_contract_test_lock();
     async_with_vars(
         [
-            ("DYN_SOAK_RUN_DURATION", Some("2s")),
-            ("DYN_SOAK_BATCH_LOAD", Some("8")),
+            ("PGD_SOAK_RUN_DURATION", Some("2s")),
+            ("PGD_SOAK_BATCH_LOAD", Some("8")),
         ],
         async {
             run_soak_contract("2s", "8").await
@@ -259,19 +259,19 @@ async fn soak_smoke_completes_short_run() -> Result<()> {
 //
 // 生产逻辑：同 `soak_smoke_completes_short_run`；默认 30s / batch 64，可通过 env 覆盖。
 //
-// 测试计划：`#[ignore]` + `--include-ignored`；读取 `DYN_SOAK_*` env 运行。
+// 测试计划：`#[ignore]` + `--include-ignored`；读取 `PGD_SOAK_*` env 运行。
 //
 // 关键断言：完整 duration 内 RPC 无失败；backend 计数与 batch 总量一致量级。
 #[tokio::test]
-#[ignore = "long-running soak (Release/Nightly); set DYN_SOAK_RUN_DURATION and --include-ignored"]
+#[ignore = "long-running soak (Release/Nightly); set PGD_SOAK_RUN_DURATION and --include-ignored"]
 async fn soak_sustained_load_reports_diagnostics() -> Result<()> {
     let _guard = acquire_contract_test_lock();
-    let run_duration = std::env::var("DYN_SOAK_RUN_DURATION").unwrap_or_else(|_| "30s".into());
-    let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or_else(|_| "64".into());
+    let run_duration = std::env::var("PGD_SOAK_RUN_DURATION").unwrap_or_else(|_| "30s".into());
+    let batch_load = std::env::var("PGD_SOAK_BATCH_LOAD").unwrap_or_else(|_| "64".into());
     async_with_vars(
         [
-            ("DYN_SOAK_RUN_DURATION", Some(run_duration.as_str())),
-            ("DYN_SOAK_BATCH_LOAD", Some(batch_load.as_str())),
+            ("PGD_SOAK_RUN_DURATION", Some(run_duration.as_str())),
+            ("PGD_SOAK_BATCH_LOAD", Some(batch_load.as_str())),
         ],
         async { run_soak_contract(&run_duration, &batch_load).await },
     )
@@ -280,7 +280,7 @@ async fn soak_sustained_load_reports_diagnostics() -> Result<()> {
 
 // 目的/场景：多 endpoint 随机 register/unregister churn 后 discovery 无 stale 实例。
 //
-// 生产逻辑：`register_endpoint_instance` / `unregister_endpoint_instance` 写 file KV；
+// 生产逻辑：`register_portname_instance` / `unregister_portname_instance` 写 file KV；
 // client watch 与 `discovery.list` 应收敛到一致视图（`endpoint.rs` + `kv_store.rs`）。
 //
 // 测试计划：6 个 served endpoint → 48 轮伪随机 churn → 周期性校验 → 全部注销 → KV 为空。
@@ -302,13 +302,13 @@ async fn random_endpoint_churn_does_not_leave_stale_instances() -> Result<()> {
             let endpoint_name = format!("e{ep_idx}");
             let endpoint = drt
                 .namespace(namespace.clone())?
-                .component(component.clone())?
-                .endpoint(endpoint_name.clone());
+                .servicegroup(component.clone())?
+                .portname(endpoint_name.clone());
             let (client, endpoint_task) = serve_streaming_endpoint(endpoint.clone()).await?;
             slots.push(ChurnSlot {
-                component,
+                servicegroup: component,
                 endpoint_name,
-                endpoint,
+                portname: endpoint,
                 client,
                 registered: true,
                 endpoint_task,
@@ -320,11 +320,11 @@ async fn random_endpoint_churn_does_not_leave_stale_instances() -> Result<()> {
     for round in 0..48 {
         let idx = rng.random_range(0..slots.len());
         if slots[idx].registered {
-            slots[idx].endpoint.unregister_endpoint_instance().await?;
+            slots[idx].portname.unregister_portname_instance().await?;
             wait_for_instances_empty(&slots[idx].client).await?;
             slots[idx].registered = false;
         } else {
-            slots[idx].endpoint.register_endpoint_instance().await?;
+            slots[idx].portname.register_portname_instance().await?;
             slots[idx]
                 .client
                 .wait_for_instances()
@@ -340,7 +340,7 @@ async fn random_endpoint_churn_does_not_leave_stale_instances() -> Result<()> {
 
     for slot in &mut slots {
         if slot.registered {
-            slot.endpoint.unregister_endpoint_instance().await?;
+            slot.portname.unregister_portname_instance().await?;
             wait_for_instances_empty(&slot.client).await?;
             slot.registered = false;
         }
@@ -377,8 +377,8 @@ async fn runtime_shutdown_after_soak_releases_external_resources() -> Result<()>
     let namespace = unique_name("soak-shutdown-file");
     let endpoint = drt
         .namespace(namespace.clone())?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, endpoint_task) =
         serve_endpoint_with_engine(endpoint.clone(), make_echo_engine()).await?;
     let router = round_robin_router(client.clone()).await?;
@@ -394,7 +394,7 @@ async fn runtime_shutdown_after_soak_releases_external_resources() -> Result<()>
         assert_eq!(collect_stream_chunks(response).await, vec!["soak-shutdown"]);
     }
 
-    endpoint.unregister_endpoint_instance().await?;
+    endpoint.unregister_portname_instance().await?;
     wait_for_instances_empty(&client).await?;
     assert_eq!(
         count_file_discovery_namespace_keys(&kv_path, &namespace)?,
@@ -461,8 +461,8 @@ async fn long_running_streams_can_be_cancelled_without_task_leak() -> Result<()>
 
     let endpoint = drt
         .namespace(unique_name("soak-cancel"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>> =
         Arc::new(LongRunningCancellableEngine {
             started: started.clone(),

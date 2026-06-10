@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #![allow(dead_code)]
@@ -11,22 +11,23 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_runtime::{
+use pagoda_runtime::{
     DistributedRuntime, Runtime,
-    component::{Client, Component, Endpoint, Instance, TransportType},
+    servicegroup::{Client, Instance, PortName, ServiceGroup, TransportType},
     config::environment_names::{nats as env_nats, runtime::system as env_system},
     discovery::{DiscoveryEvent, DiscoveryQuery, DiscoverySpec, EventTransportKind},
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
     engine::AsyncEngine,
     pipeline::{ManyOut, RouterMode, ServiceEngine, SingleIn, network::Ingress},
     protocols::annotated::Annotated,
-    service::{EndpointInfo, ServiceClient},
+    service::{PortNameInfo, ServiceClient},
     storage::kv,
     system_status_server::SystemStatusServerInfo,
     traits::DistributedRuntimeProvider,
     transports::{etcd, nats},
 };
 use futures::StreamExt;
+#[cfg(feature = "integration-kube")]
 use temp_env::async_with_vars;
 
 use super::engines::{AsyncGenerator, LlmdbaEngine as LambdaEngine};
@@ -112,15 +113,15 @@ pub fn init_integration_test_env() {
     INTEGRATION_TEST_ENV.call_once(|| {
         // SAFETY: called once before any parallel test work.
         unsafe {
-            std::env::set_var("DYN_TCP_RPC_HOST", "127.0.0.1");
-            std::env::set_var("DYN_HTTP_RPC_HOST", "127.0.0.1");
+            std::env::set_var("PGD_TCP_RPC_HOST", "127.0.0.1");
+            std::env::set_var("PGD_HTTP_RPC_HOST", "127.0.0.1");
             // Response-stream server expects a network interface *name*, not an IP.
             // Binding `lo` keeps call-home streams on loopback (see `TcpStreamServer`).
             #[cfg(target_os = "linux")]
-            std::env::set_var("DYN_TCP_RESPONSE_STREAM_HOST", "lo");
+            std::env::set_var("PGD_TCP_RESPONSE_STREAM_HOST", "lo");
             #[cfg(target_os = "macos")]
-            std::env::set_var("DYN_TCP_RESPONSE_STREAM_HOST", "lo0");
-            std::env::set_var("DYN_COMPUTE_THREADS", "2");
+            std::env::set_var("PGD_TCP_RESPONSE_STREAM_HOST", "lo0");
+            std::env::set_var("PGD_COMPUTE_THREADS", "2");
         }
     });
 }
@@ -214,7 +215,7 @@ pub fn file_backed_config(kv_path: PathBuf) -> DistributedConfig {
         discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(kv_path)),
         nats_config: None,
         request_plane: RequestPlaneMode::Tcp,
-        event_transport_kind: dynamo_runtime::discovery::EventTransportKind::Zmq,
+        event_transport_kind: pagoda_runtime::discovery::EventTransportKind::Zmq,
     }
 }
 
@@ -236,13 +237,13 @@ pub async fn additional_file_backed_runtime(
 
 pub fn endpoint_discovery_spec(
     namespace: &str,
-    component: &str,
+    servicegroup: &str,
     endpoint: &str,
 ) -> DiscoverySpec {
-    DiscoverySpec::Endpoint {
+    DiscoverySpec::PortName {
         namespace: namespace.to_string(),
-        component: component.to_string(),
-        endpoint: endpoint.to_string(),
+        servicegroup: servicegroup.to_string(),
+        portname: endpoint.to_string(),
         transport: TransportType::Tcp("127.0.0.1:8080".to_string()),
         device_type: None,
     }
@@ -250,18 +251,18 @@ pub fn endpoint_discovery_spec(
 
 pub fn discovery_query_endpoint(
     namespace: &str,
-    component: &str,
+    servicegroup: &str,
     endpoint: &str,
 ) -> DiscoveryQuery {
-    DiscoveryQuery::Endpoint {
+    DiscoveryQuery::PortName {
         namespace: namespace.to_string(),
-        component: component.to_string(),
-        endpoint: endpoint.to_string(),
+        servicegroup: servicegroup.to_string(),
+        portname: endpoint.to_string(),
     }
 }
 
 pub async fn wait_for_discovery_event(
-    stream: &mut dynamo_runtime::discovery::DiscoveryStream,
+    stream: &mut pagoda_runtime::discovery::DiscoveryStream,
     predicate: impl Fn(&DiscoveryEvent) -> bool,
 ) -> Result<DiscoveryEvent> {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -326,8 +327,8 @@ pub fn make_streaming_engine() -> ServiceEngine<SingleIn<String>, ManyOut<TestRe
 
 pub async fn round_robin_router(
     client: Client,
-) -> Result<dynamo_runtime::pipeline::PushRouter<String, TestResponse>> {
-    dynamo_runtime::pipeline::PushRouter::<String, TestResponse>::from_client(
+) -> Result<pagoda_runtime::pipeline::PushRouter<String, TestResponse>> {
+    pagoda_runtime::pipeline::PushRouter::<String, TestResponse>::from_client(
         client,
         RouterMode::RoundRobin,
     )
@@ -343,9 +344,9 @@ pub async fn collect_stream_chunks(mut response: ManyOut<TestResponse>) -> Vec<S
 }
 
 pub async fn serve_streaming_endpoint(
-    endpoint: Endpoint,
+    portname: PortName,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
-    serve_endpoint_with_engine(endpoint, make_streaming_engine()).await
+    serve_endpoint_with_engine(portname, make_streaming_engine()).await
 }
 
 fn is_nats_request_failure(err: &anyhow::Error) -> bool {
@@ -357,20 +358,20 @@ fn is_nats_request_failure(err: &anyhow::Error) -> bool {
 }
 
 async fn start_served_endpoint(
-    endpoint: Endpoint,
+    portname: PortName,
     engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>>,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
     init_integration_test_env();
     ensure_integration_tcp_request_plane().await?;
-    let _ = endpoint.drt().request_plane_server().await?;
+    let _ = portname.drt().request_plane_server().await?;
     let ingress = Ingress::for_engine(engine)?;
     // Schedule on the same Tokio runtime as `GLOBAL_TCP_SERVER` (see `ProcessTestHarness`).
-    let endpoint_task = endpoint
+    let endpoint_task = portname
         .drt()
         .runtime()
         .primary()
-        .spawn(endpoint.endpoint_builder().handler(ingress).start());
-    let client = endpoint.client().await.context("create endpoint client")?;
+        .spawn(portname.portname_builder().handler(ingress).start());
+    let client = portname.client().await.context("create endpoint client")?;
     client
         .wait_for_instances()
         .await
@@ -379,10 +380,10 @@ async fn start_served_endpoint(
 }
 
 pub async fn serve_endpoint_with_engine(
-    endpoint: Endpoint,
+    portname: PortName,
     engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>>,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
-    let (client, endpoint_task) = start_served_endpoint(endpoint, engine).await?;
+    let (client, endpoint_task) = start_served_endpoint(portname, engine).await?;
     confirm_tcp_rpc_ready(client.clone())
         .await
         .context("confirm TCP request plane is reachable")?;
@@ -394,10 +395,10 @@ pub async fn serve_endpoint_with_engine(
 /// `CancellableEngine` defers its first stream item to a spawned task; the probe would block
 /// until that task runs and is unnecessary when the test immediately drives RPC itself.
 pub async fn serve_endpoint_with_engine_no_tcp_probe(
-    endpoint: Endpoint,
+    portname: PortName,
     engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>>,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
-    start_served_endpoint(endpoint, engine).await
+    start_served_endpoint(portname, engine).await
 }
 
 /// Single-chunk echo: response data equals request string (TCP payload roundtrip contract).
@@ -411,14 +412,14 @@ pub fn make_echo_engine() -> ServiceEngine<SingleIn<String>, ManyOut<TestRespons
 
 pub fn model_discovery_spec(
     namespace: &str,
-    component: &str,
+    servicegroup: &str,
     endpoint: &str,
     model_name: &str,
 ) -> DiscoverySpec {
     DiscoverySpec::Model {
         namespace: namespace.to_string(),
-        component: component.to_string(),
-        endpoint: endpoint.to_string(),
+        servicegroup: servicegroup.to_string(),
+        portname: endpoint.to_string(),
         card_json: serde_json::json!({ "display_name": model_name }),
         model_suffix: None,
     }
@@ -445,7 +446,7 @@ pub async fn wait_for_instances_empty(client: &Client) -> Result<()> {
 }
 
 pub async fn generate_expect_no_instances(
-    router: &dynamo_runtime::pipeline::PushRouter<String, TestResponse>,
+    router: &pagoda_runtime::pipeline::PushRouter<String, TestResponse>,
     payload: &str,
 ) -> Result<()> {
     let err = match router.generate(payload.to_string().into()).await {
@@ -459,10 +460,10 @@ pub async fn generate_expect_no_instances(
 pub async fn list_endpoint_models(drt: &DistributedRuntime, namespace: &str) -> Result<usize> {
     let discovery = drt.discovery();
     let instances = discovery
-        .list(DiscoveryQuery::EndpointModels {
+        .list(DiscoveryQuery::PortNameModels {
             namespace: namespace.to_string(),
-            component: "backend".to_string(),
-            endpoint: "generate".to_string(),
+            servicegroup: "backend".to_string(),
+            portname: "generate".to_string(),
         })
         .await?;
     Ok(instances.len())
@@ -471,8 +472,8 @@ pub async fn list_endpoint_models(drt: &DistributedRuntime, namespace: &str) -> 
 /// Env vars to start system status HTTP on loopback with an OS-assigned port.
 pub fn system_status_server_env() -> [(&'static str, Option<&'static str>); 2] {
     [
-        (env_system::DYN_SYSTEM_PORT, Some("0")),
-        (env_system::DYN_SYSTEM_HOST, Some("127.0.0.1")),
+        (env_system::PGD_SYSTEM_PORT, Some("0")),
+        (env_system::PGD_SYSTEM_HOST, Some("127.0.0.1")),
     ]
 }
 
@@ -483,7 +484,7 @@ pub fn require_system_status_server(
     drt.system_status_server_info().ok_or_else(|| {
         anyhow!(
             "system status server not running; set {}=0 before creating DRT",
-            env_system::DYN_SYSTEM_PORT
+            env_system::PGD_SYSTEM_PORT
         )
     })
 }
@@ -554,14 +555,14 @@ pub async fn wait_for_nats_service_endpoints(
     service_name: &str,
     min_endpoints: usize,
     timeout: Duration,
-) -> Result<Vec<EndpointInfo>> {
+) -> Result<Vec<PortNameInfo>> {
     let client = nats_service_client().await?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let set = client
             .collect_services(service_name, Duration::from_secs(2))
             .await?;
-        let endpoints: Vec<EndpointInfo> = set.into_endpoints().collect();
+        let endpoints: Vec<PortNameInfo> = set.into_portnames().collect();
         if endpoints.len() >= min_endpoints {
             return Ok(endpoints);
         }
@@ -576,7 +577,7 @@ pub async fn wait_for_nats_service_endpoints(
 }
 
 /// Slugified NATS service name for a component (`Component::service_name` contract).
-pub fn component_service_name(component: &Component) -> String {
+pub fn servicegroup_service_name(component: &ServiceGroup) -> String {
     component.service_name()
 }
 
@@ -670,7 +671,7 @@ pub async fn nats_broker_outage_and_recovery(outage: Duration) -> Result<()> {
 
 /// Returns true if any RPC attempt fails while the broker is down (generate Err or stream timeout).
 pub async fn probe_nats_rpc_failure_during_outage(
-    router: &dynamo_runtime::pipeline::PushRouter<String, TestResponse>,
+    router: &pagoda_runtime::pipeline::PushRouter<String, TestResponse>,
     attempts: usize,
 ) -> bool {
     for _ in 0..attempts {
@@ -742,19 +743,19 @@ pub async fn additional_nats_file_backed_runtime(
 
 /// Start a NATS endpoint and wait for discovery registration only (no RPC probe).
 pub async fn start_served_endpoint_nats(
-    endpoint: Endpoint,
+    portname: PortName,
     engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>>,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
     require_nats_broker().await?;
     init_integration_test_env();
-    let _ = endpoint.drt().request_plane_server().await?;
+    let _ = portname.drt().request_plane_server().await?;
     let ingress = Ingress::for_engine(engine)?;
-    let endpoint_task = endpoint
+    let endpoint_task = portname
         .drt()
         .runtime()
         .primary()
-        .spawn(endpoint.endpoint_builder().handler(ingress).start());
-    let client = endpoint.client().await.context("create endpoint client")?;
+        .spawn(portname.portname_builder().handler(ingress).start());
+    let client = portname.client().await.context("create endpoint client")?;
     client
         .wait_for_instances()
         .await
@@ -780,16 +781,16 @@ pub async fn confirm_nats_rpc_ready(client: Client) -> Result<()> {
 }
 
 pub async fn serve_streaming_endpoint_nats(
-    endpoint: Endpoint,
+    portname: PortName,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
-    serve_endpoint_with_engine_nats(endpoint, make_streaming_engine()).await
+    serve_endpoint_with_engine_nats(portname, make_streaming_engine()).await
 }
 
 pub async fn serve_endpoint_with_engine_nats(
-    endpoint: Endpoint,
+    portname: PortName,
     engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>>,
 ) -> Result<(Client, tokio::task::JoinHandle<Result<()>>)> {
-    let (client, endpoint_task) = start_served_endpoint_nats(endpoint, engine).await?;
+    let (client, endpoint_task) = start_served_endpoint_nats(portname, engine).await?;
     confirm_nats_rpc_ready(client.clone())
         .await
         .context("confirm NATS request plane is reachable")?;
@@ -890,13 +891,13 @@ pub fn wipe_file_discovery_namespace(kv_root: &Path, namespace: &str) -> Result<
 
 /// NATS KV bucket for storage contract tests (uses public `NATSStore` + `Store` trait).
 pub async fn nats_kv_test_bucket() -> Result<Box<dyn kv::Bucket>> {
-    use dynamo_runtime::storage::kv::{NATSStore, Store};
+    use pagoda_runtime::storage::kv::{NATSStore, Store};
 
     require_nats_broker().await?;
     let client = nats::ClientOptions::default().connect().await?;
-    let endpoint = dynamo_runtime::protocols::EndpointId {
+    let endpoint = pagoda_runtime::protocols::PortNameId {
         namespace: unique_name("nats-kv"),
-        component: "integration".to_string(),
+        servicegroup: "integration".to_string(),
         name: "store".to_string(),
     };
     let store = NATSStore::new(client, endpoint);
@@ -1395,7 +1396,7 @@ pub async fn wait_for_discovery_list(
     drt: &DistributedRuntime,
     query: DiscoveryQuery,
     expected_len: usize,
-) -> Result<Vec<dynamo_runtime::discovery::DiscoveryInstance>> {
+) -> Result<Vec<pagoda_runtime::discovery::DiscoveryInstance>> {
     let deadline = tokio::time::Instant::now() + KUBE_DISCOVERY_LIST_TIMEOUT;
     loop {
         let listed = drt.discovery().list(query.clone()).await?;
@@ -1434,7 +1435,7 @@ pub async fn kube_runtime_for_identity(
         ("POD_NAME", Some(pod_name)),
         ("POD_UID", Some(pod_uid)),
         ("POD_NAMESPACE", Some(pod_namespace)),
-        ("DYN_KUBE_DISCOVERY_MODE", Some(mode)),
+        ("PGD_KUBE_DISCOVERY_MODE", Some(mode)),
     ];
     if let Some(name) = container_name {
         vars.push(("CONTAINER_NAME", Some(name)));
@@ -1469,7 +1470,7 @@ pub async fn kube_dual_pod_runtimes(
             ("POD_NAME", Some(fixture.pod_b.pod_name())),
             ("POD_UID", Some(fixture.pod_b.pod_uid())),
             ("POD_NAMESPACE", Some(pod_namespace)),
-            ("DYN_KUBE_DISCOVERY_MODE", Some("pod")),
+            ("PGD_KUBE_DISCOVERY_MODE", Some("pod")),
         ],
         async {
             DistributedRuntime::new(rt.clone(), kube_distributed_config()).await

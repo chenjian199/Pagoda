@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{sync::Arc, time::Duration};
@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use tempfile::TempDir;
-use dynamo_runtime::{
+use pagoda_runtime::{
     CancellationToken,
     engine::AsyncEngine,
     pipeline::{
@@ -64,8 +64,8 @@ async fn handler_panic_or_error_is_reported_without_killing_runtime() -> Result<
     let (rt, drt) = process_local_runtime().await?;
     let echo_endpoint = drt
         .namespace(unique_name("fail-echo"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (echo_client, echo_task) =
         serve_endpoint_with_engine(echo_endpoint, make_echo_engine()).await?;
     let echo_router = round_robin_router(echo_client).await?;
@@ -109,7 +109,7 @@ async fn critical_task_failure_is_visible_to_owner() -> Result<()> {
 
 // 目的/场景：并发 register/unregister 后 discovery 视图最终一致，不出现幽灵副本。
 //
-// 生产逻辑：`Endpoint::register_endpoint_instance` / `unregister_endpoint_instance` 经
+// 生产逻辑：`Endpoint::register_portname_instance` / `unregister_portname_instance` 经
 // discovery KV 覆盖或删除（`endpoint.rs` + `discovery/kv_store.rs`）。
 //
 // 测试计划：serve endpoint → 并发 8 次 register/unregister 交错 → 最终 `instances()` 为空。
@@ -121,8 +121,8 @@ async fn concurrent_register_unregister_is_eventually_consistent() -> Result<()>
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("fail-churn"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, endpoint_task) = serve_streaming_endpoint(endpoint.clone()).await?;
     client.wait_for_instances().await?;
     assert_eq!(client.instances().len(), 1);
@@ -132,11 +132,11 @@ async fn concurrent_register_unregister_is_eventually_consistent() -> Result<()>
     for round in 0..8 {
         let endpoint = endpoint.clone();
         tasks.push(tokio::spawn(async move {
-            endpoint.register_endpoint_instance().await?;
+            endpoint.register_portname_instance().await?;
             if round % 2 == 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            endpoint.unregister_endpoint_instance().await
+            endpoint.unregister_portname_instance().await
         }));
     }
     for task in tasks {
@@ -162,8 +162,8 @@ async fn transport_decode_error_closes_bad_request_only() -> Result<()> {
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("fail-decode"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, endpoint_task) =
         serve_endpoint_with_engine(endpoint, make_echo_engine()).await?;
     let router = round_robin_router(client).await?;
@@ -200,7 +200,7 @@ async fn transport_decode_error_closes_bad_request_only() -> Result<()> {
 // `PushRouter` 返回 no instances（`component/client.rs` + `push_router.rs`）。
 //
 // 测试计划：file-backed serve echo → RPC 成功 → 清空 namespace discovery 文件 → RPC 失败
-// → `register_endpoint_instance` 恢复 → RPC 成功。
+// → `register_portname_instance` 恢复 → RPC 成功。
 //
 // 关键断言：outage 期间 `generate_expect_no_instances`；恢复后 echo payload 一致。
 #[tokio::test]
@@ -212,8 +212,8 @@ async fn external_discovery_outage_returns_unavailable_then_recovers() -> Result
     let namespace = unique_name("fail-outage");
     let endpoint = drt
         .namespace(namespace.clone())?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, endpoint_task) =
         serve_endpoint_with_engine(endpoint.clone(), make_echo_engine()).await?;
     let router = round_robin_router(client.clone()).await?;
@@ -229,7 +229,7 @@ async fn external_discovery_outage_returns_unavailable_then_recovers() -> Result
     wait_for_instances_empty(&client).await?;
     generate_expect_no_instances(&router, "during-outage").await?;
 
-    endpoint.register_endpoint_instance().await?;
+    endpoint.register_portname_instance().await?;
     client.wait_for_instances().await?;
     confirm_tcp_rpc_ready(client.clone()).await?;
     let router = round_robin_router(client.clone()).await?;

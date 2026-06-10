@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
@@ -7,7 +7,7 @@ mod zmq {
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::{
+    use pagoda_runtime::{
         discovery::EventTransportKind,
         transports::event_plane::{EventPublisher, EventSubscriber, MsgpackCodec},
     };
@@ -35,10 +35,10 @@ mod zmq {
         let (_rt, drt) = process_local_runtime().await?;
         let component = drt
             .namespace(unique_name("zmq-roundtrip"))?
-            .component("backend")?;
+            .servicegroup("backend")?;
         const TOPIC: &str = "metrics";
 
-        let mut subscriber = EventSubscriber::for_component_with_transport(
+        let mut subscriber = EventSubscriber::for_servicegroup_with_transport(
             &component,
             TOPIC,
             EventTransportKind::Zmq,
@@ -46,7 +46,7 @@ mod zmq {
         .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
 
-        let publisher = EventPublisher::for_component_with_transport(
+        let publisher = EventPublisher::for_servicegroup_with_transport(
             &component,
             TOPIC,
             EventTransportKind::Zmq,
@@ -85,9 +85,9 @@ mod zmq {
         let (_rt, drt) = process_local_runtime().await?;
         let component = drt
             .namespace(unique_name("zmq-filter"))?
-            .component("backend")?;
+            .servicegroup("backend")?;
 
-        let mut subscriber = EventSubscriber::for_component_with_transport(
+        let mut subscriber = EventSubscriber::for_servicegroup_with_transport(
             &component,
             "alpha",
             EventTransportKind::Zmq,
@@ -95,13 +95,13 @@ mod zmq {
         .await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
 
-        let pub_alpha = EventPublisher::for_component_with_transport(
+        let pub_alpha = EventPublisher::for_servicegroup_with_transport(
             &component,
             "alpha",
             EventTransportKind::Zmq,
         )
         .await?;
-        let pub_beta = EventPublisher::for_component_with_transport(
+        let pub_beta = EventPublisher::for_servicegroup_with_transport(
             &component,
             "beta",
             EventTransportKind::Zmq,
@@ -138,7 +138,7 @@ mod nats {
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::{
+    use pagoda_runtime::{
         discovery::EventTransportKind,
         transports::event_plane::{EventPublisher, EventSubscriber, MsgpackCodec},
     };
@@ -166,17 +166,17 @@ mod nats {
         let (_rt, drt) = nats_runtime().await?;
         let component = drt
             .namespace(unique_name("nats-event"))?
-            .component("backend")?;
+            .servicegroup("backend")?;
         const TOPIC: &str = "router-events";
 
-        let mut subscriber = EventSubscriber::for_component_with_transport(
+        let mut subscriber = EventSubscriber::for_servicegroup_with_transport(
             &component,
             TOPIC,
             EventTransportKind::Nats,
         )
         .await?;
 
-        let publisher = EventPublisher::for_component_with_transport(
+        let publisher = EventPublisher::for_servicegroup_with_transport(
             &component,
             TOPIC,
             EventTransportKind::Nats,

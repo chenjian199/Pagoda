@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
 
-use dynamo_runtime::{Runtime, worker::Worker};
+use pagoda_runtime::{Runtime, worker::Worker};
 
 async fn hello_world(_runtime: Runtime) -> Result<()> {
     Ok(())

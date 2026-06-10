@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
@@ -14,7 +14,7 @@ mod tcp {
     };
 
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::{
+    use pagoda_runtime::{
         engine::AsyncEngine,
         metrics::{
             request_plane::REQUEST_PLANE_INFLIGHT,
@@ -48,8 +48,8 @@ mod tcp {
         let (rt, drt) = process_local_runtime().await?;
         let endpoint = drt
             .namespace(unique_name("phase1-tcp-echo"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let (client, endpoint_task) =
             serve_endpoint_with_engine(endpoint, make_echo_engine()).await?;
         let router = round_robin_router(client).await?;
@@ -80,8 +80,8 @@ mod tcp {
         let (rt, drt) = process_local_runtime().await?;
         let endpoint = drt
             .namespace(unique_name("phase1-stream"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let (client, endpoint_task) = serve_streaming_endpoint(endpoint).await?;
         let router = round_robin_router(client).await?;
 
@@ -110,8 +110,8 @@ mod tcp {
         let cancelled = Arc::new(AtomicBool::new(false));
         let endpoint = drt
             .namespace(unique_name("phase1-cancel"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>> =
             Arc::new(CancellableEngine {
                 started: started.clone(),
@@ -152,14 +152,14 @@ mod tcp {
         let seen = Arc::new(Mutex::new(HashMap::new()));
         let endpoint = drt
             .namespace(unique_name("phase1-concurrent"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>> =
             Arc::new(ContextEchoEngine { seen: seen.clone() });
         let ingress = Ingress::for_engine(engine)?;
         let endpoint_task = rt.primary().spawn(
             endpoint
-                .endpoint_builder()
+                .portname_builder()
                 .handler(ingress)
                 .start(),
         );
@@ -208,8 +208,8 @@ mod tcp {
         let chunk_count = 32usize;
         let endpoint = drt
             .namespace(unique_name("phase1-backpressure"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>> =
             Arc::new(HighVolumeStreamingEngine { chunk_count });
         let (client, endpoint_task) = serve_endpoint_with_engine(endpoint, engine).await?;
@@ -244,8 +244,8 @@ mod tcp {
         let (rt, drt) = process_local_runtime().await?;
         let endpoint = drt
             .namespace(unique_name("phase1-tcp-metrics"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let (client, endpoint_task) =
             serve_endpoint_with_engine(endpoint, make_echo_engine()).await?;
         let router = round_robin_router(client.clone()).await?;
@@ -276,8 +276,8 @@ mod tcp {
 
         let unregistered = drt
             .namespace(unique_name("phase1-tcp-metrics-miss"))?
-            .component("backend")?
-            .endpoint("generate")
+            .servicegroup("backend")?
+            .portname("generate")
             .client()
             .await?;
         let miss_router = round_robin_router(unregistered).await?;
@@ -302,7 +302,7 @@ mod nats {
     use std::{collections::HashSet, sync::Arc, time::Duration};
 
     use anyhow::{Context, Result, anyhow};
-    use dynamo_runtime::{component::TransportType, engine::AsyncEngine};
+    use pagoda_runtime::{servicegroup::TransportType, engine::AsyncEngine};
     use futures::StreamExt;
     use temp_env::async_with_vars;
     use tempfile::TempDir;
@@ -331,8 +331,8 @@ mod nats {
         let (rt, drt) = nats_runtime().await?;
         let endpoint = drt
             .namespace(unique_name("nats-echo"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let (client, endpoint_task) =
             serve_endpoint_with_engine_nats(endpoint, make_echo_engine()).await?;
         let router = round_robin_router(client).await?;
@@ -367,8 +367,8 @@ mod nats {
         let endpoint_name = "generate";
         let endpoint = drt
             .namespace(namespace.clone())?
-            .component(component)?
-            .endpoint(endpoint_name);
+            .servicegroup(component)?
+            .portname(endpoint_name);
         let (client, endpoint_task) = serve_streaming_endpoint_nats(endpoint).await?;
 
         let instances = client.instances();
@@ -419,12 +419,12 @@ mod nats {
 
         let endpoint1 = drt1
             .namespace(namespace.clone())?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let endpoint2 = drt2
             .namespace(namespace)?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
 
         let id1 = drt1.connection_id();
         let id2 = drt2.connection_id();
@@ -476,8 +476,8 @@ mod nats {
         let (rt, drt) = nats_runtime().await?;
         let endpoint = drt
             .namespace(unique_name("nats-timeout"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let (client, endpoint_task) = start_served_endpoint_nats(
             endpoint,
             Arc::new(BlockingFirstChunkEngine {
@@ -488,7 +488,7 @@ mod nats {
         .await?;
 
         async_with_vars(
-            [("DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS", Some("1"))],
+            [("PGD_HTTP_BACKEND_STREAM_TIMEOUT_SECS", Some("1"))],
             async {
                 let router = round_robin_router(client).await?;
 
@@ -528,8 +528,8 @@ mod nats {
         let (rt, drt) = nats_runtime().await?;
         let endpoint = drt
             .namespace(unique_name("nats-reconnect"))?
-            .component("backend")?
-            .endpoint("generate");
+            .servicegroup("backend")?
+            .portname("generate");
         let (client, endpoint_task) =
             serve_endpoint_with_engine_nats(endpoint, make_echo_engine()).await?;
         let router = round_robin_router(client.clone()).await?;
@@ -588,17 +588,17 @@ mod nats {
         let (rt, drt1) = nats_file_backed_runtime(kv_path.clone()).await?;
         let drt2 = additional_nats_file_backed_runtime(rt.clone(), &kv_path).await?;
         let namespace = unique_name("nats-svc");
-        let component1 = drt1.namespace(namespace.clone())?.component("backend")?;
-        let component2 = drt2.namespace(namespace)?.component("backend")?;
-        let service_name = super::common::contract::component_service_name(&component1);
+        let component1 = drt1.namespace(namespace.clone())?.servicegroup("backend")?;
+        let component2 = drt2.namespace(namespace)?.servicegroup("backend")?;
+        let service_name = super::common::contract::servicegroup_service_name(&component1);
 
         let (_c1, task1) = start_served_endpoint_nats(
-            component1.endpoint("generate"),
+            component1.portname("generate"),
             make_echo_engine(),
         )
         .await?;
         let (_c2, task2) = start_served_endpoint_nats(
-            component2.endpoint("health"),
+            component2.portname("health"),
             make_echo_engine(),
         )
         .await?;
@@ -640,11 +640,11 @@ mod nats {
         let namespace = unique_name("nats-svc-subj");
         let component_name = "backend";
         let endpoint_name = "generate";
-        let component = drt.namespace(namespace.clone())?.component(component_name)?;
-        let service_name = super::common::contract::component_service_name(&component);
+        let component = drt.namespace(namespace.clone())?.servicegroup(component_name)?;
+        let service_name = super::common::contract::servicegroup_service_name(&component);
         let instance_id = format!("{:x}", drt.connection_id());
 
-        let endpoint = component.endpoint(endpoint_name);
+        let endpoint = component.portname(endpoint_name);
         let (_client, endpoint_task) =
             serve_endpoint_with_engine_nats(endpoint, make_echo_engine()).await?;
 

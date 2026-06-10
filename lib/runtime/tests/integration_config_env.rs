@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::str::FromStr;
 
 use anyhow::Result;
-use dynamo_runtime::{
+use pagoda_runtime::{
     distributed::{DistributedConfig, RequestPlaneMode},
     transports::{etcd, nats},
     utils::{get_http_rpc_host_from_env, get_tcp_rpc_host_from_env},
@@ -27,9 +27,9 @@ async fn runtime_config_reads_env_over_defaults() -> Result<()> {
     let _guard = acquire_contract_test_lock();
     async_with_vars(
         [
-            ("DYN_REQUEST_PLANE", Some("http")),
-            ("DYN_TCP_RPC_HOST", Some("10.0.0.5")),
-            ("DYN_DISCOVERY_BACKEND", Some("mem")),
+            ("PGD_REQUEST_PLANE", Some("http")),
+            ("PGD_TCP_RPC_HOST", Some("10.0.0.5")),
+            ("PGD_DISCOVERY_BACKEND", Some("mem")),
         ],
         async {
             let config = DistributedConfig::from_settings();
@@ -52,7 +52,7 @@ async fn runtime_config_reads_env_over_defaults() -> Result<()> {
 #[tokio::test]
 async fn invalid_env_value_returns_configuration_error() -> Result<()> {
     let _guard = acquire_contract_test_lock();
-    async_with_vars([("DYN_REQUEST_PLANE", Some("not-a-valid-plane"))], async {
+    async_with_vars([("PGD_REQUEST_PLANE", Some("not-a-valid-plane"))], async {
         let parse_direct = RequestPlaneMode::from_str("not-a-valid-plane");
         assert!(parse_direct.is_err());
         let msg = parse_direct.unwrap_err().to_string();
@@ -61,7 +61,7 @@ async fn invalid_env_value_returns_configuration_error() -> Result<()> {
             "unexpected error: {msg}"
         );
 
-        let env_value = std::env::var("DYN_REQUEST_PLANE")?;
+        let env_value = std::env::var("PGD_REQUEST_PLANE")?;
         assert!(RequestPlaneMode::from_str(&env_value).is_err());
 
         Ok::<(), anyhow::Error>(())
@@ -112,8 +112,8 @@ async fn network_advertise_host_uses_env_when_set() -> Result<()> {
     let _guard = acquire_contract_test_lock();
     async_with_vars(
         [
-            ("DYN_HTTP_RPC_HOST", Some("192.168.10.1")),
-            ("DYN_TCP_RPC_HOST", Some("192.168.10.2")),
+            ("PGD_HTTP_RPC_HOST", Some("192.168.10.1")),
+            ("PGD_TCP_RPC_HOST", Some("192.168.10.2")),
         ],
         async {
             assert_eq!(get_http_rpc_host_from_env(), "192.168.10.1");

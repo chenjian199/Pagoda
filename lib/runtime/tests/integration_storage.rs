@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
 
 use anyhow::Result;
-use dynamo_runtime::{
+use pagoda_runtime::{
     storage::kv::{self, StoreError},
 };
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,7 @@ async fn typed_prefix_watcher_ignores_invalid_values() -> Result<()> {
 
 mod memory {
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::storage::kv::{self, Key, StoreOutcome, WatchEvent};
+    use pagoda_runtime::storage::kv::{self, Key, StoreOutcome, WatchEvent};
     use futures::StreamExt;
 
     use super::common::contract::acquire_contract_test_lock;
@@ -152,7 +152,7 @@ mod memory {
 
 mod file {
     use anyhow::Result;
-    use dynamo_runtime::{CancellationToken, storage::kv::{self, Key}};
+    use pagoda_runtime::{CancellationToken, storage::kv::{self, Key}};
     use tempfile::TempDir;
 
     use super::common::contract::acquire_contract_test_lock;
@@ -199,7 +199,7 @@ mod file {
 #[cfg(feature = "testing-etcd")]
 mod etcd {
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::storage::kv::{self, Key, WatchEvent};
+    use pagoda_runtime::storage::kv::{self, Key, WatchEvent};
     use futures::StreamExt;
 
     use super::common::contract::{acquire_contract_test_lock, etcd_kv_manager, unique_name};
@@ -284,7 +284,7 @@ mod etcd {
 
 mod nats {
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::storage::kv::{Key, StoreOutcome, WatchEvent};
+    use pagoda_runtime::storage::kv::{Key, StoreOutcome, WatchEvent};
     use futures::StreamExt;
 
     use super::common::contract::{acquire_contract_test_lock, nats_kv_test_bucket};

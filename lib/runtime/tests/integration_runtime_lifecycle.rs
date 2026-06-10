@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_runtime::{
+use pagoda_runtime::{
     Worker,
     engine::AsyncEngine,
     pipeline::{ManyOut, ServiceEngine, SingleIn, network::Ingress},
@@ -115,7 +115,7 @@ async fn distributed_runtime_process_local_starts_and_stops() -> Result<()> {
 //
 // 生产逻辑：`DistributedRuntime` 为 `Clone`，内部 `Arc` 共享 discovery client 与 registry。
 //
-// 测试计划：在 `drt` 上 `register_endpoint_instance`；用 `drt.clone()` 取同名 client 应看到同一实例。
+// 测试计划：在 `drt` 上 `register_portname_instance`；用 `drt.clone()` 取同名 client 应看到同一实例。
 //
 // 关键断言：clone 侧 client 发现 1 个实例且 `instance_id` 一致。
 #[tokio::test]
@@ -127,14 +127,14 @@ async fn runtime_clone_observes_same_registries() -> Result<()> {
 
     let endpoint = drt
         .namespace(namespace.clone())?
-        .component("backend")?
-        .endpoint("generate");
-    endpoint.register_endpoint_instance().await?;
+        .servicegroup("backend")?
+        .portname("generate");
+    endpoint.register_portname_instance().await?;
 
     let client = drt_clone
         .namespace(namespace)?
-        .component("backend")?
-        .endpoint("generate")
+        .servicegroup("backend")?
+        .portname("generate")
         .client()
         .await?;
     client.wait_for_instances().await?;
@@ -164,8 +164,8 @@ async fn shutdown_rejects_new_requests_after_draining_inflight() -> Result<()> {
     let release = Arc::new(tokio::sync::Notify::new());
     let endpoint = drt
         .namespace(unique_name("phase1-shutdown"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let engine: ServiceEngine<SingleIn<String>, ManyOut<TestResponse>> = Arc::new(BlockingFirstChunkEngine {
         started: started.clone(),
         release: release.clone(),
@@ -173,7 +173,7 @@ async fn shutdown_rejects_new_requests_after_draining_inflight() -> Result<()> {
     let ingress = Ingress::for_engine(engine)?;
     let endpoint_task = rt.primary().spawn(
         endpoint
-            .endpoint_builder()
+            .portname_builder()
             .handler(ingress)
             .start(),
     );

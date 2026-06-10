@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
@@ -12,7 +12,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use dynamo_runtime::{
+use pagoda_runtime::{
     engine::{AsyncEngine, AsyncEngineContextProvider},
     pipeline::{ManyOut, ServiceBackend, ServiceFrontend, SingleIn, Source},
 };
@@ -116,7 +116,7 @@ async fn pipeline_cancel_stops_downstream_stream() -> Result<()> {
 
 mod disaggregated {
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::{
+    use pagoda_runtime::{
         engine::AsyncEngine,
         pipeline::{SegmentSource, ServiceBackend, Source},
     };

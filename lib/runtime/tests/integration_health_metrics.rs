@@ -1,19 +1,19 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use dynamo_runtime::{
+use pagoda_runtime::{
     config::{
         HealthStatus,
         environment_names::runtime::{canary as env_canary, system as env_system},
     },
     engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream},
-    local_endpoint_registry::LocalAsyncEngine,
+    local_portname_registry::LocalAsyncEngine,
     metrics::{MetricsHierarchy, prometheus_names::{
-        build_component_metric_name, name_prefix, request_plane, sanitize_prometheus_label,
+        build_servicegroup_metric_name, name_prefix, request_plane, sanitize_prometheus_label,
         sanitize_prometheus_name, transport,
     }},
     pipeline::{ManyOut, SingleIn, network::Ingress},
@@ -55,14 +55,14 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
 // 测试计划：`DYN_HEALTH_CHECK_ENABLED` → 启动 DRT（manager 已运行）→ serve endpoint +
 // `health_check_payload` → 断言 target/notifier/endpoint 列表。
 //
-// 关键断言：注册后 `get_health_check_target` 与 `get_endpoint_health_check_notifier` 均存在。
+// 关键断言：注册后 `get_health_check_target` 与 `get_portname_health_check_notifier` 均存在。
 #[tokio::test]
 async fn health_check_target_registration_notifies_manager() -> Result<()> {
     let _guard = acquire_contract_test_lock();
     async_with_vars(
         [
-            ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
-            (env_canary::DYN_CANARY_WAIT_TIME, Some("60")),
+            ("PGD_HEALTH_CHECK_ENABLED", Some("true")),
+            (env_canary::PGD_CANARY_WAIT_TIME, Some("60")),
         ],
         async {
             ensure_integration_tcp_request_plane().await?;
@@ -70,13 +70,13 @@ async fn health_check_target_registration_notifies_manager() -> Result<()> {
             let endpoint_name = "generate";
             let endpoint = drt
                 .namespace(unique_name("phase1-hc-notify"))?
-                .component("backend")?
-                .endpoint(endpoint_name);
+                .servicegroup("backend")?
+                .portname(endpoint_name);
             let ingress = Ingress::for_engine(make_streaming_engine())?;
             let local_engine: LocalAsyncEngine = Arc::new(LocalHealthEngine);
             let endpoint_task = rt.primary().spawn(
                 endpoint
-                    .endpoint_builder()
+                    .portname_builder()
                     .handler(ingress)
                     .health_check_payload(json!("ping"))
                     .register_local_engine(local_engine)?
@@ -90,7 +90,7 @@ async fn health_check_target_registration_notifies_manager() -> Result<()> {
             let guard = system_health.lock();
             assert!(
                 guard
-                    .get_health_check_endpoints()
+                    .get_health_check_portnames()
                     .contains(&endpoint_name.to_string()),
                 "registered endpoint should appear in health check endpoint list"
             );
@@ -100,7 +100,7 @@ async fn health_check_target_registration_notifies_manager() -> Result<()> {
             );
             assert!(
                 guard
-                    .get_endpoint_health_check_notifier(endpoint_name)
+                    .get_portname_health_check_notifier(endpoint_name)
                     .is_some(),
                 "notifier should exist for registered health check target"
             );
@@ -122,7 +122,7 @@ async fn health_check_target_registration_notifies_manager() -> Result<()> {
 //
 // 测试计划：带 handler 的 endpoint 启动；检查 `SystemHealth` 中 endpoint 状态为 Ready。
 //
-// 关键断言：`get_endpoint_health_status("generate") == Ready`。
+// 关键断言：`get_portname_health_status("generate") == Ready`。
 #[tokio::test]
 async fn endpoint_health_tracks_registration() -> Result<()> {
     let _guard = acquire_contract_test_lock();
@@ -130,12 +130,12 @@ async fn endpoint_health_tracks_registration() -> Result<()> {
     let endpoint_name = "generate";
     let endpoint = drt
         .namespace(unique_name("phase1-health"))?
-        .component("backend")?
-        .endpoint(endpoint_name);
+        .servicegroup("backend")?
+        .portname(endpoint_name);
     let ingress = Ingress::for_engine(make_streaming_engine())?;
     let endpoint_task = rt.primary().spawn(
         endpoint
-            .endpoint_builder()
+            .portname_builder()
             .handler(ingress)
             .start(),
     );
@@ -146,7 +146,7 @@ async fn endpoint_health_tracks_registration() -> Result<()> {
     let system_health = drt.system_health();
     let health = system_health.lock();
     assert_eq!(
-        health.get_endpoint_health_status(endpoint_name),
+        health.get_portname_health_status(endpoint_name),
         Some(HealthStatus::Ready)
     );
 
@@ -166,8 +166,8 @@ async fn endpoint_health_tracks_canary_result() -> Result<()> {
     let _guard = acquire_contract_test_lock();
     async_with_vars(
         [
-            ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
-            (env_canary::DYN_CANARY_WAIT_TIME, Some("1")),
+            ("PGD_HEALTH_CHECK_ENABLED", Some("true")),
+            (env_canary::PGD_CANARY_WAIT_TIME, Some("1")),
         ],
         async {
             ensure_integration_tcp_request_plane().await?;
@@ -175,13 +175,13 @@ async fn endpoint_health_tracks_canary_result() -> Result<()> {
             let endpoint_name = "generate";
             let endpoint = drt
                 .namespace(unique_name("phase1-canary"))?
-                .component("backend")?
-                .endpoint(endpoint_name);
+                .servicegroup("backend")?
+                .portname(endpoint_name);
             let ingress = Ingress::for_engine(make_streaming_engine())?;
             let local_engine: LocalAsyncEngine = Arc::new(LocalHealthEngine);
             let endpoint_task = rt.primary().spawn(
                 endpoint
-                    .endpoint_builder()
+                    .portname_builder()
                     .handler(ingress)
                     .health_check_payload(json!("ping"))
                     .register_local_engine(local_engine)?
@@ -195,7 +195,7 @@ async fn endpoint_health_tracks_canary_result() -> Result<()> {
             assert_eq!(
                 system_health
                     .lock()
-                    .get_endpoint_health_status(endpoint_name),
+                    .get_portname_health_status(endpoint_name),
                 Some(HealthStatus::NotReady),
                 "canary-enabled endpoints start NotReady until verified"
             );
@@ -204,7 +204,7 @@ async fn endpoint_health_tracks_canary_result() -> Result<()> {
                 loop {
                     if system_health
                         .lock()
-                        .get_endpoint_health_status(endpoint_name)
+                        .get_portname_health_status(endpoint_name)
                         == Some(HealthStatus::Ready)
                     {
                         break;
@@ -235,10 +235,10 @@ async fn system_health_uses_endpoint_status_when_configured() -> Result<()> {
     async_with_vars(
         [
             (
-                env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+                env_system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
                 Some("[\"generate\"]"),
             ),
-            (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
+            (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
         ],
         async {
             let (rt, drt) = process_local_runtime().await?;
@@ -250,12 +250,12 @@ async fn system_health_uses_endpoint_status_when_configured() -> Result<()> {
 
             let endpoint = drt
                 .namespace(unique_name("phase1-sys-health"))?
-                .component("backend")?
-                .endpoint(ENDPOINT_NAME);
+                .servicegroup("backend")?
+                .portname(ENDPOINT_NAME);
             let ingress = Ingress::for_engine(make_streaming_engine())?;
             let endpoint_task = rt.primary().spawn(
                 endpoint
-                    .endpoint_builder()
+                    .portname_builder()
                     .handler(ingress)
                     .start(),
             );
@@ -294,12 +294,12 @@ async fn metrics_labels_include_runtime_identity() -> Result<()> {
     let endpoint_name = "generate";
     let endpoint = drt
         .namespace(unique_name("phase1-metrics"))?
-        .component(component)?
-        .endpoint(endpoint_name);
+        .servicegroup(component)?
+        .portname(endpoint_name);
     let ingress = Ingress::for_engine(make_streaming_engine())?;
     let endpoint_task = rt.primary().spawn(
         endpoint
-            .endpoint_builder()
+            .portname_builder()
             .handler(ingress)
             .health_check_payload(json!("ping"))
             .start(),
@@ -318,7 +318,7 @@ async fn metrics_labels_include_runtime_identity() -> Result<()> {
         "metrics should include endpoint label/value, got: {metrics}"
     );
     assert!(
-        metrics.contains("dynamo") || metrics.contains("runtime"),
+        metrics.contains("pagoda") || metrics.contains("runtime"),
         "metrics scrape should contain runtime families"
     );
 
@@ -339,12 +339,12 @@ async fn metrics_names_are_prometheus_safe() -> Result<()> {
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("phase1-metric-names"))?
-        .component("metrics_backend")?
-        .endpoint("generate");
+        .servicegroup("metrics_backend")?
+        .portname("generate");
     let ingress = Ingress::for_engine(make_streaming_engine())?;
     let endpoint_task = rt.primary().spawn(
         endpoint
-            .endpoint_builder()
+            .portname_builder()
             .handler(ingress)
             .start(),
     );
@@ -353,7 +353,7 @@ async fn metrics_names_are_prometheus_safe() -> Result<()> {
     client.wait_for_instances().await?;
 
     for name in [
-        build_component_metric_name("requests_total"),
+        build_servicegroup_metric_name("requests_total"),
         format!(
             "{}_{}",
             name_prefix::TRANSPORT,

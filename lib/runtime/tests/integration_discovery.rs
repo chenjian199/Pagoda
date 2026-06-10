@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 
 use anyhow::{Context, Result};
-use dynamo_runtime::metadata_registry::BASE_SUFFIX;
+use pagoda_runtime::metadata_registry::BASE_SUFFIX;
 use tempfile::TempDir;
 
 use common::contract::{
@@ -94,7 +94,7 @@ mod file {
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
+    use pagoda_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
     use tempfile::TempDir;
 
     use super::common::contract::{
@@ -128,14 +128,14 @@ mod file {
         let added = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))
+                DiscoveryEvent::Added(DiscoveryInstance::PortName(inst))
                     if inst.namespace == namespace
-                        && inst.component == component
-                        && inst.endpoint == endpoint
+                        && inst.servicegroup == component
+                        && inst.portname == endpoint
             )
         })
         .await?;
-        let DiscoveryEvent::Added(DiscoveryInstance::Endpoint(added_inst)) = added else {
+        let DiscoveryEvent::Added(DiscoveryInstance::PortName(added_inst)) = added else {
             return Err(anyhow!("expected Added endpoint event"));
         };
         assert_eq!(added_inst.instance_id, instance.instance_id());
@@ -145,10 +145,10 @@ mod file {
         let removed = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(id))
+                DiscoveryEvent::Removed(DiscoveryInstanceId::PortName(id))
                     if id.namespace == namespace
-                        && id.component == component
-                        && id.endpoint == endpoint
+                        && id.servicegroup == component
+                        && id.portname == endpoint
                         && id.instance_id == added_inst.instance_id
             )
         })
@@ -198,8 +198,8 @@ mod file {
 
         let client = drt_b
             .namespace(&namespace)?
-            .component(component)?
-            .endpoint(endpoint)
+            .servicegroup(component)?
+            .portname(endpoint)
             .client()
             .await?;
         client.wait_for_instances().await?;
@@ -280,14 +280,14 @@ mod file {
         let first_added = wait_for_discovery_event(&mut first_watch, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))
+                DiscoveryEvent::Added(DiscoveryInstance::PortName(inst))
                     if inst.namespace == namespace
-                        && inst.component == component
-                        && inst.endpoint == endpoint
+                        && inst.servicegroup == component
+                        && inst.portname == endpoint
             )
         })
         .await?;
-        let DiscoveryEvent::Added(DiscoveryInstance::Endpoint(first_inst)) = first_added else {
+        let DiscoveryEvent::Added(DiscoveryInstance::PortName(first_inst)) = first_added else {
             return Err(anyhow!("expected Added from first watch"));
         };
         assert_eq!(first_inst.instance_id, instance.instance_id());
@@ -297,7 +297,7 @@ mod file {
         let second_added = wait_for_discovery_event(&mut second_watch, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))
+                DiscoveryEvent::Added(DiscoveryInstance::PortName(inst))
                     if inst.instance_id == instance.instance_id()
             )
         })
@@ -318,7 +318,7 @@ mod etcd {
     use std::time::Duration;
 
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::discovery::{
+    use pagoda_runtime::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
     use futures::StreamExt;
@@ -354,14 +354,14 @@ mod etcd {
         let first = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))
+                DiscoveryEvent::Added(DiscoveryInstance::PortName(inst))
                     if inst.namespace == namespace
-                        && inst.component == component
-                        && inst.endpoint == endpoint
+                        && inst.servicegroup == component
+                        && inst.portname == endpoint
             )
         })
         .await?;
-        let DiscoveryEvent::Added(DiscoveryInstance::Endpoint(added)) = first else {
+        let DiscoveryEvent::Added(DiscoveryInstance::PortName(added)) = first else {
             return Err(anyhow!("expected Added from initial watch snapshot"));
         };
         assert_eq!(added.instance_id, instance.instance_id());
@@ -403,8 +403,8 @@ mod etcd {
 
         let client = drt2
             .namespace(namespace)?
-            .component(component)?
-            .endpoint(endpoint)
+            .servicegroup(component)?
+            .portname(endpoint)
             .client()
             .await?;
         wait_for_instances_empty(&client).await?;
@@ -450,7 +450,7 @@ mod etcd {
                     .next()
                     .await
                     .ok_or_else(|| anyhow!("discovery watch ended before prefix delete removals"))??;
-                if matches!(event, DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(_))) {
+                if matches!(event, DiscoveryEvent::Removed(DiscoveryInstanceId::PortName(_))) {
                     removed += 1;
                 }
             }
@@ -471,7 +471,7 @@ mod etcd {
 #[cfg(feature = "integration-kube")]
 mod kube {
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::discovery::{
+    use pagoda_runtime::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, hash_pod_name,
     };
 
@@ -541,14 +541,14 @@ mod kube {
         let added = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))
+                DiscoveryEvent::Added(DiscoveryInstance::PortName(inst))
                     if inst.namespace == namespace
-                        && inst.component == component
-                        && inst.endpoint == endpoint
+                        && inst.servicegroup == component
+                        && inst.portname == endpoint
             )
         })
         .await?;
-        let DiscoveryEvent::Added(DiscoveryInstance::Endpoint(added_inst)) = added else {
+        let DiscoveryEvent::Added(DiscoveryInstance::PortName(added_inst)) = added else {
             return Err(anyhow!("expected Added endpoint event"));
         };
         assert_eq!(added_inst.instance_id, instance.instance_id());
@@ -558,10 +558,10 @@ mod kube {
         let removed = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(id))
+                DiscoveryEvent::Removed(DiscoveryInstanceId::PortName(id))
                     if id.namespace == namespace
-                        && id.component == component
-                        && id.endpoint == endpoint
+                        && id.servicegroup == component
+                        && id.portname == endpoint
                         && id.instance_id == added_inst.instance_id
             )
         })
@@ -574,7 +574,7 @@ mod kube {
 
     // 目的/场景：Kubernetes discovery query 必须精确匹配 namespace/component/endpoint。
     //
-    // 生产逻辑：`MetadataSnapshot::filter` 按 `DiscoveryQuery::Endpoint` 三元组过滤
+    // 生产逻辑：`MetadataSnapshot::filter` 按 `DiscoveryQuery::PortName` 三元组过滤
     //（`discovery/metadata.rs`）；daemon 聚合的 snapshot 不泄漏邻域。
     //
     // 测试计划：注册 comp-a/ep-a 与 comp-b/ep-a → 精确 query、错 endpoint、错 namespace 各 list。
@@ -826,12 +826,12 @@ mod kube {
         let added = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst))
+                DiscoveryEvent::Added(DiscoveryInstance::PortName(inst))
                     if inst.instance_id == instance.instance_id()
             )
         })
         .await?;
-        let DiscoveryEvent::Added(DiscoveryInstance::Endpoint(added_inst)) = added else {
+        let DiscoveryEvent::Added(DiscoveryInstance::PortName(added_inst)) = added else {
             return Err(anyhow!("expected Added endpoint event"));
         };
 
@@ -841,10 +841,10 @@ mod kube {
         let removed = wait_for_discovery_event(&mut stream, |event| {
             matches!(
                 event,
-                DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(id))
+                DiscoveryEvent::Removed(DiscoveryInstanceId::PortName(id))
                     if id.namespace == namespace
-                        && id.component == component
-                        && id.endpoint == endpoint
+                        && id.servicegroup == component
+                        && id.portname == endpoint
                         && id.instance_id == added_inst.instance_id
             )
         })

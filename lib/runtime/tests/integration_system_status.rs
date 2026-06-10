@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use dynamo_runtime::config::environment_names::runtime::system as env_system;
+use pagoda_runtime::config::environment_names::runtime::system as env_system;
 use serde_json::Value;
 use temp_env::async_with_vars;
 
@@ -18,7 +18,7 @@ use common::contract::{
 // 生产逻辑：`DistributedRuntime::new` 读取 `RuntimeConfig::from_settings`，
 // `system_server_enabled()` 时 `spawn_system_status_server` 绑定 OS 端口（`system_status_server.rs`）。
 //
-// 测试计划：`DYN_SYSTEM_PORT=0` + `starting_health_status=ready` → GET `/live`。
+// 测试计划：`PGD_SYSTEM_PORT=0` + `starting_health_status=ready` → GET `/live`。
 //
 // 关键断言：HTTP 200；body 含 `"status":"ready"`。
 #[tokio::test]
@@ -28,7 +28,7 @@ async fn live_endpoint_reports_process_liveness() -> Result<()> {
         [
             system_status_server_env()[0],
             system_status_server_env()[1],
-            (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+            (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
         ],
         async {
             let (rt, drt) = process_local_runtime().await?;
@@ -49,7 +49,7 @@ async fn live_endpoint_reports_process_liveness() -> Result<()> {
 // 目的/场景：`/health` 反映 system/endpoint 聚合健康，随 endpoint 注册变化。
 //
 // 生产逻辑：`health_handler` 调用 `SystemHealth::get_health_status`（`system_status_server.rs`）；
-// `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` 时未注册 endpoint 为 notready。
+// `PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` 时未注册 endpoint 为 notready。
 //
 // 测试计划：初始 GET `/health` 为 503 → serve endpoint → 再 GET 为 200 ready。
 //
@@ -62,9 +62,9 @@ async fn health_endpoint_reports_aggregated_health() -> Result<()> {
         [
             system_status_server_env()[0],
             system_status_server_env()[1],
-            (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
+            (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("notready")),
             (
-                env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
+                env_system::PGD_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
                 Some("[\"generate\"]"),
             ),
         ],
@@ -79,8 +79,8 @@ async fn health_endpoint_reports_aggregated_health() -> Result<()> {
 
             let endpoint = drt
                 .namespace(unique_name("sys-status-health"))?
-                .component("backend")?
-                .endpoint(ENDPOINT_NAME);
+                .servicegroup("backend")?
+                .portname(ENDPOINT_NAME);
             let (_client, endpoint_task) = serve_streaming_endpoint(endpoint).await?;
 
             let (status_after, body_after) = system_status_http_get(addr, "/health").await?;
@@ -120,7 +120,7 @@ async fn status_endpoint_includes_registered_endpoints() -> Result<()> {
         [
             system_status_server_env()[0],
             system_status_server_env()[1],
-            (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+            (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
         ],
         async {
             let (rt, drt) = process_local_runtime().await?;
@@ -128,8 +128,8 @@ async fn status_endpoint_includes_registered_endpoints() -> Result<()> {
 
             let endpoint = drt
                 .namespace(unique_name("sys-status-endpoints"))?
-                .component("backend")?
-                .endpoint(ENDPOINT_NAME);
+                .servicegroup("backend")?
+                .portname(ENDPOINT_NAME);
             let (_client, endpoint_task) = serve_streaming_endpoint(endpoint).await?;
 
             let (status, body) =
@@ -171,9 +171,9 @@ async fn custom_health_and_live_paths_are_honored() -> Result<()> {
         [
             system_status_server_env()[0],
             system_status_server_env()[1],
-            (env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
-            (env_system::DYN_SYSTEM_HEALTH_PATH, Some(CUSTOM_HEALTH)),
-            (env_system::DYN_SYSTEM_LIVE_PATH, Some(CUSTOM_LIVE)),
+            (env_system::PGD_SYSTEM_STARTING_HEALTH_STATUS, Some("ready")),
+            (env_system::PGD_SYSTEM_HEALTH_PATH, Some(CUSTOM_HEALTH)),
+            (env_system::PGD_SYSTEM_LIVE_PATH, Some(CUSTOM_LIVE)),
         ],
         async {
             let (rt, drt) = process_local_runtime().await?;
@@ -206,7 +206,7 @@ mod engine {
     use std::sync::Arc;
 
     use anyhow::{Result, anyhow};
-    use dynamo_runtime::engine_routes::EngineRouteCallback;
+    use pagoda_runtime::engine_routes::EngineRouteCallback;
     use serde_json::{Value, json};
     use temp_env::async_with_vars;
 
@@ -342,10 +342,10 @@ mod local {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use dynamo_runtime::{
+    use pagoda_runtime::{
         engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream},
         engine_routes::EngineRouteCallback,
-        local_endpoint_registry::LocalAsyncEngine,
+        local_portname_registry::LocalAsyncEngine,
         pipeline::{ManyOut, SingleIn},
         protocols::annotated::Annotated,
     };
@@ -382,14 +382,14 @@ mod local {
 
     // 目的/场景：`LocalEndpointRegistry` register/get 语义与 `EngineRouteRegistry::routes` 列表。
     //
-    // 生产逻辑：`local_endpoint_registry::register` 按 endpoint 名索引 engine；
+    // 生产逻辑：`local_portname_registry::register` 按 endpoint 名索引 engine；
     // `engine_routes::routes` 列出已注册 engine HTTP 路径（`distributed.rs`）。
     //
     // 测试计划：注册两个 local engine + 两个 engine route → 断言 get/routes。
     //
     // 关键断言：已注册名 get 为 Some；未知名为 None；routes 含两条路径。
     #[tokio::test]
-    async fn local_endpoint_registry_lists_registered_engines() -> Result<()> {
+    async fn local_portname_registry_lists_registered_engines() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let name_a = unique_name("local-a");
         let name_b = unique_name("local-b");
@@ -398,7 +398,7 @@ mod local {
         async_with_vars(system_status_server_env(), async {
             let (rt, drt) = process_local_runtime().await?;
 
-            let registry = drt.local_endpoint_registry();
+            let registry = drt.local_portname_registry();
             registry.register(
                 name_a.clone(),
                 Arc::new(EchoLocalEngine {

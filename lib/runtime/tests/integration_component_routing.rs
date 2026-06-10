@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{Result, anyhow};
-use dynamo_runtime::{DistributedRuntime, engine::AsyncEngine};
+use pagoda_runtime::{DistributedRuntime, engine::AsyncEngine};
 use futures::StreamExt;
 
 mod common;
@@ -19,11 +19,11 @@ use common::contract_engines::InstanceTagEngine;
 
 // 目的/场景：endpoint 注册 → discovery → RPC → 显式注销 的完整公共 API 闭环。
 //
-// 生产逻辑：`Endpoint::start` 注册 discovery；`unregister_endpoint_instance` 调用
+// 生产逻辑：`Endpoint::start` 注册 discovery；`unregister_portname_instance` 调用
 // `discovery.unregister`（`endpoint.rs`）；client watch 收敛后 `instances()` 为空；
 // `PushRouter` 无实例时失败。
 //
-// 测试计划：serve 流式 endpoint → 调用成功 → `unregister_endpoint_instance` →
+// 测试计划：serve 流式 endpoint → 调用成功 → `unregister_portname_instance` →
 // 等待 discovery 空 → 再调用必须失败。
 //
 // 关键断言：注销前 `a,b,c`；注销后 `generate_expect_no_instances`。
@@ -33,15 +33,15 @@ async fn register_discover_call_unregister_roundtrip() -> Result<()> {
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("phase1"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, endpoint_task) = serve_streaming_endpoint(endpoint.clone()).await?;
 
     let router = round_robin_router(client.clone()).await?;
     let response = router.generate("abc".to_string().into()).await?;
     assert_eq!(collect_stream_chunks(response).await, vec!["a", "b", "c"]);
 
-    endpoint.unregister_endpoint_instance().await?;
+    endpoint.unregister_portname_instance().await?;
     wait_for_instances_empty(&client).await?;
     generate_expect_no_instances(&router, "after-unregister").await?;
 
@@ -63,12 +63,12 @@ async fn same_endpoint_different_namespace_does_not_mix() -> Result<()> {
     let (rt, drt) = process_local_runtime().await?;
     let endpoint_a = drt
         .namespace(unique_name("phase1-a"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let endpoint_b = drt
         .namespace(unique_name("phase1-b"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
 
     let (client_a, task_a) = serve_streaming_endpoint(endpoint_a).await?;
     let client_b = endpoint_b.client().await?;
@@ -112,12 +112,12 @@ async fn same_endpoint_same_namespace_forms_replica_pool() -> Result<()> {
 
     let endpoint1 = drt1
         .namespace(namespace.clone())?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let endpoint2 = drt2
         .namespace(namespace)?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
 
     let id1 = drt1.connection_id();
     let id2 = drt2.connection_id();
@@ -167,15 +167,15 @@ async fn same_namespace_different_component_is_isolated() -> Result<()> {
 
     let (_client_a, task_a) = serve_streaming_endpoint(
         drt.namespace(ns.clone())?
-            .component("component-a")?
-            .endpoint("generate"),
+            .servicegroup("component-a")?
+            .portname("generate"),
     )
     .await?;
 
     let client_b = drt
         .namespace(ns)?
-        .component("component-b")?
-        .endpoint("generate")
+        .servicegroup("component-b")?
+        .portname("generate")
         .client()
         .await?;
     assert!(client_b.instances().is_empty());
@@ -200,15 +200,15 @@ async fn same_namespace_same_component_different_endpoint_is_isolated() -> Resul
 
     let (_client, task) = serve_streaming_endpoint(
         drt.namespace(ns.clone())?
-            .component("backend")?
-            .endpoint("generate-a"),
+            .servicegroup("backend")?
+            .portname("generate-a"),
     )
     .await?;
 
     let client_b = drt
         .namespace(ns)?
-        .component("backend")?
-        .endpoint("generate-b")
+        .servicegroup("backend")?
+        .portname("generate-b")
         .client()
         .await?;
     assert!(client_b.instances().is_empty());
@@ -232,8 +232,8 @@ async fn calling_unregistered_endpoint_returns_unavailable() -> Result<()> {
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("phase1-empty"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let client = endpoint.client().await?;
     generate_expect_no_instances(&round_robin_router(client).await?, "abc").await?;
     shutdown_runtime(rt, None).await?;
@@ -242,7 +242,7 @@ async fn calling_unregistered_endpoint_returns_unavailable() -> Result<()> {
 
 // 目的/场景：注销后调用失败（与“从未注册”区分，走真实 unregister API）。
 //
-// 生产逻辑：`unregister_endpoint_instance` → discovery Removed → client watch 收敛。
+// 生产逻辑：`unregister_portname_instance` → discovery Removed → client watch 收敛。
 //
 // 测试计划：serve → 成功 RPC → unregister → 同一 router 再 RPC。
 //
@@ -253,13 +253,13 @@ async fn calling_endpoint_after_unregister_returns_unavailable() -> Result<()> {
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("phase1-unreg"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, task) = serve_streaming_endpoint(endpoint.clone()).await?;
     let router = round_robin_router(client.clone()).await?;
     assert!(router.generate("ok".to_string().into()).await?.next().await.is_some());
 
-    endpoint.unregister_endpoint_instance().await?;
+    endpoint.unregister_portname_instance().await?;
     wait_for_instances_empty(&client).await?;
     generate_expect_no_instances(&router, "after").await?;
 
@@ -267,11 +267,11 @@ async fn calling_endpoint_after_unregister_returns_unavailable() -> Result<()> {
     Ok(())
 }
 
-// 目的/场景：同一 worker 重复 `register_endpoint_instance` 行为稳定（幂等覆盖，不膨胀副本）。
+// 目的/场景：同一 worker 重复 `register_portname_instance` 行为稳定（幂等覆盖，不膨胀副本）。
 //
 // 生产逻辑：KV `insert` 同一 instance key 覆盖；client 仍应只见 1 个本 worker 实例。
 //
-// 测试计划：serve 后连续两次 `register_endpoint_instance` → `wait_for_instances`。
+// 测试计划：serve 后连续两次 `register_portname_instance` → `wait_for_instances`。
 //
 // 关键断言：`client.instances().len() == 1`。
 #[tokio::test]
@@ -280,12 +280,12 @@ async fn duplicate_instance_registration_is_idempotent_or_rejected_consistently(
     let (rt, drt) = process_local_runtime().await?;
     let endpoint = drt
         .namespace(unique_name("phase1-dup"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, task) = serve_streaming_endpoint(endpoint.clone()).await?;
 
-    endpoint.register_endpoint_instance().await?;
-    endpoint.register_endpoint_instance().await?;
+    endpoint.register_portname_instance().await?;
+    endpoint.register_portname_instance().await?;
     client.wait_for_instances().await?;
     assert_eq!(client.instances().len(), 1);
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026-2028 PAGODA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use dynamo_runtime::engine::AsyncEngine;
+use pagoda_runtime::engine::AsyncEngine;
 use futures::StreamExt;
 
 mod common;
@@ -63,8 +63,8 @@ async fn compute_pool_offloads_without_blocking_request_plane() -> Result<()> {
 
     let endpoint = drt
         .namespace(unique_name("compute-rpc"))?
-        .component("backend")?
-        .endpoint("generate");
+        .servicegroup("backend")?
+        .portname("generate");
     let (client, endpoint_task) =
         serve_endpoint_with_engine(endpoint, make_echo_engine()).await?;
     let router = round_robin_router(client).await?;
