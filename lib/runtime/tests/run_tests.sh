@@ -12,7 +12,10 @@
 # 环境变量:
 #   NATS_SERVER         NATS broker 地址（默认 nats://127.0.0.1:4222）
 #   ETCD_ENDPOINTS      etcd 集群地址（默认 http://127.0.0.1:2379）
-#   POD_IP              K8s Pod IP（K8s 测试需要）
+#   POD_IP                      可选：直接指定注入 Runtime 的 IP（不可为 127.x）
+#   KUBE_TEST_POD_USE_REAL_POD_IP  设为 1：等 kubelet 分配真实 status.podIP（方案 A）
+#   KUBE_TEST_SYNTHETIC_POD_IP  可选：合成 podIP（默认 10.42.0.1，方案 B 默认）
+#   KUBE_TEST_POD_IMAGE         仅方案 A 时常用：fixture Pod 镜像
 #   PGD_SOAK_RUN_DURATION  soak 测试时长（默认 5s）
 # =============================================================================
 
@@ -87,9 +90,10 @@ run_nightly_tests() {
     # --- etcd 测试 ---
     info "检查 etcd 集群: $etcd_url ..."
     if curl -s --max-time 2 "${etcd_url}/version" >/dev/null 2>&1; then
-        info "etcd 可用，运行 etcd 集成测试..."
+        info "etcd 可用，运行 etcd 集成测试（discovery + storage）..."
         ETCD_ENDPOINTS="$etcd_url" cargo test -p pagoda-runtime \
             --test discovery \
+            --test storage \
             --features testing-etcd \
             -- --test-threads="$THREADS" --include-ignored 2>&1
         if [ $? -eq 0 ]; then
@@ -110,18 +114,20 @@ run_nightly_tests() {
 # Release 测试（K8s + soak）
 # -----------------------------------------------------------------------------
 run_release_tests() {
-    local pod_ip="${POD_IP:-127.0.0.1}"
+    # Default: synthetic podIP (方案 B). See lib/runtime/tests/KUBE_DISCOVERY_TEST_MIGRATION.md §5.4
     local failed=0
 
-    # --- K8s 测试 ---
+    # --- K8s discovery（8 用例）---
     info "检查 Kubernetes 集群..."
     if kubectl cluster-info >/dev/null 2>&1; then
-        info "K8s 可用，运行 K8s 集成测试..."
-        warn "K8s 测试需要在 Pod 内运行，或设置 POD_IP/POD_NAME/POD_UID 环境变量"
-        POD_IP="$pod_ip" cargo test -p pagoda-runtime \
+        info "K8s 可用，运行 discovery::kube 集成测试（8）..."
+        warn "默认合成 podIP；勿设 POD_IP=127.x。详见 KUBE_DISCOVERY_TEST_MIGRATION.md"
+        unset POD_IP KUBE_TEST_POD_USE_REAL_POD_IP 2>/dev/null || true
+        cargo test -p pagoda-runtime \
             --test discovery \
             --features integration-kube \
-            -- --test-threads=1 --include-ignored kube:: 2>&1
+            kube \
+            -- --test-threads=1 --include-ignored 2>&1
         if [ $? -eq 0 ]; then
             pass "K8s 测试通过"
         else

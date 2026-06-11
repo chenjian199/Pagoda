@@ -127,6 +127,8 @@ pub struct ServiceInfo {
     pub id: String,
     pub version: String,
     pub started: String,
+    /// NATS `$SRV.STATS` wire format uses `"endpoints"`; keep Rust field name aligned with Pagoda terminology.
+    #[serde(alias = "endpoints")]
     pub portnames: Vec<PortNameInfo>,
 }
 
@@ -406,6 +408,33 @@ mod tests {
         let decoded: MetricsPayload = sample_metrics("decoded").decode().unwrap();
 
         assert_eq!(decoded, MetricsPayload { key: "decoded".to_string() });
+    }
+
+    #[test]
+    /// 测试：NATS `$SRV.STATS` wire JSON 使用 `endpoints` 字段名时仍能反序列化到 `portnames`。
+    fn test_service_info_deserializes_nats_endpoints_field() {
+        let payload = r#"{
+            "type": "io.nats.micro.v1.stats_response",
+            "name": "pagoda_backend",
+            "id": "svc-id",
+            "version": "0.0.1",
+            "started": "2025-08-08T05:07:17.720783523Z",
+            "endpoints": [
+                {
+                    "name": "pagoda_backend-generate-694d988806b92e39",
+                    "subject": "pagoda_backend.generate-694d988806b92e39",
+                    "num_requests": 0,
+                    "num_errors": 0,
+                    "processing_time": 0,
+                    "average_processing_time": 0,
+                    "last_error": "",
+                    "queue_group": "q"
+                }
+            ]
+        }"#;
+        let info: ServiceInfo = serde_json::from_str(payload).unwrap();
+        assert_eq!(info.portnames.len(), 1);
+        assert_eq!(info.portnames[0].name, "pagoda_backend-generate-694d988806b92e39");
     }
 
     #[test]

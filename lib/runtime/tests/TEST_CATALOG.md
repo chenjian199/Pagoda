@@ -30,28 +30,53 @@
 | `soak` | 1 | 4 | 5 |
 | **合计** | **63** | **25** | **88** |
 
-**通用运行示例：**
+**通用运行示例**（在 workspace 根目录执行；建议 `--test-threads=1`，与 `acquire_contract_test_lock()` 一致）：
 
 ```bash
-# PR 层：全部 integration bin（跳过 ignored）
+# --- PR 层：全部 integration bin（默认跳过 #[ignore]）---
 cargo test -p pagoda-runtime --tests -- --test-threads=1
 
-# 单个集成测试文件
+# 单个 integration bin
 cargo test -p pagoda-runtime --test discovery -- --test-threads=1
 
-# Nightly：etcd discovery
-ETCD_ENDPOINTS=http://127.0.0.1:2379 \
-  cargo test -p pagoda-runtime --test discovery \
-  --features testing-etcd -- --test-threads=1 --include-ignored
+# PR 层：逐 bin（与 --tests 等价，便于定位失败）
+for t in lifecycle pipeline pool runtime_lifecycle component_routing \
+         request_plane event_plane integration_pipeline health_metrics \
+         discovery storage system_status config_env failures \
+         integration_soak compute; do
+  cargo test -p pagoda-runtime --test "$t" -- --test-threads=1
+done
 
-# Release：K8s discovery（需集群 + PagodaWorkerMetadata CRD）
-cargo test -p pagoda-runtime --test discovery \
-  --features integration-kube -- --test-threads=1 --include-ignored
-
-# Nightly：NATS request plane + event plane
+# --- Nightly：NATS（request_plane + event_plane + storage）---
 NATS_SERVER=nats://127.0.0.1:4222 \
-  cargo test -p pagoda-runtime --test request_plane \
-  --test event_plane -- --test-threads=1 --include-ignored
+  cargo test -p pagoda-runtime \
+  --test request_plane --test event_plane --test storage \
+  -- --test-threads=1 --include-ignored
+
+# --- Nightly：etcd（discovery + storage）---
+ETCD_ENDPOINTS=http://127.0.0.1:2379 \
+  cargo test -p pagoda-runtime \
+  --test discovery --test storage \
+  --features testing-etcd \
+  -- --test-threads=1 --include-ignored
+
+# --- Release：K8s discovery（8 用例；默认合成 podIP，无需 CRD）---
+# 详见 KUBE_DISCOVERY_TEST_MIGRATION.md；勿设 POD_IP=127.x
+unset POD_IP KUBE_TEST_POD_USE_REAL_POD_IP
+cargo test -p pagoda-runtime --test discovery \
+  --features integration-kube \
+  kube:: \
+  -- --test-threads=1 --include-ignored
+
+# --- Release：契约 soak（integration_soak.rs；#[ignore] 长跑用例）---
+PGD_SOAK_RUN_DURATION=5s \
+  cargo test -p pagoda-runtime --test integration_soak \
+  -- --test-threads=1 --include-ignored
+
+# --- 遗留 soak（需 --features integration；端到端 Worker + DRT）---
+# PGD_SOAK_RUN_DURATION=60s PGD_SOAK_BATCH_LOAD=10000 \
+#   cargo test -p pagoda-runtime --test soak \
+#   --features integration integration::main -- --nocapture
 ```
 
 集成测试通过 `common/contract.rs` 中的 `acquire_contract_test_lock()` 串行化全局环境变更，避免并行污染。TCP request plane 使用进程级 `shared_integration_runtime()`，与 `#[tokio::test]` 生命周期解耦。
@@ -182,20 +207,20 @@ NATS_SERVER=nats://127.0.0.1:4222 \
 | `etcd_lease_expiry_removes_instance` | lease 过期后实例移除 | `etcd::Client` attach_lease + TTL | shutdown 后 12s list 为空 |
 | `prefix_delete_removes_all_child_instances` | etcd prefix 删除反映到 discovery watcher | `KVStoreDiscovery::list_and_watch` + `kv_delete` prefix | watch 收 2 Removed；`list` 为空 |
 
-#### `mod kube`（`#[ignore]`，`--features integration-kube`，K8s + CRD）
+#### `mod kube`（`#[ignore]`，`--features integration-kube`，K8s 集群）
 
-Harness：`kube_runtime()`（单 Pod + EndpointSlice）、`KubeDualPodFixture`、`KubeReadinessFixture::{install,install_pod_only,install_container_mode}`、`wait_for_discovery_list`（轮询 daemon 收敛）、`fixture.teardown()` 清理 Pod/Slice。
+Harness（原生 discovery，无 CRD）：`kube_runtime()`、`kube_pagoda_namespace()`、`resolve_fixture_pod_ip`（默认合成 `10.42.0.1`）、`KubeDualPodFixture`、`KubeReadinessFixture`、`kube_apply_invalid_model_config_map`、`kube_patch_endpoint_slice_ready`、`wait_for_discovery_list` / `wait_for_kube_discovery_*`、`fixture.teardown()`。详见 `KUBE_DISCOVERY_TEST_MIGRATION.md`。
 
 | 用例 | 目的/场景 | 生产逻辑 | 关键断言 |
 |------|-----------|----------|----------|
-| `kube_discovery_register_list_roundtrip` | K8s register/list 往返 | `KubeDiscoveryClient::register_internal` + `apply_cr` | `wait_for_discovery_list` 1 条；instance_id 一致 |
-| `kube_discovery_watch_sees_register_and_unregister` | K8s watch Added/Removed | `list_and_watch` + `metadata_watch` | Added/Removed 三元组一致 |
-| `kube_discovery_filters_exact_namespace_component_endpoint` | K8s query 精确过滤 | `MetadataSnapshot::filter` | 精确 query 1 条；错 portname/namespace `wait_for_discovery_list` 为 0 |
-| `kube_discovery_cross_pod_shares_instances` | 跨 Pod 发现 | `DiscoveryDaemon` 聚合 namespace snapshot；`kube_dual_pod_runtimes` | pod-B `wait_for_discovery_list` 见 pod-A；`instance_id == hash_pod_name(pod_a)` |
-| `kube_discovery_list_ignores_invalid_cr_data` | 非法 CR 不污染 list | `aggregate_snapshot` deserialize skip | 坏 CR + 合法 register 后 list 仅 1 条合法实例 |
-| `kube_discovery_requires_ready_endpoint_and_cr` | ready EndpointSlice + CR 缺一不可 | ready entry 无 slice 时 skip | `install_pod_only` 后 list 空；`install_endpoint_slice` 后 1 条 |
-| `kube_container_mode_register_list_roundtrip` | container 模式 register/list | `PGD_KUBE_DISCOVERY_MODE=container`；Pod `containerStatuses.ready` | list 1 条；`instance_id == hash_pod_name(pod)` |
-| `kube_discovery_pod_delete_removes_from_watch` | Pod 删除触发 Removed | Pod 删 → CR GC → ready 消失 | watch 收 Removed；`instance_id` 一致 |
+| `kube_discovery_register_list_roundtrip` | K8s register/list 往返 | `register_portname_instance` → Service + EndpointSlice | `wait_for_discovery_list` 1 条；instance_id 一致 |
+| `kube_discovery_watch_sees_register_and_unregister` | K8s watch Added/Removed | `list_and_watch` + daemon snapshot | Added/Removed 三元组一致 |
+| `kube_discovery_filters_exact_namespace_component_endpoint` | K8s query 精确过滤 | `MetadataSnapshot::filter` | 精确 query 1 条；错 portname/namespace 为 0 |
+| `kube_discovery_cross_pod_shares_instances` | 跨 Pod 发现 | `DiscoveryDaemon` 聚合 `POD_NAMESPACE` snapshot | pod-B 见 pod-A；`instance_id == hash_pod_name(pod_a)` |
+| `kube_discovery_list_ignores_invalid_native_object_data` | 非法 Model ConfigMap 不污染 list | `model_instance_from_config_map` skip | list 1 条合法实例 |
+| `kube_discovery_requires_ready_endpoint_slice` | EndpointSlice ready 门控 | `extract_portname_info` + `aggregate` | patch ready=false→0；true→1 |
+| `kube_container_mode_register_list_roundtrip` | container 模式 register/list | `PGD_KUBE_DISCOVERY_MODE=container` | list 1 条；`instance_id == hash_pod_name(pod)` |
+| `kube_discovery_pod_delete_removes_from_watch` | Pod 删除触发 Removed | Pod 删 → EndpointSlice GC | list 空 + watch Removed |
 
 ---
 
@@ -368,7 +393,7 @@ cargo test --test soak integration::main --features integration -- --nocapture
 | 模块 | 职责 |
 |------|------|
 | `contract.rs` | 集成测试主 harness：`process_local_runtime`、`shared_integration_runtime`、`file_backed_runtime`、`etcd_runtime`、`nats_*`、`serve_portname_*`、`shutdown_runtime`、`acquire_contract_test_lock`、`unique_name` 等 |
-| `contract.rs`（K8s，`feature integration-kube`） | `KubeReadinessFixture`、`KubeDualPodFixture`、`kube_runtime` / `kube_runtime_for_identity`、`kube_dual_pod_runtimes`、`wait_for_discovery_list`、`kube_apply_invalid_worker_metadata_cr` |
+| `contract.rs`（K8s，`feature integration-kube`） | `kube_pagoda_namespace`、`KubeReadinessFixture`、`KubeDualPodFixture`、`kube_runtime` / `kube_runtime_for_identity`、`resolve_fixture_pod_ip`、`kube_apply_invalid_model_config_map`、`kube_find_portname_endpoint_slice_for_pod`、`kube_patch_endpoint_slice_ready`、`wait_for_discovery_list`、`wait_for_kube_discovery_*` |
 | `contract_engines.rs` | 契约用 mock engine：`CancellableEngine`、`InstanceTagEngine`、`BlockingFirstChunkEngine`、pipeline 契约 service 工厂 |
 | `engines.rs` | 通用 `AsyncGenerator`、`LlmdbaEngine`；内含 `test_async_processor`、`test_generator` 单元测试 |
 | `mock.rs` | `MockNetworkTransport` 等网络 mock（disaggregated pipeline） |
@@ -379,8 +404,8 @@ cargo test --test soak integration::main --features integration -- --nocapture
 |--------------------|------------|
 | （无，默认） | 绝大多数合约测试顶层与 `mod file` / `mod tcp` / `mod zmq` / `mod memory` 用例 |
 | `testing-etcd` + `ETCD_ENDPOINTS` + `--include-ignored` | `discovery::etcd::*`（3）；`storage::etcd::*`（1） |
-| `integration-kube` + K8s + `PagodaWorkerMetadata` CRD + `--include-ignored` | `discovery::kube::*`（8） |
+| `integration-kube` + K8s + `--include-ignored` + `kube` | `discovery::kube::*`（8） |
 | `NATS_SERVER` + `--include-ignored` | `request_plane::nats::*`（7）；`storage::nats::*`（1）；`event_plane::nats::*`（1） |
-| `--include-ignored`（Release soak） | `soak::{soak_sustained_load_*,random_endpoint_churn_*,runtime_shutdown_after_soak_*,long_running_streams_*}`；`PGD_SOAK_*` 仅影响 sustained load |
+| `--include-ignored`（Release soak） | `integration_soak::{soak_sustained_load_*,random_endpoint_churn_*,runtime_shutdown_after_soak_*,long_running_streams_*}`；`PGD_SOAK_*` 仅影响 sustained load |
 | `integration` feature | `soak.rs` 中的 `integration::main` |
 

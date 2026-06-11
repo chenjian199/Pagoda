@@ -925,14 +925,42 @@ pub async fn etcd_kv_manager() -> Result<kv::Manager> {
 }
 
 #[cfg(feature = "integration-kube")]
-const KUBE_DISCOVERY_BACKEND_LABEL: &str = "nvidia.com/pagoda-discovery-backend";
+const KUBE_MANAGED_BY_LABEL: &str = "endpointslice.kubernetes.io/managed-by";
 #[cfg(feature = "integration-kube")]
-const KUBE_DISCOVERY_ENABLED_LABEL: &str = "nvidia.com/pagoda-discovery-enabled";
+const KUBE_MANAGED_BY_VALUE: &str = "pagoda-worker";
+#[cfg(feature = "integration-kube")]
+const KUBE_REGISTRY_MODE_LABEL: &str = "bedicloud.com/pagoda-discovery-mode";
+#[cfg(feature = "integration-kube")]
+const KUBE_REGISTRY_MODE_VALUE: &str = "native-service";
+#[cfg(feature = "integration-kube")]
+const KUBE_KIND_LABEL: &str = "bedicloud.com/pagoda-kind";
+#[cfg(feature = "integration-kube")]
+const KUBE_MODEL_KIND_VALUE: &str = "model";
+#[cfg(feature = "integration-kube")]
+const KUBE_ANNOTATION_NAMESPACE: &str = "bedicloud.com/pagoda-namespace";
+#[cfg(feature = "integration-kube")]
+const KUBE_ANNOTATION_SERVICEGROUP: &str = "bedicloud.com/pagoda-servicegroup";
+#[cfg(feature = "integration-kube")]
+const KUBE_ANNOTATION_PORTNAME: &str = "bedicloud.com/pagoda-portname";
+#[cfg(feature = "integration-kube")]
+const KUBE_ANNOTATION_TRANSPORT: &str = "bedicloud.com/pagoda-transport";
+#[cfg(feature = "integration-kube")]
+const KUBE_POD_IP_WAIT: Duration = Duration::from_secs(60);
+/// RFC5737-style test address; not loopback — accepted by EndpointSlice API.
+#[cfg(feature = "integration-kube")]
+const KUBE_TEST_SYNTHETIC_POD_IP_DEFAULT: &str = "10.42.0.1";
+#[cfg(feature = "integration-kube")]
+const KUBE_ITEST_LABEL: &str = "pagoda.test/fixture";
+#[cfg(feature = "integration-kube")]
+const KUBE_ITEST_LABEL_VALUE: &str = "true";
 /// Matches `DEBOUNCE_DURATION` in `discovery/kube/daemon.rs`.
 #[cfg(feature = "integration-kube")]
 const KUBE_DISCOVERY_DAEMON_DEBOUNCE: Duration = Duration::from_millis(500);
 #[cfg(feature = "integration-kube")]
 const KUBE_DISCOVERY_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Pod delete → ownerReference GC → reflector + daemon debounce can be slow on real clusters.
+#[cfg(feature = "integration-kube")]
+const KUBE_DISCOVERY_WATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "integration-kube")]
 pub fn kube_distributed_config() -> DistributedConfig {
@@ -960,36 +988,230 @@ pub async fn require_kube_cluster() -> Result<()> {
     kube::Client::try_default()
         .await
         .context(
-            "Kubernetes API not reachable (set KUBECONFIG, install PagodaWorkerMetadata CRD, or run in-cluster)",
+            "Kubernetes API not reachable (set KUBECONFIG or run in-cluster with a reachable API server)",
         )?;
     Ok(())
 }
 
-/// Marks the test pod as ready in an EndpointSlice so the discovery daemon includes CR metadata.
+/// K8s namespace where native discovery objects are stored and the daemon watches.
 ///
-/// Production correlates `PagodaWorkerMetadata` CRs with ready EndpointSlice entries
-/// (`discovery/kube/daemon.rs`). Out-of-cluster tests must install this fixture explicitly,
-/// including a real Pod so `PagodaWorkerMetadata` ownerReferences are not garbage-collected.
+/// Native `KubeDiscoveryClient` writes `Service` / `EndpointSlice` into the worker's
+/// `POD_NAMESPACE`; integration tests must use the same value as Pagoda `namespace`.
+#[cfg(feature = "integration-kube")]
+pub fn kube_pagoda_namespace() -> String {
+    std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string())
+}
+
+/// Optional `POD_IP` override for out-of-cluster tests (must not be loopback).
+#[cfg(feature = "integration-kube")]
+pub fn kube_test_pod_ip_override() -> Option<String> {
+    std::env::var("POD_IP")
+        .ok()
+        .filter(|ip| !ip.is_empty())
+        .and_then(|ip| {
+            if ip.starts_with("127.") {
+                eprintln!("warn: ignoring POD_IP={ip} (loopback rejected by EndpointSlice API)");
+                None
+            } else {
+                Some(ip)
+            }
+        })
+}
+
+/// When true, wait for kubelet-assigned `status.podIP` instead of patching a synthetic IP.
+#[cfg(feature = "integration-kube")]
+pub fn kube_test_use_real_pod_ip() -> bool {
+    std::env::var("KUBE_TEST_POD_USE_REAL_POD_IP")
+        .ok()
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+}
+
+/// Synthetic fixture `podIP` (default mode); override via `KUBE_TEST_SYNTHETIC_POD_IP`.
+#[cfg(feature = "integration-kube")]
+pub fn kube_test_synthetic_pod_ip() -> String {
+    std::env::var("KUBE_TEST_SYNTHETIC_POD_IP")
+        .unwrap_or_else(|_| KUBE_TEST_SYNTHETIC_POD_IP_DEFAULT.to_string())
+}
+
+/// Container image for fixture Pods (`KUBE_TEST_POD_IMAGE` overrides the default pause image).
+#[cfg(feature = "integration-kube")]
+pub fn kube_test_pod_image() -> String {
+    std::env::var("KUBE_TEST_POD_IMAGE")
+        .unwrap_or_else(|_| "registry.k8s.io/pause:3.9".to_string())
+}
+
+#[cfg(feature = "integration-kube")]
+fn validate_non_loopback_pod_ip(ip: &str) -> Result<()> {
+    if ip.is_empty() || ip.starts_with("127.") {
+        anyhow::bail!("pod IP {ip:?} is empty or loopback; EndpointSlice rejects 127.0.0.0/8");
+    }
+    Ok(())
+}
+
+/// Ensures a test Pod exists for owner references / cross-pod scenarios.
+///
+/// Native discovery persists portname metadata via `register()`; fixture EndpointSlices
+/// are optional (see `install_endpoint_slice` for Phase 2 readiness tests).
 #[cfg(feature = "integration-kube")]
 pub struct KubeReadinessFixture {
     client: kube::Client,
     slice_name: Option<String>,
+    service_name: Option<String>,
     pod_name: Option<String>,
     pod_uid: String,
+    pod_ip: String,
     pod_namespace: Option<String>,
-    cr_name: Option<String>,
     /// When true, teardown deletes the Pod created for this fixture.
     created_pod: bool,
 }
 
+/// Returns a human-readable blocker when a fixture Pod cannot reach Running + podIP.
 #[cfg(feature = "integration-kube")]
-fn kube_discovery_resource_labels() -> std::collections::BTreeMap<String, String> {
+fn kube_pod_scheduling_blocker(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String> {
+    let status = pod.status.as_ref()?;
+    if status.phase.as_deref() == Some("Failed") {
+        return Some(format!(
+            "pod phase Failed (message={:?})",
+            status.message.as_deref().unwrap_or("")
+        ));
+    }
+    if let Some(statuses) = status.container_statuses.as_ref() {
+        for cs in statuses {
+            if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
+                if matches!(
+                    waiting.reason.as_deref(),
+                    Some("ImagePullBackOff" | "ErrImagePull" | "InvalidImageName")
+                ) {
+                    return Some(format!(
+                        "container {} {:?}: {} — set KUBE_TEST_POD_IMAGE to an image your cluster can pull (current: {})",
+                        cs.name,
+                        waiting.reason,
+                        waiting.message.as_deref().unwrap_or(""),
+                        kube_test_pod_image(),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Patch fixture Pod status with a synthetic routable IP (out-of-cluster default).
+#[cfg(feature = "integration-kube")]
+async fn patch_pod_status_ip(
+    client: &kube::Client,
+    pod_name: &str,
+    pod_namespace: &str,
+    pod_ip: &str,
+) -> Result<()> {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::Api;
+    use kube::api::{Patch, PatchParams};
+
+    validate_non_loopback_pod_ip(pod_ip)?;
+    let pod_api: Api<Pod> = Api::namespaced(client.clone(), pod_namespace);
+    let status = serde_json::json!({
+        "status": {
+            "phase": "Running",
+            "podIP": pod_ip,
+            "podIPs": [{ "ip": pod_ip }]
+        }
+    });
+    pod_api
+        .patch_status(pod_name, &PatchParams::default(), &Patch::Merge(&status))
+        .await
+        .with_context(|| format!("patch Pod {pod_name} podIP in {pod_namespace}"))?;
+    Ok(())
+}
+
+/// Resolve `POD_IP` for fixture/runtime: synthetic patch (default) or real `status.podIP` (optional).
+#[cfg(feature = "integration-kube")]
+async fn resolve_fixture_pod_ip(
+    client: &kube::Client,
+    pod_name: &str,
+    pod_namespace: &str,
+) -> Result<String> {
+    if let Some(ip) = kube_test_pod_ip_override() {
+        return Ok(ip);
+    }
+    if kube_test_use_real_pod_ip() {
+        return wait_for_pod_ip(client, pod_name, pod_namespace).await;
+    }
+    let ip = kube_test_synthetic_pod_ip();
+    validate_non_loopback_pod_ip(&ip)?;
+    patch_pod_status_ip(client, pod_name, pod_namespace, &ip).await?;
+    Ok(ip)
+}
+
+/// Poll until the fixture Pod has a kubelet-assigned `status.podIP` (not loopback).
+#[cfg(feature = "integration-kube")]
+async fn wait_for_pod_ip(
+    client: &kube::Client,
+    pod_name: &str,
+    pod_namespace: &str,
+) -> Result<String> {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::Api;
+
+    if let Some(ip) = kube_test_pod_ip_override() {
+        return Ok(ip);
+    }
+
+    let api: Api<Pod> = Api::namespaced(client.clone(), pod_namespace);
+    let deadline = tokio::time::Instant::now() + KUBE_POD_IP_WAIT;
+    loop {
+        let pod = api
+            .get(pod_name)
+            .await
+            .with_context(|| format!("get Pod {pod_name} in {pod_namespace}"))?;
+        if let Some(blocker) = kube_pod_scheduling_blocker(&pod) {
+            anyhow::bail!("fixture Pod {pod_name} in {pod_namespace} blocked: {blocker}");
+        }
+        if let Some(ip) = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.pod_ip.as_ref())
+            .filter(|ip| !ip.is_empty())
+        {
+            if ip.starts_with("127.") {
+                anyhow::bail!(
+                    "pod {pod_name} has loopback podIP {ip}; EndpointSlice rejects 127.0.0.0/8"
+                );
+            }
+            return Ok(ip.clone());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .unwrap_or("unknown");
+            anyhow::bail!(
+                "timed out waiting for status.podIP on pod {pod_name} in {pod_namespace} (phase={phase}, image={}); try KUBE_TEST_POD_IMAGE",
+                kube_test_pod_image()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(feature = "integration-kube")]
+fn kube_native_endpoint_slice_labels(
+    service_name: &str,
+) -> std::collections::BTreeMap<String, String> {
     [
         (
-            KUBE_DISCOVERY_BACKEND_LABEL.to_string(),
-            "kubernetes".to_string(),
+            KUBE_MANAGED_BY_LABEL.to_string(),
+            KUBE_MANAGED_BY_VALUE.to_string(),
         ),
-        (KUBE_DISCOVERY_ENABLED_LABEL.to_string(), "true".to_string()),
+        (
+            KUBE_REGISTRY_MODE_LABEL.to_string(),
+            KUBE_REGISTRY_MODE_VALUE.to_string(),
+        ),
+        (
+            "kubernetes.io/service-name".to_string(),
+            service_name.to_string(),
+        ),
     ]
     .into_iter()
     .collect()
@@ -1009,55 +1231,70 @@ async fn ensure_kube_test_pod(
     use kube::api::{DeleteParams, PostParams};
 
     let pod_api: Api<Pod> = Api::namespaced(client.clone(), pod_namespace);
-    let mut labels = None;
+    let image = kube_test_pod_image();
+    let mut labels = std::collections::BTreeMap::from([(
+        KUBE_ITEST_LABEL.to_string(),
+        KUBE_ITEST_LABEL_VALUE.to_string(),
+    )]);
     if with_discovery_labels {
-        labels = Some(kube_discovery_resource_labels());
+        labels.insert(
+            KUBE_REGISTRY_MODE_LABEL.to_string(),
+            KUBE_REGISTRY_MODE_VALUE.to_string(),
+        );
     }
 
     match pod_api.get(pod_name).await {
-        Ok(existing) => Ok((
-            existing
-                .metadata
-                .uid
-                .context("existing pod missing metadata.uid")?,
-            false,
-        )),
-        Err(kube::Error::Api(err)) if err.code == 404 => {
-            let _ = pod_api.delete(pod_name, &DeleteParams::default()).await;
-            let created = pod_api
-                .create(
-                    &PostParams::default(),
-                    &Pod {
-                        metadata: ObjectMeta {
-                            name: Some(pod_name.to_string()),
-                            namespace: Some(pod_namespace.to_string()),
-                            labels,
-                            ..Default::default()
-                        },
-                        spec: Some(PodSpec {
-                            containers: vec![Container {
-                                name: container_name.to_string(),
-                                image: Some("registry.k8s.io/pause:3.9".to_string()),
-                                ..Default::default()
-                            }],
-                            restart_policy: Some("Never".into()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .with_context(|| format!("create Pod {pod_name} in {pod_namespace}"))?;
-            Ok((
-                created
-                    .metadata
-                    .uid
-                    .context("created pod missing metadata.uid")?,
-                true,
-            ))
+        Ok(existing) => {
+            let blocked = kube_pod_scheduling_blocker(&existing).is_some();
+            if kube_test_use_real_pod_ip() && blocked {
+                let _ = pod_api.delete(pod_name, &DeleteParams::default()).await;
+            } else {
+                return Ok((
+                    existing
+                        .metadata
+                        .uid
+                        .context("existing pod missing metadata.uid")?,
+                    false,
+                ));
+            }
         }
-        Err(e) => Err(e.into()),
+        Err(kube::Error::Api(err)) if err.code == 404 => {}
+        Err(e) => return Err(e.into()),
     }
+
+    let _ = pod_api.delete(pod_name, &DeleteParams::default()).await;
+    let created = pod_api
+        .create(
+            &PostParams::default(),
+            &Pod {
+                metadata: ObjectMeta {
+                    name: Some(pod_name.to_string()),
+                    namespace: Some(pod_namespace.to_string()),
+                    labels: Some(labels),
+                    ..Default::default()
+                },
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        name: container_name.to_string(),
+                        image: Some(image),
+                        image_pull_policy: Some("IfNotPresent".into()),
+                        ..Default::default()
+                    }],
+                    restart_policy: Some("Never".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("create Pod {pod_name} in {pod_namespace}"))?;
+    Ok((
+        created
+            .metadata
+            .uid
+            .context("created pod missing metadata.uid")?,
+        true,
+    ))
 }
 
 #[cfg(feature = "integration-kube")]
@@ -1065,33 +1302,93 @@ async fn create_endpoint_slice_for_pod(
     client: &kube::Client,
     pod_name: &str,
     pod_namespace: &str,
-) -> Result<String> {
-    use k8s_openapi::api::core::v1::ObjectReference;
+    pod_ip: &str,
+) -> Result<(String, String)> {
+    use k8s_openapi::api::core::v1::{ObjectReference, Service, ServicePort, ServiceSpec};
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort, EndpointSlice};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::Api;
     use kube::api::{DeleteParams, PostParams};
 
-    let api: Api<EndpointSlice> = Api::namespaced(client.clone(), pod_namespace);
     let slice_name = format!("{pod_name}-itest-eps");
     let service_name = format!("{pod_name}-itest-svc");
-    let _ = api.delete(&slice_name, &DeleteParams::default()).await;
+    let pagoda_namespace = kube_pagoda_namespace();
+    let servicegroup = "fixture-sg";
+    let portname = "fixture-ep";
+    let transport = r#"{"Tcp":"127.0.0.1:8080"}"#;
 
-    let mut labels = kube_discovery_resource_labels();
-    labels.insert("kubernetes.io/service-name".to_string(), service_name);
+    let svc_api: Api<Service> = Api::namespaced(client.clone(), pod_namespace);
+    let _ = svc_api.delete(&service_name, &DeleteParams::default()).await;
+    svc_api
+        .create(
+            &PostParams::default(),
+            &Service {
+                metadata: ObjectMeta {
+                    name: Some(service_name.clone()),
+                    namespace: Some(pod_namespace.to_string()),
+                    labels: Some(
+                        [(KUBE_REGISTRY_MODE_LABEL.to_string(), KUBE_REGISTRY_MODE_VALUE.to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    annotations: Some(
+                        [
+                            (KUBE_ANNOTATION_NAMESPACE.to_string(), pagoda_namespace.clone()),
+                            (
+                                KUBE_ANNOTATION_SERVICEGROUP.to_string(),
+                                servicegroup.to_string(),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    ..Default::default()
+                },
+                spec: Some(ServiceSpec {
+                    cluster_ip: Some("None".to_string()),
+                    ports: Some(vec![ServicePort {
+                        name: Some(portname.to_string()),
+                        port: 8080,
+                        protocol: Some("TCP".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("create fixture Service {service_name} in {pod_namespace}"))?;
+
+    let eps_api: Api<EndpointSlice> = Api::namespaced(client.clone(), pod_namespace);
+    let _ = eps_api.delete(&slice_name, &DeleteParams::default()).await;
 
     let slice = EndpointSlice {
         metadata: ObjectMeta {
             name: Some(slice_name.clone()),
             namespace: Some(pod_namespace.to_string()),
-            labels: Some(labels),
+            labels: Some(kube_native_endpoint_slice_labels(&service_name)),
+            annotations: Some(
+                [
+                    (KUBE_ANNOTATION_NAMESPACE.to_string(), pagoda_namespace),
+                    (
+                        KUBE_ANNOTATION_SERVICEGROUP.to_string(),
+                        servicegroup.to_string(),
+                    ),
+                    (KUBE_ANNOTATION_PORTNAME.to_string(), portname.to_string()),
+                    (KUBE_ANNOTATION_TRANSPORT.to_string(), transport.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
             ..Default::default()
         },
         address_type: "IPv4".to_string(),
         endpoints: vec![Endpoint {
-            addresses: vec!["10.0.0.1".to_string()],
+            addresses: vec![pod_ip.to_string()],
             conditions: Some(EndpointConditions {
                 ready: Some(true),
+                serving: Some(true),
                 ..Default::default()
             }),
             target_ref: Some(ObjectReference {
@@ -1103,6 +1400,7 @@ async fn create_endpoint_slice_for_pod(
             ..Default::default()
         }],
         ports: Some(vec![EndpointPort {
+            name: Some(portname.to_string()),
             port: Some(8080),
             protocol: Some("TCP".to_string()),
             ..Default::default()
@@ -1110,10 +1408,11 @@ async fn create_endpoint_slice_for_pod(
         ..Default::default()
     };
 
-    api.create(&PostParams::default(), &slice)
+    eps_api
+        .create(&PostParams::default(), &slice)
         .await
         .with_context(|| format!("create EndpointSlice {slice_name} in {pod_namespace}"))?;
-    Ok(slice_name)
+    Ok((slice_name, service_name))
 }
 
 #[cfg(feature = "integration-kube")]
@@ -1134,7 +1433,7 @@ async fn patch_pod_container_ready(
             "containerStatuses": [{
                 "name": container_name,
                 "ready": true,
-                "image": "registry.k8s.io/pause:3.9"
+                "image": kube_test_pod_image()
             }]
         }
     });
@@ -1167,37 +1466,31 @@ impl KubeReadinessFixture {
         &self.client
     }
 
-    /// Pod + ready EndpointSlice (default pod-mode discovery readiness).
+    pub fn pod_ip(&self) -> &str {
+        &self.pod_ip
+    }
+
+    /// Ensure a real Pod exists (native discovery writes objects on `register()`).
     pub async fn install(pod_name: &str, pod_namespace: &str) -> Result<Self> {
         let client = kube::Client::try_default().await?;
         let (pod_uid, created_pod) =
             ensure_kube_test_pod(&client, pod_name, pod_namespace, "main", false).await?;
-        let slice_name = create_endpoint_slice_for_pod(&client, pod_name, pod_namespace).await?;
+        let pod_ip = resolve_fixture_pod_ip(&client, pod_name, pod_namespace).await?;
         Ok(Self {
             client,
-            slice_name: Some(slice_name),
+            slice_name: None,
+            service_name: None,
             pod_name: Some(pod_name.to_string()),
             pod_uid,
+            pod_ip,
             pod_namespace: Some(pod_namespace.to_string()),
-            cr_name: Some(pod_name.to_string()),
             created_pod,
         })
     }
 
-    /// Pod only — no EndpointSlice yet (for ready-endpoint + CR correlation tests).
+    /// Pod only — no pre-created EndpointSlice (Phase 2 readiness tests).
     pub async fn install_pod_only(pod_name: &str, pod_namespace: &str) -> Result<Self> {
-        let client = kube::Client::try_default().await?;
-        let (pod_uid, created_pod) =
-            ensure_kube_test_pod(&client, pod_name, pod_namespace, "main", false).await?;
-        Ok(Self {
-            client,
-            slice_name: None,
-            pod_name: Some(pod_name.to_string()),
-            pod_uid,
-            pod_namespace: Some(pod_namespace.to_string()),
-            cr_name: Some(pod_name.to_string()),
-            created_pod,
-        })
+        Self::install(pod_name, pod_namespace).await
     }
 
     /// Container-mode readiness: labeled Pod with `containerStatuses.ready=true` (no EndpointSlice).
@@ -1216,18 +1509,20 @@ impl KubeReadinessFixture {
         )
         .await?;
         patch_pod_container_ready(&client, pod_name, pod_namespace, container_name).await?;
+        let pod_ip = resolve_fixture_pod_ip(&client, pod_name, pod_namespace).await?;
         Ok(Self {
             client,
             slice_name: None,
+            service_name: None,
             pod_name: Some(pod_name.to_string()),
             pod_uid,
+            pod_ip,
             pod_namespace: Some(pod_namespace.to_string()),
-            cr_name: Some(pod_name.to_string()),
             created_pod,
         })
     }
 
-    /// Add a ready EndpointSlice for an existing fixture pod (pod-mode discovery).
+    /// Add a native Service + ready EndpointSlice (Phase 2 readiness gate tests).
     pub async fn install_endpoint_slice(&mut self) -> Result<()> {
         if self.slice_name.is_some() {
             return Ok(());
@@ -1237,25 +1532,31 @@ impl KubeReadinessFixture {
             .as_deref()
             .context("fixture missing pod name")?;
         let pod_namespace = self.pod_namespace();
-        let slice_name =
-            create_endpoint_slice_for_pod(&self.client, pod_name, pod_namespace).await?;
+        let (slice_name, service_name) = create_endpoint_slice_for_pod(
+            &self.client,
+            pod_name,
+            pod_namespace,
+            &self.pod_ip,
+        )
+        .await?;
         self.slice_name = Some(slice_name);
+        self.service_name = Some(service_name);
         Ok(())
     }
 
-    /// Delete readiness resources and the pod; CR is garbage-collected via ownerReference.
+    /// Delete fixture readiness resources and the pod.
     pub async fn delete_pod_and_clear_readiness(&mut self) -> Result<()> {
         let pod_name = self.pod_name.clone().unwrap_or_default();
         let pod_namespace = self.pod_namespace.clone().unwrap_or_default();
-        let cr_name = self.cr_name.clone().unwrap_or_default();
         let slice_name = self.slice_name.take();
+        let service_name = self.service_name.take();
         let created_pod = self.created_pod;
         teardown_kube_readiness_fixture(
             self.client.clone(),
             slice_name.as_deref(),
+            service_name.as_deref(),
             &pod_name,
             &pod_namespace,
-            &cr_name,
             created_pod,
         )
         .await?;
@@ -1265,9 +1566,9 @@ impl KubeReadinessFixture {
 
     pub async fn teardown(mut self) -> Result<()> {
         let slice_name = self.slice_name.take();
+        let service_name = self.service_name.take();
         let pod_name = self.pod_name.take().unwrap_or_default();
         let pod_namespace = self.pod_namespace.take().unwrap_or_default();
-        let cr_name = self.cr_name.take().unwrap_or_default();
         let created_pod = self.created_pod;
         if slice_name.is_none() && !created_pod {
             return Ok(());
@@ -1275,9 +1576,9 @@ impl KubeReadinessFixture {
         teardown_kube_readiness_fixture(
             self.client.clone(),
             slice_name.as_deref(),
+            service_name.as_deref(),
             &pod_name,
             &pod_namespace,
-            &cr_name,
             created_pod,
         )
         .await
@@ -1320,7 +1621,7 @@ impl Drop for KubeReadinessFixture {
         }
         let pod_name = self.pod_name.take().unwrap_or_default();
         let pod_namespace = self.pod_namespace.take().unwrap_or_default();
-        let cr_name = self.cr_name.take().unwrap_or_default();
+        let service_name = self.service_name.take();
         let client = self.client.clone();
         // Cannot block_on the #[tokio::test] runtime; spawn a short-lived thread instead.
         let _ = std::thread::Builder::new()
@@ -1333,9 +1634,9 @@ impl Drop for KubeReadinessFixture {
                     if let Err(e) = rt.block_on(teardown_kube_readiness_fixture(
                         client,
                         slice_name.as_deref(),
+                        service_name.as_deref(),
                         &pod_name,
                         &pod_namespace,
-                        &cr_name,
                         created_pod,
                     )) {
                         eprintln!("KubeReadinessFixture teardown failed: {e:#}");
@@ -1349,16 +1650,15 @@ impl Drop for KubeReadinessFixture {
 async fn teardown_kube_readiness_fixture(
     client: kube::Client,
     slice_name: Option<&str>,
+    service_name: Option<&str>,
     pod_name: &str,
     pod_namespace: &str,
-    cr_name: &str,
     delete_pod: bool,
 ) -> Result<()> {
-    use k8s_openapi::api::core::v1::Pod;
+    use k8s_openapi::api::core::v1::{Pod, Service};
     use k8s_openapi::api::discovery::v1::EndpointSlice;
     use kube::Api;
     use kube::api::DeleteParams;
-    use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 
     if let Some(slice_name) = slice_name {
         let slice_api: Api<EndpointSlice> = Api::namespaced(client.clone(), pod_namespace);
@@ -1369,28 +1669,59 @@ async fn teardown_kube_readiness_fixture(
         }
     }
 
-    let gvk = GroupVersionKind::gvk("nvidia.com", "v1alpha1", "PagodaWorkerMetadata");
-    let ar = ApiResource::from_gvk(&gvk);
-    let cr_api: Api<DynamicObject> = Api::namespaced_with(client.clone(), pod_namespace, &ar);
-    match cr_api.delete(cr_name, &DeleteParams::default()).await {
-        Ok(_) => {}
-        Err(kube::Error::Api(err)) if err.code == 404 => {}
-        Err(e) => return Err(e.into()),
-    }
-
-    if delete_pod && !pod_name.is_empty() {
-        let pod_api: Api<Pod> = Api::namespaced(client, pod_namespace);
-        match pod_api.delete(pod_name, &DeleteParams::default()).await {
+    if let Some(service_name) = service_name {
+        let svc_api: Api<Service> = Api::namespaced(client.clone(), pod_namespace);
+        match svc_api.delete(service_name, &DeleteParams::default()).await {
             Ok(_) => {}
             Err(kube::Error::Api(err)) if err.code == 404 => {}
             Err(e) => return Err(e.into()),
         }
     }
 
+    if delete_pod && !pod_name.is_empty() {
+        let pod_api: Api<Pod> = Api::namespaced(client.clone(), pod_namespace);
+        // pause fixture Pods default to 30s grace; slice stays ready until Pod is gone.
+        let delete_params = DeleteParams {
+            grace_period_seconds: Some(0),
+            ..Default::default()
+        };
+        match pod_api.delete(pod_name, &delete_params).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(err)) if err.code == 404 => {}
+            Err(e) => return Err(e.into()),
+        }
+        wait_until_pod_absent(&client, pod_namespace, pod_name).await?;
+    }
+
     Ok(())
 }
 
-/// Poll until `list` returns the expected number of instances (daemon debounce + CR watch).
+/// Poll until Pod is gone from the API (404), avoiding Terminating + ready EndpointSlice lag.
+#[cfg(feature = "integration-kube")]
+async fn wait_until_pod_absent(
+    client: &kube::Client,
+    pod_namespace: &str,
+    pod_name: &str,
+) -> Result<()> {
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::Api;
+
+    let pod_api: Api<Pod> = Api::namespaced(client.clone(), pod_namespace);
+    let deadline = tokio::time::Instant::now() + KUBE_DISCOVERY_WATCH_TIMEOUT;
+    loop {
+        match pod_api.get(pod_name).await {
+            Err(kube::Error::Api(err)) if err.code == 404 => return Ok(()),
+            Ok(_) if tokio::time::Instant::now() >= deadline => {
+                anyhow::bail!("pod {pod_name} still present after delete in {pod_namespace}");
+            }
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Poll until `list` returns the expected number of instances (daemon debounce + reflector lag).
 #[cfg(feature = "integration-kube")]
 pub async fn wait_for_discovery_list(
     drt: &DistributedRuntime,
@@ -1418,12 +1749,56 @@ pub async fn kube_wait_for_daemon_settle() {
     tokio::time::sleep(KUBE_DISCOVERY_DAEMON_DEBOUNCE + Duration::from_millis(200)).await;
 }
 
+/// Poll until `list` returns the expected count (Pod GC / reflector scenarios).
+#[cfg(feature = "integration-kube")]
+pub async fn wait_for_kube_discovery_list(
+    drt: &DistributedRuntime,
+    query: DiscoveryQuery,
+    expected_len: usize,
+) -> Result<Vec<pagoda_runtime::discovery::DiscoveryInstance>> {
+    let deadline = tokio::time::Instant::now() + KUBE_DISCOVERY_WATCH_TIMEOUT;
+    loop {
+        let listed = drt.discovery().list(query.clone()).await?;
+        if listed.len() == expected_len {
+            return Ok(listed);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "discovery list for {query:?} returned {} instances, expected {expected_len}",
+                listed.len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// K8s discovery watch with a longer deadline (Pod GC / reflector scenarios).
+#[cfg(feature = "integration-kube")]
+pub async fn wait_for_kube_discovery_event(
+    stream: &mut pagoda_runtime::discovery::DiscoveryStream,
+    predicate: impl Fn(&DiscoveryEvent) -> bool,
+) -> Result<DiscoveryEvent> {
+    tokio::time::timeout(KUBE_DISCOVERY_WATCH_TIMEOUT, async {
+        loop {
+            let event = stream
+                .next()
+                .await
+                .ok_or_else(|| anyhow!("discovery watch stream ended"))??;
+            if predicate(&event) {
+                return Ok(event);
+            }
+        }
+    })
+    .await?
+}
+
 /// Build a `DistributedRuntime` with explicit pod/container identity for kube discovery.
 #[cfg(feature = "integration-kube")]
 pub async fn kube_runtime_for_identity(
     pod_name: &str,
     pod_uid: &str,
     pod_namespace: &str,
+    pod_ip: &str,
     mode: &str,
     container_name: Option<&str>,
 ) -> Result<(Runtime, DistributedRuntime)> {
@@ -1435,6 +1810,7 @@ pub async fn kube_runtime_for_identity(
         ("POD_NAME", Some(pod_name)),
         ("POD_UID", Some(pod_uid)),
         ("POD_NAMESPACE", Some(pod_namespace)),
+        ("POD_IP", Some(pod_ip)),
         ("PGD_KUBE_DISCOVERY_MODE", Some(mode)),
     ];
     if let Some(name) = container_name {
@@ -1461,6 +1837,7 @@ pub async fn kube_dual_pod_runtimes(
         fixture.pod_a.pod_name(),
         fixture.pod_a.pod_uid(),
         pod_namespace,
+        fixture.pod_a.pod_ip(),
         "pod",
         None,
     )
@@ -1470,6 +1847,7 @@ pub async fn kube_dual_pod_runtimes(
             ("POD_NAME", Some(fixture.pod_b.pod_name())),
             ("POD_UID", Some(fixture.pod_b.pod_uid())),
             ("POD_NAMESPACE", Some(pod_namespace)),
+            ("POD_IP", Some(fixture.pod_b.pod_ip())),
             ("PGD_KUBE_DISCOVERY_MODE", Some("pod")),
         ],
         async {
@@ -1481,50 +1859,107 @@ pub async fn kube_dual_pod_runtimes(
     Ok((rt, drt_a, drt_b))
 }
 
-/// Apply a `PagodaWorkerMetadata` CR whose `spec.data` cannot deserialize to `DiscoveryMetadata`.
+/// Apply a Model `ConfigMap` whose `data` cannot deserialize to `DiscoveryInstance::Model`.
 #[cfg(feature = "integration-kube")]
-pub async fn kube_apply_invalid_worker_metadata_cr(
+pub async fn kube_apply_invalid_model_config_map(
     client: &kube::Client,
     namespace: &str,
-    cr_name: &str,
+    cm_name: &str,
     pod_name: &str,
     pod_uid: &str,
 ) -> Result<()> {
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
     use kube::Api;
     use kube::api::{Patch, PatchParams};
-    use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 
-    let cr = serde_json::json!({
-        "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "PagodaWorkerMetadata",
-        "metadata": {
-            "name": cr_name,
-            "ownerReferences": [{
-                "apiVersion": "v1",
-                "kind": "Pod",
-                "name": pod_name,
-                "uid": pod_uid,
-                "controller": true,
-                "blockOwnerDeletion": false
-            }]
+    let cm = ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(cm_name.to_string()),
+            labels: Some(std::collections::BTreeMap::from([(
+                KUBE_KIND_LABEL.to_string(),
+                KUBE_MODEL_KIND_VALUE.to_string(),
+            )])),
+            owner_references: Some(vec![OwnerReference {
+                api_version: "v1".to_owned(),
+                kind: "Pod".to_owned(),
+                name: pod_name.to_owned(),
+                uid: pod_uid.to_owned(),
+                controller: Some(true),
+                block_owner_deletion: Some(false),
+            }]),
+            ..Default::default()
         },
-        "spec": {
-            // CRD requires `data` to be an object; use wrong field types so the API accepts
-            // the CR but `DiscoveryMetadata` deserialization fails in the daemon.
-            "data": {
-                "endpoints": "not-a-hash-map",
-                "model_cards": {},
-                "event_channels": {}
-            }
-        }
-    });
-    let gvk = GroupVersionKind::gvk("nvidia.com", "v1alpha1", "PagodaWorkerMetadata");
-    let ar = ApiResource::from_gvk(&gvk);
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+        data: Some(std::collections::BTreeMap::from([
+            ("namespace".to_string(), "ns".to_string()),
+            ("card.json".to_string(), "not-valid-model-card".to_string()),
+        ])),
+        ..Default::default()
+    };
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
     let params = PatchParams::apply("pagoda-integration-test").force();
-    api.patch(cr_name, &params, &Patch::Apply(&cr))
+    api.patch(cm_name, &params, &Patch::Apply(&cm))
         .await
-        .with_context(|| format!("apply invalid PagodaWorkerMetadata CR {cr_name}"))?;
+        .with_context(|| format!("apply invalid Model ConfigMap {cm_name}"))?;
+    Ok(())
+}
+
+/// Locate the pagoda-managed EndpointSlice whose `targetRef` points at `pod_name`.
+#[cfg(feature = "integration-kube")]
+pub async fn kube_find_portname_endpoint_slice_for_pod(
+    client: &kube::Client,
+    k8s_namespace: &str,
+    pod_name: &str,
+) -> Result<String> {
+    use k8s_openapi::api::discovery::v1::EndpointSlice;
+    use kube::Api;
+    use kube::api::ListParams;
+
+    let api: Api<EndpointSlice> = Api::namespaced(client.clone(), k8s_namespace);
+    let label = format!("{KUBE_MANAGED_BY_LABEL}={KUBE_MANAGED_BY_VALUE}");
+    let slices = api.list(&ListParams::default().labels(&label)).await?;
+    for slice in slices.items {
+        let Some(name) = slice.metadata.name else {
+            continue;
+        };
+        let targets_pod = slice.endpoints.iter().any(|ep| {
+            ep.target_ref
+                .as_ref()
+                .and_then(|r| r.name.as_deref())
+                == Some(pod_name)
+        });
+        if targets_pod {
+            return Ok(name);
+        }
+    }
+    anyhow::bail!("no pagoda EndpointSlice with targetRef pod {pod_name} in {k8s_namespace}");
+}
+
+/// Patch `endpoints[].conditions.ready` on a register-created EndpointSlice (ready gate tests).
+#[cfg(feature = "integration-kube")]
+pub async fn kube_patch_endpoint_slice_ready(
+    client: &kube::Client,
+    k8s_namespace: &str,
+    slice_name: &str,
+    ready: bool,
+) -> Result<()> {
+    use k8s_openapi::api::discovery::v1::{EndpointConditions, EndpointSlice};
+    use kube::Api;
+    use kube::api::PostParams;
+
+    let api: Api<EndpointSlice> = Api::namespaced(client.clone(), k8s_namespace);
+    let mut slice = api
+        .get(slice_name)
+        .await
+        .with_context(|| format!("get EndpointSlice {slice_name}"))?;
+    for ep in &mut slice.endpoints {
+        let cond = ep.conditions.get_or_insert_with(EndpointConditions::default);
+        cond.ready = Some(ready);
+        cond.serving = Some(ready);
+    }
+    api.replace(slice_name, &PostParams::default(), &slice)
+        .await
+        .with_context(|| format!("patch EndpointSlice {slice_name} ready={ready}"))?;
     Ok(())
 }
 
@@ -1534,7 +1969,15 @@ pub async fn kube_runtime() -> Result<(Runtime, DistributedRuntime, KubeReadines
     let (pod_name, _synthetic_pod_uid, pod_namespace) = kube_test_pod_identity();
     let fixture = KubeReadinessFixture::install(&pod_name, &pod_namespace).await?;
     let pod_uid = fixture.pod_uid().to_string();
-    let (rt, drt) =
-        kube_runtime_for_identity(&pod_name, &pod_uid, &pod_namespace, "pod", None).await?;
+    let pod_ip = fixture.pod_ip().to_string();
+    let (rt, drt) = kube_runtime_for_identity(
+        &pod_name,
+        &pod_uid,
+        &pod_namespace,
+        &pod_ip,
+        "pod",
+        None,
+    )
+    .await?;
     Ok((rt, drt, fixture))
 }

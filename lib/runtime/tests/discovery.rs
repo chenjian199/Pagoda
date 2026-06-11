@@ -477,32 +477,34 @@ mod kube {
 
     use super::common::contract::{
         KubeDualPodFixture, KubeReadinessFixture, acquire_contract_test_lock,
-        discovery_query_endpoint, endpoint_discovery_spec, kube_apply_invalid_worker_metadata_cr,
-        kube_dual_pod_runtimes, kube_runtime, kube_runtime_for_identity,
-        kube_wait_for_daemon_settle, unique_name, wait_for_discovery_event,
-        wait_for_discovery_list,
+        discovery_query_endpoint, endpoint_discovery_spec, kube_apply_invalid_model_config_map,
+        kube_dual_pod_runtimes, kube_find_portname_endpoint_slice_for_pod,
+        kube_patch_endpoint_slice_ready, kube_pagoda_namespace, kube_runtime,
+        kube_runtime_for_identity, kube_wait_for_daemon_settle, unique_name,
+        wait_for_discovery_event, wait_for_discovery_list, wait_for_kube_discovery_event,
+        wait_for_kube_discovery_list,
     };
 
     // 目的/场景：Kubernetes discovery 经 `register`/`list` 完成单 pod 元数据往返。
     //
-    // 生产逻辑：`KubeDiscoveryClient::register_internal` 写本地 snapshot 并 `apply_cr`
-    // 持久化 `PagodaWorkerMetadata`（`discovery/kube.rs` / `crd.rs`）。
+    // 生产逻辑：`KubeDiscoveryClient::register` 写本地 metadata 并 `register_portname_instance`
+    // 持久化 `Service` + `EndpointSlice`（`discovery/kube/objects.rs`）。
     //
-    // 测试计划：`kube_runtime`（含 EndpointSlice fixture）→ `register` → `wait_for_discovery_list`。
+    // 测试计划：`kube_runtime`（Pod fixture）→ `register` → `wait_for_discovery_list`。
     //
     // 关键断言：list 返回 1 条；`instance_id` 与 register 返回值一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
     async fn kube_discovery_register_list_roundtrip() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, fixture) = kube_runtime().await?;
 
-        let namespace = unique_name("kube-list");
-        let component = "backend";
+        let namespace = kube_pagoda_namespace();
+        let component = unique_name("backend");
         let endpoint = "generate";
-        let query = discovery_query_endpoint(&namespace, component, endpoint);
+        let query = discovery_query_endpoint(&namespace, &component, endpoint);
 
-        let spec = endpoint_discovery_spec(&namespace, component, endpoint);
+        let spec = endpoint_discovery_spec(&namespace, &component, endpoint);
         let instance = drt.discovery().register(spec).await?;
 
         let listed = wait_for_discovery_list(&drt, query, 1).await?;
@@ -517,25 +519,25 @@ mod kube {
     // 目的/场景：Kubernetes discovery watch 可观察 register/unregister 的 Added/Removed 事件。
     //
     // 生产逻辑：`KubeDiscoveryClient::list_and_watch` 先 replay 当前 snapshot 再跟
-    // `metadata_watch` 增量（`discovery/kube.rs`）。
+    // daemon `watch::Receiver` 增量（`discovery/kube.rs`）。
     //
     // 测试计划：`list_and_watch` → `register` → Added → `unregister` → Removed。
     //
     // 关键断言：Added/Removed 事件的 namespace/component/endpoint 与注册一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
     async fn kube_discovery_watch_sees_register_and_unregister() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, fixture) = kube_runtime().await?;
 
-        let namespace = unique_name("kube-watch");
-        let component = "backend";
+        let namespace = kube_pagoda_namespace();
+        let component = unique_name("backend");
         let endpoint = "generate";
-        let query = discovery_query_endpoint(&namespace, component, endpoint);
+        let query = discovery_query_endpoint(&namespace, &component, endpoint);
 
         let mut stream = drt.discovery().list_and_watch(query.clone(), None).await?;
 
-        let spec = endpoint_discovery_spec(&namespace, component, endpoint);
+        let spec = endpoint_discovery_spec(&namespace, &component, endpoint);
         let instance = drt.discovery().register(spec).await?;
 
         let added = wait_for_discovery_event(&mut stream, |event| {
@@ -581,12 +583,12 @@ mod kube {
     //
     // 关键断言：精确 query 1 条；错 endpoint / 错 namespace 均为空。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
     async fn kube_discovery_filters_exact_namespace_component_endpoint() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, fixture) = kube_runtime().await?;
 
-        let namespace = unique_name("kube-filter");
+        let namespace = kube_pagoda_namespace();
         drt.discovery()
             .register(endpoint_discovery_spec(&namespace, "comp-a", "ep-a"))
             .await?;
@@ -624,29 +626,28 @@ mod kube {
 
     // 目的/场景：worker A 在 pod A 注册后，pod B 上的 discovery 能 list 到该实例。
     //
-    // 生产逻辑：`DiscoveryDaemon` 聚合 namespace 内全部 ready EndpointSlice + CR；
+    // 生产逻辑：`DiscoveryDaemon` 聚合 `POD_NAMESPACE` 内 native Service/EndpointSlice；
     // 各 pod 的 `KubeDiscoveryClient` 共享同一集群 snapshot。
     //
     // 测试计划：双 Pod fixture → DRT-A register → DRT-B `wait_for_discovery_list`。
     //
     // 关键断言：B 侧 list 1 条；`instance_id == hash_pod_name(pod_a)`。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
     async fn kube_discovery_cross_pod_shares_instances() -> Result<()> {
         let _guard = acquire_contract_test_lock();
-        let pod_namespace =
-            std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+        let pod_namespace = kube_pagoda_namespace();
         let pod_a_name = unique_name("kube-pod-a");
         let pod_b_name = unique_name("kube-pod-b");
         let dual = KubeDualPodFixture::install(&pod_a_name, &pod_b_name, &pod_namespace).await?;
         let (_rt, drt_a, drt_b) = kube_dual_pod_runtimes(&dual).await?;
 
-        let namespace = unique_name("kube-cross");
-        let component = "backend";
+        let namespace = pod_namespace.clone();
+        let component = unique_name("backend");
         let endpoint = "generate";
-        let query = discovery_query_endpoint(&namespace, component, endpoint);
+        let query = discovery_query_endpoint(&namespace, &component, endpoint);
 
-        let spec = endpoint_discovery_spec(&namespace, component, endpoint);
+        let spec = endpoint_discovery_spec(&namespace, &component, endpoint);
         let instance = drt_a.discovery().register(spec).await?;
         let expected_id = hash_pod_name(&pod_a_name);
         assert_eq!(instance.instance_id(), expected_id);
@@ -660,25 +661,24 @@ mod kube {
         Ok(())
     }
 
-    // 目的/场景：daemon 反序列化失败的 CR 不污染 discovery list。
+    // 目的/场景：daemon 反序列化失败的 Model ConfigMap 不污染 discovery list。
     //
-    // 生产逻辑：`DiscoveryDaemon::aggregate_snapshot` 对非法 `spec.data` warn 并 skip
-    //（`discovery/kube/daemon.rs`）。
+    // 生产逻辑：`model_instance_from_config_map` 对非法 `data` 返回 `Err` / skip
+    //（`discovery/kube/daemon.rs` + `objects.rs`）。
     //
-    // 测试计划：invalid pod ready + 坏 CR → 合法 pod register → list 仅含合法实例。
+    // 测试计划：invalid pod + 坏 ConfigMap → 合法 pod register → list 仅含合法实例。
     //
     // 关键断言：list 1 条且 `instance_id` 为合法 pod。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
-    async fn kube_discovery_list_ignores_invalid_cr_data() -> Result<()> {
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
+    async fn kube_discovery_list_ignores_invalid_native_object_data() -> Result<()> {
         let _guard = acquire_contract_test_lock();
-        let pod_namespace =
-            std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+        let pod_namespace = kube_pagoda_namespace();
         let good_pod = unique_name("kube-valid");
         let bad_pod = unique_name("kube-invalid");
         let good_fixture = KubeReadinessFixture::install(&good_pod, &pod_namespace).await?;
         let bad_fixture = KubeReadinessFixture::install(&bad_pod, &pod_namespace).await?;
-        kube_apply_invalid_worker_metadata_cr(
+        kube_apply_invalid_model_config_map(
             bad_fixture.client(),
             &pod_namespace,
             &bad_pod,
@@ -692,15 +692,18 @@ mod kube {
             good_fixture.pod_name(),
             good_fixture.pod_uid(),
             &pod_namespace,
+            good_fixture.pod_ip(),
             "pod",
             None,
         )
         .await?;
 
-        let namespace = unique_name("kube-bad-cr");
-        let query = discovery_query_endpoint(&namespace, "backend", "generate");
+        let namespace = pod_namespace.clone();
+        let component = unique_name("backend");
+        let endpoint = "generate";
+        let query = discovery_query_endpoint(&namespace, &component, endpoint);
         drt.discovery()
-            .register(endpoint_discovery_spec(&namespace, "backend", "generate"))
+            .register(endpoint_discovery_spec(&namespace, &component, endpoint))
             .await?;
 
         let listed = wait_for_discovery_list(&drt, query, 1).await?;
@@ -714,39 +717,53 @@ mod kube {
         Ok(())
     }
 
-    // 目的/场景：实例仅当 ready EndpointSlice 与 CR 同时存在时才进入 snapshot。
+    // 目的/场景：EndpointSlice 端点 `ready=false` 时实例不进入 snapshot；恢复 ready 后可见。
     //
-    // 生产逻辑：daemon 对 ready entry 无 CR 时 skip（`aggregate_snapshot`）。
+    // 生产逻辑：`extract_portname_info` 仅收集 ready 端点；`aggregate` 就绪门控
+    //（`discovery/kube/daemon.rs`）。
     //
-    // 测试计划：仅 Pod → register → list 空 → 补 EndpointSlice → list 1 条。
+    // 测试计划：register → list 1 → patch ready=false → list 0 → patch ready=true → list 1。
     //
-    // 关键断言：无 slice 时空；补 slice 后非空且 instance_id 一致。
+    // 关键断言：ready 门控前后 list 条数变化；`instance_id` 一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
-    async fn kube_discovery_requires_ready_endpoint_and_cr() -> Result<()> {
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
+    async fn kube_discovery_requires_ready_endpoint_slice() -> Result<()> {
         let _guard = acquire_contract_test_lock();
-        let pod_namespace =
-            std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
-        let pod_name = unique_name("kube-ready");
-        let mut fixture = KubeReadinessFixture::install_pod_only(&pod_name, &pod_namespace).await?;
-        let (rt, drt) = kube_runtime_for_identity(
+        let (_rt, drt, fixture) = kube_runtime().await?;
+
+        let namespace = kube_pagoda_namespace();
+        let component = unique_name("backend");
+        let endpoint = "generate";
+        let query = discovery_query_endpoint(&namespace, &component, endpoint);
+        let spec = endpoint_discovery_spec(&namespace, &component, endpoint);
+        let instance = drt.discovery().register(spec).await?;
+
+        wait_for_discovery_list(&drt, query.clone(), 1).await?;
+
+        let slice_name = kube_find_portname_endpoint_slice_for_pod(
+            fixture.client(),
+            fixture.pod_namespace(),
             fixture.pod_name(),
-            fixture.pod_uid(),
-            &pod_namespace,
-            "pod",
-            None,
         )
         .await?;
 
-        let namespace = unique_name("kube-ready-req");
-        let query = discovery_query_endpoint(&namespace, "backend", "generate");
-        let spec = endpoint_discovery_spec(&namespace, "backend", "generate");
-        let instance = drt.discovery().register(spec).await?;
+        kube_patch_endpoint_slice_ready(
+            fixture.client(),
+            fixture.pod_namespace(),
+            &slice_name,
+            false,
+        )
+        .await?;
+        kube_wait_for_daemon_settle().await;
+        wait_for_discovery_list(&drt, query.clone(), 0).await?;
 
-        let before = wait_for_discovery_list(&drt, query.clone(), 0).await?;
-        assert!(before.is_empty());
-
-        fixture.install_endpoint_slice().await?;
+        kube_patch_endpoint_slice_ready(
+            fixture.client(),
+            fixture.pod_namespace(),
+            &slice_name,
+            true,
+        )
+        .await?;
         kube_wait_for_daemon_settle().await;
 
         let after = wait_for_discovery_list(&drt, query, 1).await?;
@@ -754,25 +771,23 @@ mod kube {
         assert_eq!(after[0].instance_id(), instance.instance_id());
 
         drt.discovery().unregister(instance).await?;
-        drop(drt);
-        drop(rt);
         fixture.teardown().await?;
         Ok(())
     }
 
-    // 目的/场景：container 模式下 register/list 往返（`DYN_KUBE_DISCOVERY_MODE=container`）。
+    // 目的/场景：container 模式下 register/list 往返（`PGD_KUBE_DISCOVERY_MODE=container`）。
     //
-    // 生产逻辑：daemon 监视 Pod `containerStatuses.ready`；`CONTAINER_NAME=main` 使用 pod 级 CR 名。
+    // 生产逻辑：`CONTAINER_NAME=main` 时 `instance_id` collapse 为 `hash_pod_name(pod)`；
+    // 就绪门控仍来自 native EndpointSlice（由 `register` 创建）。
     //
     // 测试计划：container fixture → `kube_runtime_for_identity` container 模式 → register/list。
     //
     // 关键断言：list 1 条；`instance_id == hash_pod_name(pod)`。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
     async fn kube_container_mode_register_list_roundtrip() -> Result<()> {
         let _guard = acquire_contract_test_lock();
-        let pod_namespace =
-            std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+        let pod_namespace = kube_pagoda_namespace();
         let pod_name = unique_name("kube-ctr");
         let fixture =
             KubeReadinessFixture::install_container_mode(&pod_name, &pod_namespace, "main")
@@ -781,14 +796,16 @@ mod kube {
             fixture.pod_name(),
             fixture.pod_uid(),
             &pod_namespace,
+            fixture.pod_ip(),
             "container",
             Some("main"),
         )
         .await?;
 
-        let namespace = unique_name("kube-ctr-ns");
-        let query = discovery_query_endpoint(&namespace, "backend", "generate");
-        let spec = endpoint_discovery_spec(&namespace, "backend", "generate");
+        let namespace = pod_namespace.clone();
+        let servicegroup = unique_name("backend");
+        let query = discovery_query_endpoint(&namespace, &servicegroup, "generate");
+        let spec = endpoint_discovery_spec(&namespace, &servicegroup, "generate");
         let instance = drt.discovery().register(spec).await?;
 
         let listed = wait_for_discovery_list(&drt, query, 1).await?;
@@ -803,24 +820,25 @@ mod kube {
 
     // 目的/场景：Pod 删除后 discovery watch 收到 Removed。
     //
-    // 生产逻辑：Pod 删除 → CR ownerReference GC → ready entry 消失 → snapshot 移除实例。
+    // 生产逻辑：Pod 删除 → EndpointSlice ownerReference GC → ready 消失 → snapshot 移除实例。
+    // 测试 Pod 使用 grace_period=0 删除，避免默认 30s 优雅退出期间 slice 仍 ready。
     //
-    // 测试计划：register → watch Added → 删 Pod/readiness → watch Removed。
+    // 测试计划：register → watch Added → 删 Pod → list 空 + watch Removed。
     //
     // 关键断言：Removed 事件 `instance_id` 与注册一致。
     #[tokio::test]
-    #[ignore = "requires Kubernetes + PagodaWorkerMetadata CRD (Release); run with --features integration-kube --include-ignored"]
+    #[ignore = "requires Kubernetes cluster (Release); run with --features integration-kube --include-ignored; see KUBE_DISCOVERY_TEST_MIGRATION.md"]
     async fn kube_discovery_pod_delete_removes_from_watch() -> Result<()> {
         let _guard = acquire_contract_test_lock();
         let (_rt, drt, mut fixture) = kube_runtime().await?;
 
-        let namespace = unique_name("kube-del");
-        let component = "backend";
+        let namespace = kube_pagoda_namespace();
+        let component = unique_name("backend");
         let endpoint = "generate";
-        let query = discovery_query_endpoint(&namespace, component, endpoint);
+        let query = discovery_query_endpoint(&namespace, &component, endpoint);
 
         let mut stream = drt.discovery().list_and_watch(query.clone(), None).await?;
-        let spec = endpoint_discovery_spec(&namespace, component, endpoint);
+        let spec = endpoint_discovery_spec(&namespace, &component, endpoint);
         let instance = drt.discovery().register(spec).await?;
 
         let added = wait_for_discovery_event(&mut stream, |event| {
@@ -836,9 +854,12 @@ mod kube {
         };
 
         fixture.delete_pod_and_clear_readiness().await?;
-        kube_wait_for_daemon_settle().await;
 
-        let removed = wait_for_discovery_event(&mut stream, |event| {
+        // 先等 daemon list 收敛（ownerReference GC + reflector + debounce）。
+        let listed = wait_for_kube_discovery_list(&drt, query.clone(), 0).await?;
+        assert!(listed.is_empty());
+
+        let removed = wait_for_kube_discovery_event(&mut stream, |event| {
             matches!(
                 event,
                 DiscoveryEvent::Removed(DiscoveryInstanceId::PortName(id))
